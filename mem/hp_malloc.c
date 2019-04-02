@@ -35,7 +35,6 @@
 #include "../locking.h"
 
 #include "hp_malloc.h"
-#include "common.h"
 
 #ifdef DBG_MALLOC
 #include "mem_dbg_hash.h"
@@ -97,11 +96,6 @@ static unsigned int optimized_put_indexes[HP_HASH_SIZE];
 	}) : \
 	HP_LINEAR_HASH_SIZE + big_hash_idx((s)) - HP_MALLOC_OPTIMIZE_FACTOR + 1)
 
-#define UN_HASH(h)	(((unsigned long)(h) <= (HP_MALLOC_OPTIMIZE/ROUNDTO)) ?\
-						(unsigned long)(h)*ROUNDTO: \
-						1UL<<((unsigned long)(h)-HP_MALLOC_OPTIMIZE/ROUNDTO+\
-							HP_MALLOC_OPTIMIZE_FACTOR - 1)\
-					)
 
 
 
@@ -121,10 +115,15 @@ int mem_warming_enabled;
  */
 int mem_warming_percentage = MEM_WARMING_DEFAULT_PERCENTAGE;
 
-#if defined(HP_MALLOC) && !defined(HP_MALLOC_FAST_STATS)
+#if defined(HP_MALLOC)
+stat_var *rpm_used;
+stat_var *rpm_rused;
+stat_var *rpm_frags;
+#if !defined(HP_MALLOC_FAST_STATS)
 stat_var *shm_used;
 stat_var *shm_rused;
 stat_var *shm_frags;
+#endif
 #endif
 
 /* ROUNDTO= 2^k so the following works */
@@ -134,6 +133,8 @@ stat_var *shm_frags;
 
 #define SHM_LOCK(i) lock_get(&mem_locks[i])
 #define SHM_UNLOCK(i) lock_release(&mem_locks[i])
+#define RPM_LOCK(i) lock_get(&rpmem_locks[i])
+#define RPM_UNLOCK(i) lock_release(&rpmem_locks[i])
 
 #define MEM_FRAG_AVOIDANCE
 
@@ -223,12 +224,9 @@ static inline void hp_frag_detach(struct hp_block *hpb, struct hp_frag *frag)
 	frag->prev = NULL;
 
 #ifdef HP_MALLOC_FAST_STATS
-	unsigned int hash;
-
-	hash = GET_HASH_RR(hpb, frag->size);
-	hpb->free_hash[hash].no--;
+	hpb->free_hash[GET_HASH(frag->size)].no--;
 #endif
-};
+}
 
 #include "hp_malloc_dyn.h"
 

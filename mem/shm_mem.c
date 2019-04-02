@@ -75,24 +75,18 @@ unsigned long (*gen_shm_get_frags)(void *blk);
 #ifdef STATISTICS
 stat_export_t shm_stats[] = {
 	{"total_size" ,     STAT_IS_FUNC,    (stat_var**)shm_get_size  },
-
-#if defined(HP_MALLOC) && !defined(HP_MALLOC_FAST_STATS)
-	{"used_size" ,     STAT_NO_RESET,               &shm_used      },
-	{"real_used_size" ,STAT_NO_RESET,               &shm_rused     },
-#else
-	{"used_size" ,      STAT_IS_FUNC,    (stat_var**)shm_get_used  },
-	{"real_used_size" , STAT_IS_FUNC,    (stat_var**)shm_get_rused },
-#endif
-
 	{"max_used_size" ,  STAT_IS_FUNC,    (stat_var**)shm_get_mused },
 	{"free_size" ,      STAT_IS_FUNC,    (stat_var**)shm_get_free  },
-
-#if defined(HP_MALLOC) && !defined(HP_MALLOC_FAST_STATS)
+#if defined HP_MALLOC && defined INLINE_ALLOC && !defined HP_MALLOC_FAST_STATS
+	{"used_size" ,     STAT_NO_RESET,               &shm_used      },
+	{"real_used_size" ,STAT_NO_RESET,               &shm_rused     },
 	{"fragments" ,     STAT_NO_RESET,               &shm_frags     },
 #else
+	/* for HP_MALLOC, these still need to be edited to stats @ startup */
+	{"used_size" ,      STAT_IS_FUNC,    (stat_var**)shm_get_used  },
+	{"real_used_size" , STAT_IS_FUNC,    (stat_var**)shm_get_rused },
 	{"fragments" ,      STAT_IS_FUNC,    (stat_var**)shm_get_frags },
 #endif
-
 	{0,0,0}
 };
 #endif
@@ -110,7 +104,7 @@ gen_lock_t *mem_lock;
 gen_lock_t *mem_locks;
 #endif
 
-static void *shm_mempool = (void *)-1;
+static void* shm_mempool=INVALID_MAP;
 void *shm_block;
 
 /*
@@ -154,6 +148,12 @@ static str shm_size_str = { "size", 4 };
 
 int set_shm_mm(const char *mm_name)
 {
+#ifdef INLINE_ALLOC
+	LM_NOTICE("this is an inlined allocator build (see opensips -V), "
+	          "cannot set a custom shm allocator (%s)\n", mm_name);
+	return 0;
+#endif
+
 	if (parse_mm(mm_name, &mem_allocator_shm) < 0)
 		return -1;
 
@@ -211,56 +211,91 @@ end:
 }
 #endif
 
-int shm_getmem(void)
-{
 
-#ifdef SHM_MMAP
-	int fd;
+
+inline static void* sh_realloc(void* p, unsigned int size)
+{
+	void *r;
+
+	shm_lock(); 
+
+#ifndef HP_MALLOC
+	shm_free_unsafe(p);
+	r = shm_malloc_unsafe(size);
 #else
+	shm_free(p);
+	r = shm_malloc(size);
+#endif
+
+	shm_threshold_check();
+
+	shm_unlock(); 
+
+	return r;
+}
+
+/* look at a buffer if there is perhaps enough space for the new size
+    if so, we return current buffer again; otherwise, we free it,
+	allocate a new one and return it; no guarantee for buffer content;
+	if allocation fails, we return NULL
+*/
+
+#ifdef DBG_MALLOC
+void* _shm_resize( void* p, unsigned int s, const char* file, const char* func,
+							int line)
+#else
+void* _shm_resize( void* p , unsigned int s)
+#endif
+{
+	if (p==0) {
+		LM_DBG("resize(0) called\n");
+		return shm_malloc( s );
+	}
+
+	return sh_realloc( p, s );
+}
+
+
+
+
+/*
+ * Allocates memory using mmap or sysv shmap
+ *  - fd: a handler to a file descriptor pointing to a map file
+ *  - force_addr: force mapping to a specific address
+ *  - size: how large the mmap should be
+ */
+void *shm_getmem(int fd, void *force_addr, unsigned long size)
+{
+	void *ret_addr;
+	int flags;
+
+#ifndef SHM_MMAP
 	struct shmid_ds shm_info;
 #endif
 
 #ifdef SHM_MMAP
-	if (shm_mempool && (shm_mempool!=(void*)-1)){
-#else
-	if ((shm_shmid!=-1)||(shm_mempool!=(void*)-1)){
-#endif
-		LM_CRIT("shm already initialized\n");
-		return -1;
-	}
+	flags = MAP_SHARED;
+	if (force_addr)
+		flags |= MAP_FIXED;
+	if (fd == -1)
+		flags |= MAP_ANON;
+	ret_addr=mmap(force_addr, size, PROT_READ|PROT_WRITE,
+					 flags, fd, 0);
+#else /* USE_MMAP */
+/* TODO: handle persistent storage for SysV */
+	#warn "Cannot have persistent storage using SysV"
+	if (force_addr || fd == -1)
+		return INVALID_MAP;
 
-#ifdef SHM_MMAP
-#ifdef USE_ANON_MMAP
-	shm_mempool=mmap(0, shm_mem_size, PROT_READ|PROT_WRITE,
-					 MAP_ANON|MAP_SHARED, -1 ,0);
-#else
-	fd=open("/dev/zero", O_RDWR);
-	if (fd==-1){
-		LM_CRIT("could not open /dev/zero: %s\n", strerror(errno));
-		return -1;
-	}
-	shm_mempool=mmap(0, shm_mem_size, PROT_READ|PROT_WRITE, MAP_SHARED, fd ,0);
-	/* close /dev/zero */
-	close(fd);
-#endif /* USE_ANON_MMAP */
-#else
-
-	shm_shmid=shmget(IPC_PRIVATE, /* SHM_MEM_SIZE */ shm_mem_size , 0700);
+	shm_shmid=shmget(IPC_PRIVATE, /* SHM_MEM_SIZE */ shm_mem_size, 0700);
 	if (shm_shmid==-1){
 		LM_CRIT("could not allocate shared memory segment: %s\n",
 				strerror(errno));
-		return -1;
+		return INVALID_MAP;
 	}
 	shm_mempool=shmat(shm_shmid, 0, 0);
 #endif
-	if (shm_mempool==(void*)-1){
-		LM_CRIT("could not attach shared memory segment: %s\n",
-				strerror(errno));
-		/* destroy segment*/
-		shm_mem_destroy();
-		return -1;
-	}
-	return 0;
+	return ret_addr;
 }
 
 
@@ -288,9 +323,17 @@ int shm_mem_init_mallocs(void* mempool, unsigned long pool_size)
 		mem_allocator_shm = mem_allocator;
 
 #ifdef HP_MALLOC
-	if (mem_allocator_shm != MM_HP_MALLOC
-	        && mem_allocator_shm != MM_HP_MALLOC_DBG)
+	if (mem_allocator_shm == MM_HP_MALLOC
+	        || mem_allocator_shm == MM_HP_MALLOC_DBG) {
+		shm_stats[3].flags = STAT_NO_RESET;
+		shm_stats[3].stat_pointer = &shm_used;
+		shm_stats[4].flags = STAT_NO_RESET;
+		shm_stats[4].stat_pointer = &shm_rused;
+		shm_stats[5].flags = STAT_NO_RESET;
+		shm_stats[5].stat_pointer = &shm_frags;
+	} else {
 		shm_use_global_lock = 1;
+	}
 #endif
 
 #ifdef SHM_EXTRA_STATS
@@ -345,12 +388,12 @@ int shm_mem_init_mallocs(void* mempool, unsigned long pool_size)
 #ifdef F_MALLOC
 	case MM_F_MALLOC:
 		shm_block = fm_malloc_init(mempool, pool_size, "shm");
-		gen_shm_malloc         = (osips_malloc_f)fm_malloc;
-		gen_shm_malloc_unsafe  = (osips_malloc_f)fm_malloc;
-		gen_shm_realloc        = (osips_realloc_f)fm_realloc;
-		gen_shm_realloc_unsafe = (osips_realloc_f)fm_realloc;
-		gen_shm_free           = (osips_free_f)fm_free;
-		gen_shm_free_unsafe    = (osips_free_f)fm_free;
+		gen_shm_malloc         = (osips_block_malloc_f)fm_malloc;
+		gen_shm_malloc_unsafe  = (osips_block_malloc_f)fm_malloc;
+		gen_shm_realloc        = (osips_block_realloc_f)fm_realloc;
+		gen_shm_realloc_unsafe = (osips_block_realloc_f)fm_realloc;
+		gen_shm_free           = (osips_block_free_f)fm_free;
+		gen_shm_free_unsafe    = (osips_block_free_f)fm_free;
 		gen_shm_info           = (osips_mem_info_f)fm_info;
 		gen_shm_status         = (osips_mem_status_f)fm_status;
 		gen_shm_get_size       = (osips_get_mmstat_f)fm_get_size;
@@ -364,12 +407,12 @@ int shm_mem_init_mallocs(void* mempool, unsigned long pool_size)
 #ifdef Q_MALLOC
 	case MM_Q_MALLOC:
 		shm_block = qm_malloc_init(mempool, pool_size, "shm");
-		gen_shm_malloc         = (osips_malloc_f)qm_malloc;
-		gen_shm_malloc_unsafe  = (osips_malloc_f)qm_malloc;
-		gen_shm_realloc        = (osips_realloc_f)qm_realloc;
-		gen_shm_realloc_unsafe = (osips_realloc_f)qm_realloc;
-		gen_shm_free           = (osips_free_f)qm_free;
-		gen_shm_free_unsafe    = (osips_free_f)qm_free;
+		gen_shm_malloc         = (osips_block_malloc_f)qm_malloc;
+		gen_shm_malloc_unsafe  = (osips_block_malloc_f)qm_malloc;
+		gen_shm_realloc        = (osips_block_realloc_f)qm_realloc;
+		gen_shm_realloc_unsafe = (osips_block_realloc_f)qm_realloc;
+		gen_shm_free           = (osips_block_free_f)qm_free;
+		gen_shm_free_unsafe    = (osips_block_free_f)qm_free;
 		gen_shm_info           = (osips_mem_info_f)qm_info;
 		gen_shm_status         = (osips_mem_status_f)qm_status;
 		gen_shm_get_size       = (osips_get_mmstat_f)qm_get_size;
@@ -383,12 +426,12 @@ int shm_mem_init_mallocs(void* mempool, unsigned long pool_size)
 #ifdef HP_MALLOC
 	case MM_HP_MALLOC:
 		shm_block = hp_shm_malloc_init(mempool, pool_size, "shm");
-		gen_shm_malloc         = (osips_malloc_f)hp_shm_malloc;
-		gen_shm_malloc_unsafe  = (osips_malloc_f)hp_shm_malloc_unsafe;
-		gen_shm_realloc        = (osips_realloc_f)hp_shm_realloc;
-		gen_shm_realloc_unsafe = (osips_realloc_f)hp_shm_realloc_unsafe;
-		gen_shm_free           = (osips_free_f)hp_shm_free;
-		gen_shm_free_unsafe    = (osips_free_f)hp_shm_free_unsafe;
+		gen_shm_malloc         = (osips_block_malloc_f)hp_shm_malloc;
+		gen_shm_malloc_unsafe  = (osips_block_malloc_f)hp_shm_malloc_unsafe;
+		gen_shm_realloc        = (osips_block_realloc_f)hp_shm_realloc;
+		gen_shm_realloc_unsafe = (osips_block_realloc_f)hp_shm_realloc_unsafe;
+		gen_shm_free           = (osips_block_free_f)hp_shm_free;
+		gen_shm_free_unsafe    = (osips_block_free_f)hp_shm_free_unsafe;
 		gen_shm_info           = (osips_mem_info_f)hp_info;
 		gen_shm_status         = (osips_mem_status_f)hp_status;
 		gen_shm_get_size       = (osips_get_mmstat_f)hp_shm_get_size;
@@ -403,12 +446,12 @@ int shm_mem_init_mallocs(void* mempool, unsigned long pool_size)
 #ifdef F_MALLOC
 	case MM_F_MALLOC_DBG:
 		shm_block = fm_malloc_init(mempool, pool_size, "shm");
-		gen_shm_malloc         = (osips_malloc_f)fm_malloc_dbg;
-		gen_shm_malloc_unsafe  = (osips_malloc_f)fm_malloc_dbg;
-		gen_shm_realloc        = (osips_realloc_f)fm_realloc_dbg;
-		gen_shm_realloc_unsafe = (osips_realloc_f)fm_realloc_dbg;
-		gen_shm_free           = (osips_free_f)fm_free_dbg;
-		gen_shm_free_unsafe    = (osips_free_f)fm_free_dbg;
+		gen_shm_malloc         = (osips_block_malloc_f)fm_malloc_dbg;
+		gen_shm_malloc_unsafe  = (osips_block_malloc_f)fm_malloc_dbg;
+		gen_shm_realloc        = (osips_block_realloc_f)fm_realloc_dbg;
+		gen_shm_realloc_unsafe = (osips_block_realloc_f)fm_realloc_dbg;
+		gen_shm_free           = (osips_block_free_f)fm_free_dbg;
+		gen_shm_free_unsafe    = (osips_block_free_f)fm_free_dbg;
 		gen_shm_info           = (osips_mem_info_f)fm_info;
 		gen_shm_status         = (osips_mem_status_f)fm_status_dbg;
 		gen_shm_get_size       = (osips_get_mmstat_f)fm_get_size;
@@ -422,12 +465,12 @@ int shm_mem_init_mallocs(void* mempool, unsigned long pool_size)
 #ifdef Q_MALLOC
 	case MM_Q_MALLOC_DBG:
 		shm_block = qm_malloc_init(mempool, pool_size, "shm");
-		gen_shm_malloc         = (osips_malloc_f)qm_malloc_dbg;
-		gen_shm_malloc_unsafe  = (osips_malloc_f)qm_malloc_dbg;
-		gen_shm_realloc        = (osips_realloc_f)qm_realloc_dbg;
-		gen_shm_realloc_unsafe = (osips_realloc_f)qm_realloc_dbg;
-		gen_shm_free           = (osips_free_f)qm_free_dbg;
-		gen_shm_free_unsafe    = (osips_free_f)qm_free_dbg;
+		gen_shm_malloc         = (osips_block_malloc_f)qm_malloc_dbg;
+		gen_shm_malloc_unsafe  = (osips_block_malloc_f)qm_malloc_dbg;
+		gen_shm_realloc        = (osips_block_realloc_f)qm_realloc_dbg;
+		gen_shm_realloc_unsafe = (osips_block_realloc_f)qm_realloc_dbg;
+		gen_shm_free           = (osips_block_free_f)qm_free_dbg;
+		gen_shm_free_unsafe    = (osips_block_free_f)qm_free_dbg;
 		gen_shm_info           = (osips_mem_info_f)qm_info;
 		gen_shm_status         = (osips_mem_status_f)qm_status_dbg;
 		gen_shm_get_size       = (osips_get_mmstat_f)qm_get_size;
@@ -441,12 +484,12 @@ int shm_mem_init_mallocs(void* mempool, unsigned long pool_size)
 #ifdef HP_MALLOC
 	case MM_HP_MALLOC_DBG:
 		shm_block = hp_shm_malloc_init(mempool, pool_size, "shm");
-		gen_shm_malloc         = (osips_malloc_f)hp_shm_malloc_dbg;
-		gen_shm_malloc_unsafe  = (osips_malloc_f)hp_shm_malloc_unsafe_dbg;
-		gen_shm_realloc        = (osips_realloc_f)hp_shm_realloc_dbg;
-		gen_shm_realloc_unsafe = (osips_realloc_f)hp_shm_realloc_unsafe_dbg;
-		gen_shm_free           = (osips_free_f)hp_shm_free_dbg;
-		gen_shm_free_unsafe    = (osips_free_f)hp_shm_free_unsafe_dbg;
+		gen_shm_malloc         = (osips_block_malloc_f)hp_shm_malloc_dbg;
+		gen_shm_malloc_unsafe  = (osips_block_malloc_f)hp_shm_malloc_unsafe_dbg;
+		gen_shm_realloc        = (osips_block_realloc_f)hp_shm_realloc_dbg;
+		gen_shm_realloc_unsafe = (osips_block_realloc_f)hp_shm_realloc_unsafe_dbg;
+		gen_shm_free           = (osips_block_free_f)hp_shm_free_dbg;
+		gen_shm_free_unsafe    = (osips_block_free_f)hp_shm_free_unsafe_dbg;
 		gen_shm_info           = (osips_mem_info_f)hp_info;
 		gen_shm_status         = (osips_mem_status_f)hp_status_dbg;
 		gen_shm_get_size       = (osips_get_mmstat_f)hp_shm_get_size;
@@ -588,13 +631,37 @@ int shm_mem_init_mallocs(void* mempool, unsigned long pool_size)
 
 int shm_mem_init(void)
 {
-	int ret;
-
+	int fd = -1;
 	LM_INFO("allocating SHM block\n");
 
-	ret = shm_getmem();
-	if (ret < 0)
-		return ret;
+#ifdef SHM_MMAP
+	if (shm_mempool && (shm_mempool!=(void*)-1)){
+#else
+	if ((shm_shmid!=-1)||(shm_mempool!=(void*)-1)){
+#endif
+		LM_CRIT("shm already initialized\n");
+		return -1;
+	}
+
+#ifndef USE_ANON_MMAP
+	fd=open("/dev/zero", O_RDWR);
+	if (fd==-1){
+		LM_CRIT("could not open /dev/zero: %s\n", strerror(errno));
+		return -1;
+	}
+#endif /* USE_ANON_MMAP */
+
+	shm_mempool = shm_getmem(fd, NULL, shm_mem_size);
+#ifndef USE_ANON_MMAP
+	close(fd);
+#endif /* USE_ANON_MMAP */
+	if (shm_mempool == INVALID_MAP) {
+		LM_CRIT("could not attach shared memory segment: %s\n",
+				strerror(errno));
+		/* destroy segment*/
+		shm_mem_destroy();
+		return -1;
+	}
 
 	return shm_mem_init_mallocs(shm_mempool, shm_mem_size);
 }
@@ -642,7 +709,9 @@ void init_shm_post_yyparse(void)
 	if (mem_warming_enabled && hp_mem_warming(shm_block) != 0) {
 		LM_INFO("skipped memory warming\n");
 	}
-	hp_init_shm_statistics(shm_block);
+	if (mem_allocator_shm == MM_HP_MALLOC ||
+	    mem_allocator_shm == MM_HP_MALLOC_DBG)
+		hp_init_shm_statistics(shm_block);
 #endif
 
 #ifdef SHM_EXTRA_STATS
@@ -816,20 +885,25 @@ void shm_mem_destroy(void)
 		}
 	#endif
 	}
+	shm_relmem(shm_mempool, shm_mem_size);
+	shm_mempool=INVALID_MAP;
 
-	if (shm_mempool && (shm_mempool!=(void*)-1)) {
-#ifdef SHM_MMAP
-		munmap(shm_mempool, /* SHM_MEM_SIZE */ shm_mem_size );
-#else
-		shmdt(shm_mempool);
-#endif
-		shm_mempool=(void*)-1;
-	}
 #ifndef SHM_MMAP
 	if (shm_shmid!=-1) {
 		shmctl(shm_shmid, IPC_RMID, &shm_info);
 		shm_shmid=-1;
 	}
 #endif
+}
+
+void shm_relmem(void *mempool, unsigned long size)
+{
+	if (mempool && (mempool!=INVALID_MAP)) {
+#ifdef SHM_MMAP
+		munmap(mempool, size);
+#else
+		shmdt(mempool);
+#endif
+	}
 }
 

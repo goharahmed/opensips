@@ -197,15 +197,18 @@ extern unsigned long (*gen_shm_get_frags)(void *blk);
 
 #if defined F_MALLOC || defined Q_MALLOC
 extern gen_lock_t* mem_lock;
+extern gen_lock_t* rpmem_lock;
 #endif
 
 #ifdef HP_MALLOC
 extern gen_lock_t* mem_locks;
+extern gen_lock_t* rpmem_locks;
 #endif
 
 extern enum osips_mm mem_allocator_shm;
 
 
+#define INVALID_MAP ((void *)-1)
 int shm_mem_init(); /* calls shm_getmem & shm_mem_init_mallocs */
 
 /*
@@ -214,11 +217,8 @@ int shm_mem_init(); /* calls shm_getmem & shm_mem_init_mallocs */
  *	- performs memory warming with HP_MALLOC
  */
 void init_shm_post_yyparse(void);
-
-int shm_getmem();   /* allocates the memory (mmap or sysv shmap) */
-int shm_mem_init_mallocs(void* mempool, unsigned long size); /* initialize
-																the mallocs
-																& the lock */
+void *shm_getmem(int, void *, unsigned long);   /* allocates the memory (mmap or sysv shmap) */
+void shm_relmem(void *, unsigned long); /* deallocates the memory allocated by shm_getmem() */
 void shm_mem_destroy();
 
 
@@ -301,8 +301,8 @@ inline static void shm_threshold_check(void)
 			#define __FUNCTION__ ""  /* gcc specific */
 	#endif
 
-inline static void* _shm_malloc_unsafe(unsigned int size,
-	const char *file, const char *function, int line )
+inline static void* _shm_malloc_unsafe(unsigned long size,
+	const char *file, const char *function, unsigned int line )
 {
 	void *p;
 
@@ -320,8 +320,8 @@ inline static void* _shm_malloc_unsafe(unsigned int size,
 	return p;
 }
 
-inline static void* _shm_malloc(unsigned int size, 
-	const char *file, const char *function, int line )
+inline static void* _shm_malloc(unsigned long size,
+	const char *file, const char *function, unsigned int line )
 {
 	void *p;
 
@@ -411,7 +411,7 @@ inline static void* _shm_realloc_unsafe(void *ptr, unsigned int size,
 }
 
 inline static void _shm_free_unsafe(void *ptr,
-		const char* file, const char* function, int line )
+		const char* file, const char* function, unsigned int line )
 {
 #ifdef SHM_EXTRA_STATS
 	if (shm_stats_get_index(ptr) !=  VAR_STAT(MOD_NAME)) {
@@ -429,7 +429,7 @@ inline static void _shm_free_unsafe(void *ptr,
 }
 
 inline static void _shm_free(void *ptr,
-		const char* file, const char* function, int line)
+		const char* file, const char* function, unsigned int line)
 {
 #ifdef HP_MALLOC
 #ifdef SHM_EXTRA_STATS
@@ -452,21 +452,27 @@ inline static void _shm_free(void *ptr,
 #endif /* HP_MALLOC */
 }
 
+#define shm_malloc_func _shm_malloc
 #define shm_malloc( _size ) _shm_malloc((_size), \
 	__FILE__, __FUNCTION__, __LINE__ )
 
+#define shm_malloc_func_unsafe _shm_malloc_unsafe
 #define shm_malloc_unsafe(_size ) _shm_malloc_unsafe((_size), \
 	__FILE__, __FUNCTION__, __LINE__ )
 
+#define shm_realloc_func _shm_realloc
 #define shm_realloc( _ptr, _size ) _shm_realloc( (_ptr), (_size), \
 	__FILE__, __FUNCTION__, __LINE__ )
 
+#define shm_realloc_func_unsafe _shm_realloc_unsafe
 #define shm_realloc_unsafe( _ptr, _size ) _shm_realloc_unsafe( (_ptr), (_size), \
 	__FILE__, __FUNCTION__, __LINE__ )
 
+#define shm_free_func _shm_free
 #define shm_free( _ptr ) _shm_free( (_ptr), \
 	__FILE__, __FUNCTION__, __LINE__ )
 
+#define shm_free_func_unsafe _shm_free_unsafe
 #define shm_free_unsafe( _ptr ) _shm_free_unsafe( (_ptr), \
 	__FILE__, __FUNCTION__, __LINE__ )
 
@@ -476,6 +482,7 @@ extern unsigned long long *shm_hash_usage;
 
 #else /*DBG_MALLOC*/
 
+#define shm_malloc_func_unsafe shm_malloc_unsafe
 inline static void* shm_malloc_unsafe(unsigned int size)
 {
 	void *p;
@@ -495,6 +502,7 @@ inline static void* shm_malloc_unsafe(unsigned int size)
 	return p;
 }
 
+#define shm_malloc_func shm_malloc
 inline static void* shm_malloc(unsigned long size)
 {
 	void *p;
@@ -517,6 +525,7 @@ inline static void* shm_malloc(unsigned long size)
 	return p;
 }
 
+#define shm_realloc_func shm_realloc
 inline static void* shm_realloc(void *ptr, unsigned int size)
 {
 	void *p;
@@ -551,6 +560,7 @@ inline static void* shm_realloc(void *ptr, unsigned int size)
 	return p;
 }
 
+#define shm_realloc_func_unsafe shm_realloc_unsafe
 inline static void* shm_realloc_unsafe(void *ptr, unsigned int size)
 {
 	void *p;
@@ -579,29 +589,24 @@ inline static void* shm_realloc_unsafe(void *ptr, unsigned int size)
 	return p;
 }
 
-#ifndef SHM_EXTRA_STATS
-#define shm_free_unsafe( _p ) \
-do { \
+#define shm_free_func_unsafe shm_free_unsafe
+inline static void shm_free_unsafe(void *_p)
+{
+	#ifdef SHM_EXTRA_STATS
+	if (shm_stats_get_index(_p) !=  VAR_STAT(MOD_NAME)) {
+			update_module_stats(-shm_frag_size(_p), -(shm_frag_size(_p) + shm_frag_overhead), -1, shm_stats_get_index(_p));
+			LM_GEN1(memlog, "memory freed from different module than it was allocated, allocated in"
+				"module with index %ld, freed in module index %ld, at %s: %s %d \n", shm_stats_get_index(_p), VAR_STAT(MOD_NAME),
+				__FILE__, __FUNCTION__, __LINE__);
+	} else {
+		update_module_stats(-shm_frag_size(_p), -(shm_frag_size(_p) + shm_frag_overhead), -1, VAR_STAT(MOD_NAME));
+	}
+	#endif
 	SHM_FREE_UNSAFE(shm_block, (_p)); \
 	shm_threshold_check(); \
-} while(0)
-#else
-#define shm_free_unsafe( _p ) \
-do { \
-	if (shm_stats_get_index(_p) !=  VAR_STAT(MOD_NAME)) { \
-			update_module_stats(-shm_frag_size(_p), -(shm_frag_size(_p) + shm_frag_overhead), -1, shm_stats_get_index(_p)); \
-			LM_GEN1(memlog, "memory freed from different module than it was allocated, allocated in" \
-				"module with index %ld, freed in module index %ld, at %s: %s %d \n", shm_stats_get_index(_p), VAR_STAT(MOD_NAME), \
-				__FILE__, __FUNCTION__, __LINE__); \
-		} else { \
-			update_module_stats(-shm_frag_size(_p), -(shm_frag_size(_p) + shm_frag_overhead), -1, VAR_STAT(MOD_NAME)); \
-		} \
-	SHM_FREE_UNSAFE(shm_block, (_p)); \
-	shm_threshold_check(); \
-} while(0)
+}
 
-#endif
-
+#define shm_free_func shm_free
 inline static void shm_free(void *_p)
 {
 	shm_lock();
@@ -613,9 +618,9 @@ inline static void shm_free(void *_p)
 			LM_GEN1(memlog, "memory freed from different module than it was allocated, allocated in"
 				"module with index %ld, freed in module index %ld, at %s: %s %d \n", shm_stats_get_index(_p), VAR_STAT(MOD_NAME),
 				__FILE__, __FUNCTION__, __LINE__);
-		} else {
-			update_module_stats(-shm_frag_size(_p), -(shm_frag_size(_p) + shm_frag_overhead), -1, VAR_STAT(MOD_NAME));
-		}
+	} else {
+		update_module_stats(-shm_frag_size(_p), -(shm_frag_size(_p) + shm_frag_overhead), -1, VAR_STAT(MOD_NAME));
+	}
 	#endif
 	SHM_FREE(shm_block, _p);
 #else
