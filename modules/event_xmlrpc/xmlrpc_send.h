@@ -32,19 +32,22 @@
 
 typedef struct _xmlrpc_send {
 	union sockaddr_union addr;
+	evi_async_ctx_t async_ctx;
 	str body;
 	str method;
 	str host;
 	str first_line;
 	str event;
-	int process_idx;
 } xmlrpc_send_t;
+
+struct xmlrpc_cb_ipc_param {
+	evi_async_ctx_t async_ctx;
+	enum evi_status status;
+};
 
 void xmlrpc_process(int rank);
 int xmlrpc_create_pipe(void);
-int xmlrpc_create_status_pipes(void);
 void xmlrpc_destroy_pipe(void);
-void xmlrpc_destroy_status_pipes(void);
 int xmlrpc_init_writer(void);
 int xmlrpc_init_buffers(void);
 int xmlrpc_send(xmlrpc_send_t * xmlrpcs);
@@ -56,8 +59,6 @@ int xmlrpc_build_buffer(str *,
 #define XMLRPC_DEFAULT_BUFFER_SIZE 8192
 #define XMLRPC_IOVEC_MAX_SIZE 32
 #define XMLRPC_DEFAULT_PORT 8080
-#define XMLRPC_SEND_SUCCESS 0
-#define XMLRPC_SEND_FAIL -1
 
 /* string macros */
 /* computes a macro len */

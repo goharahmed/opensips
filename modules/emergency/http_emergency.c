@@ -43,7 +43,7 @@ int send_esct(struct sip_msg *msg, str callid_ori, str from_tag){
 	NODE* info_call;
 	char* xml = NULL;
 	time_t rawtime;
-	struct tm * timeinfo;
+	struct tm timeinfo;
 	char* response;
 	int resp;
 	char* callidHeader;
@@ -75,7 +75,7 @@ int send_esct(struct sip_msg *msg, str callid_ori, str from_tag){
 	callid.s = callidHeader,
 		callid.len = strlen(callidHeader);
 
-	hash_code= core_hash(&callid, 0, emet_size);
+	hash_code= core_hash(&callid, NULL, emet_size);
 	LM_DBG("********************************************HASH_CODE%d\n", hash_code);
 
 	info_call= search_ehtable(call_htable, callidHeader, ftag, hash_code, 1);
@@ -96,12 +96,12 @@ int send_esct(struct sip_msg *msg, str callid_ori, str from_tag){
 		LM_DBG(" --- SEND ESQK =%s\n \n",info_call->esct->esqk);
 
 		time(&rawtime);
-		timeinfo = localtime(&rawtime);
+		localtime_r(&rawtime, &timeinfo);
 
-		strftime(info_call->esct->datetimestamp, MAX_TIME_SIZE, "%Y-%m-%dT%H:%M:%S%Z", timeinfo);
-		LM_DBG(" --- TREAT BYE - XML ESCT %s \n \n", xml);
+		strftime(info_call->esct->datetimestamp, MAX_TIME_SIZE, "%Y-%m-%dT%H:%M:%S%Z", &timeinfo);
 
 		xml = buildXmlFromModel(info_call->esct);
+		LM_DBG(" --- TREAT BYE - XML ESCT %s \n \n", xml);
 
 		// sends HTTP POST esctRequest to VPC
 		resp = post(url_vpc, xml, &response);

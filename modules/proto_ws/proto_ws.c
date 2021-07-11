@@ -36,6 +36,7 @@
 #include "../../net/api_proto.h"
 #include "../../net/api_proto_net.h"
 #include "../../net/net_tcp_report.h"
+#include "../../net/tcp_common.h"
 #include "../../socket_info.h"
 #include "../../tsend.h"
 #include "../../receive.h"
@@ -51,6 +52,8 @@ int ws_max_msg_chunks = TCP_CHILD_MAX_MSG_CHUNK;
 static struct tcp_req tcp_current_req;
 
 static struct ws_req ws_current_req;
+
+static int ws_require_origin = 1;
 
 /* in milliseconds */
 int ws_send_timeout = 100;
@@ -70,6 +73,7 @@ static str ws_resource = str_init("/");
 #define _ws_common_read_tout ws_hs_read_tout
 #define _ws_common_write_tout ws_send_timeout
 #define _ws_common_resource ws_resource
+#define _ws_common_require_origin ws_require_origin
 #include "ws_handshake_common.h"
 #include "ws_common.h"
 
@@ -91,7 +95,8 @@ static int mod_init(void);
 static int proto_ws_init(struct proto_info *pi);
 static int proto_ws_init_listener(struct socket_info *si);
 static int proto_ws_send(struct socket_info* send_sock,
-		char* buf, unsigned int len, union sockaddr_union* to, int id);
+		char* buf, unsigned int len, union sockaddr_union* to,
+		unsigned int id);
 static int ws_read_req(struct tcp_connection* con, int* bytes_read);
 static int ws_conn_init(struct tcp_connection* c);
 static void ws_conn_clean(struct tcp_connection* c);
@@ -107,17 +112,16 @@ static int ws_port = WS_DEFAULT_PORT;
 
 
 static cmd_export_t cmds[] = {
-	{"proto_init", (cmd_function)proto_ws_init, 0, 0, 0, 0},
-	{0, 0, 0, 0, 0, 0}
+	{"proto_init", (cmd_function)proto_ws_init, {{0,0,0}},0},
 };
-
 
 static param_export_t params[] = {
 	/* XXX: should we drop the ws prefix? */
 	{ "ws_port",           INT_PARAM, &ws_port           },
 	{ "ws_max_msg_chunks", INT_PARAM, &ws_max_msg_chunks },
 	{ "ws_send_timeout",   INT_PARAM, &ws_send_timeout   },
-	{ "ws_resource",       STR_PARAM, &ws_resource       },
+	{ "ws_resource",       STR_PARAM, &ws_resource.s     },
+	{ "require_origin",    INT_PARAM, &ws_require_origin },
 	{ "ws_handshake_timeout", INT_PARAM, &ws_hs_read_tout },
 	{ "trace_destination",     STR_PARAM,         &trace_destination_name.s  },
 	{ "trace_on",						 INT_PARAM, &trace_is_on_tmp        },
@@ -150,7 +154,8 @@ struct module_exports exports = {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
-	&deps,            /* OpenSIPS module dependencies */
+	0,				 /* load function */
+	&deps,           /* OpenSIPS module dependencies */
 	cmds,       /* exported functions */
 	0,          /* exported async functions */
 	params,     /* module parameters */
@@ -159,10 +164,12 @@ struct module_exports exports = {
 	0,          /* exported pseudo-variables */
 	0,			/* exported transformations */
 	0,          /* extra processes */
+	0,          /* module pre-initialization function */
 	mod_init,   /* module initialization function */
 	0,          /* response function */
 	0,          /* destroy function */
 	0,          /* per-child init function */
+	0           /* reload confirm function */
 };
 
 
@@ -191,6 +198,8 @@ static int proto_ws_init(struct proto_info *pi)
 static int mod_init(void)
 {
 	LM_INFO("initializing WebSocket protocol\n");
+
+	ws_resource.len = strlen(ws_resource.s);
 
 	if (trace_destination_name.s) {
 		if ( !net_trace_api ) {
@@ -221,7 +230,8 @@ static int mod_init(void)
 	*trace_is_on = trace_is_on_tmp;
 	if ( trace_filter_route ) {
 		trace_filter_route_id =
-			get_script_route_ID_by_name( trace_filter_route, rlist, RT_NO);
+			get_script_route_ID_by_name( trace_filter_route, 
+				sroutes->request, RT_NO);
 	}
 
 	return 0;
@@ -268,6 +278,7 @@ static void ws_conn_clean(struct tcp_connection* c)
 			break;
 		case WS_ERR_NONE:
 			WS_CODE(c) = WS_ERR_NORMAL;
+			/* fall through */
 		default:
 			ws_close(c);
 			break;
@@ -310,96 +321,14 @@ static void ws_report(int type, unsigned long long conn_id, int conn_flags,
 
 
 
-static struct tcp_connection* ws_sync_connect(struct socket_info* send_sock,
-		union sockaddr_union* server)
-{
-	int s;
-	union sockaddr_union my_name;
-	socklen_t my_name_len;
-	struct tcp_connection* con;
-
-	s=socket(AF2PF(server->s.sa_family), SOCK_STREAM, 0);
-	if (s==-1){
-		LM_ERR("socket: (%d) %s\n", errno, strerror(errno));
-		goto error;
-	}
-	if (tcp_init_sock_opt(s)<0){
-		LM_ERR("tcp_init_sock_opt failed\n");
-		goto error;
-	}
-	my_name_len = sockaddru_len(send_sock->su);
-	memcpy( &my_name, &send_sock->su, my_name_len);
-	su_setport( &my_name, 0);
-	if (bind(s, &my_name.s, my_name_len )!=0) {
-		LM_ERR("bind failed (%d) %s\n", errno,strerror(errno));
-		goto error;
-	}
-
-	if (tcp_connect_blocking(s, &server->s, sockaddru_len(*server))<0){
-		LM_ERR("tcp_blocking_connect failed\n");
-		goto error;
-	}
-	con=tcp_conn_new(s, server, send_sock, S_CONN_OK);
-	if (con==NULL){
-		LM_ERR("tcp_conn_create failed, closing the socket\n");
-		goto error;
-	}
-	/* it is safe to move this here and clear it after we complete the
-	 * handshake, just before sending the fd to main */
-	con->fd = s;
-	return con;
-error:
-	/* close the opened socket */
-	if (s!=-1) close(s);
-	return 0;
-}
-
-static struct tcp_connection* ws_connect(struct socket_info* send_sock,
-		union sockaddr_union* to, int *fd)
-{
-	struct tcp_connection *c;
-
-	if ((c=ws_sync_connect(send_sock, to))==0) {
-		LM_ERR("connect failed\n");
-		return NULL;
-	}
-	/* the state of the connection should be NONE, otherwise something is
-	 * wrong */
-	if (WS_TYPE(c) != WS_NONE) {
-		LM_BUG("invalid type for connection %d\n", WS_TYPE(c));
-		goto error;
-	}
-	WS_TYPE(c) = WS_CLIENT;
-
-	if (ws_client_handshake(c) < 0) {
-		LM_ERR("cannot complete WebSocket handshake\n");
-		goto error;
-	}
-
-	*fd = c->fd;
-	/* clear the fd, just in case */
-	c->fd = -1;
-	/* handshake done - send the socket to main */
-	if (tcp_conn_send(c) < 0) {
-		LM_ERR("cannot send socket to main\n");
-		goto error;
-	}
-
-	return c;
-error:
-	tcp_conn_destroy(c);
-	return NULL;
-}
-
-
 /**************  WRITE related functions ***************/
 
 
 
 /*! \brief Finds a tcpconn & sends on it */
 static int proto_ws_send(struct socket_info* send_sock,
-											char* buf, unsigned int len,
-											union sockaddr_union* to, int id)
+		char* buf, unsigned int len, union sockaddr_union* to,
+		unsigned int id)
 {
 	struct tcp_connection *c;
 	struct timeval get;
@@ -415,9 +344,9 @@ static int proto_ws_send(struct socket_info* send_sock,
 	if (to){
 		su2ip_addr(&ip, to);
 		port=su_getport(to);
-		n = tcp_conn_get(id, &ip, port, PROTO_WS, &c, &fd);
+		n = tcp_conn_get(id, &ip, port, PROTO_WS, NULL, &c, &fd, send_sock);
 	}else if (id){
-		n = tcp_conn_get(id, 0, 0, PROTO_NONE, &c, &fd);
+		n = tcp_conn_get(id, 0, 0, PROTO_NONE, NULL, &c, &fd, NULL);
 	}else{
 		LM_CRIT("prot_tls_send called with null id & to\n");
 		get_time_difference(get,tcpthreshold,tcp_timeout_con_get);
@@ -434,6 +363,10 @@ static int proto_ws_send(struct socket_info* send_sock,
 	/* was connection found ?? */
 	if (c==0) {
 		if (tcp_no_new_conn) {
+			return -1;
+		}
+		if (!to) {
+			LM_ERR("Unknown destination - cannot open new ws connection\n");
 			return -1;
 		}
 		LM_DBG("no open tcp connection found, opening new one\n");
@@ -493,6 +426,8 @@ send_it:
 
 	/* mark the ID of the used connection (tracing purposes) */
 	last_outgoing_tcp_id = c->id;
+	send_sock->last_local_real_port = c->rcv.dst_port;
+	send_sock->last_remote_real_port = c->rcv.src_port;
 
 	tcp_conn_release(c, 0);
 	return n;

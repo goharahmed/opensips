@@ -1,7 +1,7 @@
 /*
- * Starting point for writing and including OpenSIPS unit tests
+ * Entry point for including and running OpenSIPS unit tests (core + modules)
  *
- * Copyright (C) 2018 OpenSIPS Solutions
+ * Copyright (C) 2018-2020 OpenSIPS Solutions
  *
  * This file is part of opensips, a free SIP server.
  *
@@ -22,17 +22,65 @@
 
 #include <tap.h>
 
-#include "../cachedb/test/test_backends.h"
+#include "../cachedb/test/test_cachedb.h"
+#include "../lib/test/test_csv.h"
+#include "../parser/test/test_parser.h"
+#include "../mem/test/test_malloc.h"
+#include "test_ut.h"
+
+#include "../str.h"
 #include "../lib/list.h"
+#include "../globals.h"
+#include "../context.h"
 #include "../dprint.h"
 #include "../sr_module.h"
+#include "../sr_module_deps.h"
 
-void init_unit_tests(void) {
-	set_mpath("modules/");
-	init_cachedb_tests();
+#include "unit_tests.h"
+
+void init_unit_tests(void)
+{
+	if (!strcmp(testing_module, "core")) {
+		set_mpath("modules/");
+		solve_module_dependencies(modules);
+		init_cachedb_tests();
+		//init_malloc_tests();
+	}
+
+	ensure_global_context();
 }
 
-int run_unit_tests(void) {
-	test_cachedb_backends();
+int run_unit_tests(void)
+{
+	char *error;
+	void *mod_handle;
+	mod_tests_f mod_tests;
+
+	/* core tests */
+	if (!strcmp(testing_module, "core")) {
+		//test_malloc();
+		test_cachedb();
+		test_lib_csv();
+		test_parser();
+		test_ut();
+
+	/* module tests */
+	} else {
+		mod_handle = get_mod_handle(testing_module);
+		if (!mod_handle) {
+			LM_ERR("module not loaded / not found: '%s'\n", testing_module);
+			return -1;
+		}
+
+		mod_tests = (mod_tests_f)dlsym(mod_handle, DLSYM_PREFIX "mod_tests");
+		if ((error = (char *)dlerror())) {
+			LM_ERR("failed to locate 'mod_tests' in '%s': %s\n",
+			       testing_module, error);
+			return -1;
+		}
+
+		mod_tests();
+	}
+
 	done_testing();
 }

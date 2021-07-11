@@ -36,6 +36,7 @@
 
 #include "../../db/db_res.h"
 #include "../../db/db.h"
+#include "../../db/db_ut.h"
 #include "db_berkeley.h"
 #include "bdb_lib.h"
 #include "bdb_res.h"
@@ -67,10 +68,9 @@ int bdb_bind_api(const str* mod, db_func_t *dbb);
  * Exported functions
  */
 static cmd_export_t cmds[] = {
-	{"db_bind_api",    (cmd_function)bdb_bind_api,   0, 0, 0, 0},
-	{0, 0, 0, 0, 0, 0}
+	{"db_bind_api",    (cmd_function)bdb_bind_api, {{0,0,0}},0},
+	{0,0,{{0,0,0}},0}
 };
-
 
 /*
  * Exported parameters
@@ -98,7 +98,8 @@ struct module_exports exports = {
 	MOD_TYPE_SQLDB,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
-	NULL,            /* OpenSIPS module dependencies */
+	0,				 /* load function */
+	NULL,			 /* OpenSIPS module dependencies */
 	cmds,     /* Exported functions */
 	0,        /* Exported async functions */
 	params,   /* Exported parameters */
@@ -107,10 +108,12 @@ struct module_exports exports = {
 	0,        /* exported pseudo-variables */
 	0,		  /* exported transformations */
 	0,        /* extra processes */
+	0,        /* module pre-initialization function */
 	mod_init, /* module initialization function */
 	0,        /* response function*/
 	destroy,  /* destroy function */
-	0         /* per-child init function */
+	0,        /* per-child init function */
+	0         /* reload confirm function */
 };
 
 
@@ -192,7 +195,7 @@ db_con_t* bdb_init(const str* _sqlurl)
 		}
 		strcpy(bdb_path, CFG_DIR);
 		bdb_path[sizeof(CFG_DIR)] = '/';
-		strncpy(&bdb_path[sizeof(CFG_DIR)+1], _s.s, _s.len);
+		memcpy(&bdb_path[sizeof(CFG_DIR)+1], _s.s, _s.len);
 		_s.len += sizeof(CFG_DIR);
 		_s.s = bdb_path;
 	}
@@ -285,7 +288,7 @@ void bdb_check_reload(db_con_t* _con)
 		return;
 	}
 
-	strncpy(p, s.s, s.len);
+	memcpy(p, s.s, s.len);
 	p+=s.len;
 
 	len++;
@@ -308,10 +311,10 @@ void bdb_check_reload(db_con_t* _con)
 		return;
 	}
 
-	strncpy(t, s.s, s.len);
+	memcpy(t, s.s, s.len);
 	t[s.len] = 0;
 
-	strncpy(p, s.s, s.len);
+	memcpy(p, s.s, s.len);
 	p+=s.len;
 	*p=0;
 
@@ -702,7 +705,7 @@ int bdb_insert(db_con_t* _h, db_key_t* _k, db_val_t* _v, int _n)
 	/* verify col types provided */
 	for(i=0; i<_n; i++)
 	{	j = lkey[i];
-		if(bdb_is_neq_type(_tp->colp[j]->type, _v[i].type))
+		if(db_is_neq_type(_tp->colp[j]->type, _v[i].type))
 		{
 			LM_WARN("incompatible types v[%d] - c[%d]!\n", i, j);
 			ret = -8;
@@ -1191,7 +1194,7 @@ int bdb_update(db_con_t* _con, db_key_t* _k, db_op_t* _op, db_val_t* _v,
 		}
 
 		/* copy original column to the new column */
-		strncpy(t, c, len);
+		memcpy(t, c, len);
 
 next:
 		t+=len;
@@ -1204,7 +1207,7 @@ next:
 			goto cleanup;
 		}
 
-		strncpy(t, delim, DELIM_LEN);
+		memcpy(t, delim, DELIM_LEN);
 		t += DELIM_LEN;
 
 		c = strsep(&tmp, DELIM);

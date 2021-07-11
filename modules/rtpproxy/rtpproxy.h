@@ -31,22 +31,29 @@
 #include "../dialog/dlg_load.h"
 #include "../../rw_locking.h"
 
+struct rtpproxy_vcmd;
+
 /* Handy macros */
 #define STR2IOVEC(sx, ix)       do {(ix).iov_base = (sx).s; (ix).iov_len = (sx).len;} while(0)
 #define SZ2IOVEC(sx, ix)        do {(ix).iov_base = (sx); (ix).iov_len = strlen(sx);} while(0)
 
+enum comm_modes {CM_UNIX = 0, CM_UDP, CM_TCP, CM_UDP6, CM_TCP6};
+
 struct rtpp_node {
 	unsigned int		idx;			/* overall index */
-	str					rn_url;			/* unparsed, deletable */
-	int					rn_umode;
-	char				*rn_address;	/* substring of rn_url */
-	char				*adv_address;	/* advertised address of rtpproxy */
-	int					rn_disabled;	/* found unaccessible? */
-	unsigned			rn_weight;		/* for load balancing */
+	str			rn_url;			/* unparsed, deletable */
+	enum comm_modes		rn_umode;		/* communication mode */
+	char			*rn_address;		/* substring of rn_url */
+	char			*adv_address;		/* advertised address of rtpproxy */
+	int			rn_disabled;		/* found unaccessible? */
+	unsigned		rn_weight;		/* for load balancing */
 	unsigned int		rn_recheck_ticks;
 	unsigned int		capabilities;
+	union sockaddr_union	addr;
 	struct rtpp_node	*rn_next;
 };
+
+#define CM_STREAM(ndp) ((ndp)->rn_umode == CM_TCP || (ndp)->rn_umode == CM_TCP6)
 
 /* Supported version of the RTP proxy command protocol */
 #define	SUP_CPROTOVER	20040107
@@ -71,6 +78,10 @@ struct rtpp_node {
 #define	TTL_CHANGE_CPROTOVER	"20170313"
 #define	RECORD_CAP				(1<<8)
 #define	RECORD_CPROTOVER		"20071218"
+#define	SUBCOMMAND_CAP			(1<<9)
+#define	SUBCOMMAND_CPROTOVER	"20191015"
+
+#define DEFAULT_CPORT 	"22222"
 
 #define RTP_CAP(_c) _c ## _CPROTOVER, sizeof(_c ## _CPROTOVER) - 1
 #define SET_CAP(_n, _c) (_n)->capabilities |= (_c ## _CAP)
@@ -94,63 +105,58 @@ struct rtpp_set_head{
 	struct rtpp_set		*rset_last;
 };
 
-struct force_rtpp_args {
+struct rtpp_args {
     char *arg1;
     char *arg2;
     int offer;
     str body;
     str callid;
+    str from_tag;
+    str to_tag;
     struct rtpp_set *set;
     struct rtpp_node *node;
     str raddr;
 };
 
-/* used in timeout_listener_process */
-struct rtpp_notify_node {
-	int index;
-	int fd;
-	int mode;
-	char* addr;
-	struct rtpp_notify_node *next;
-};
-
-struct rtpp_notify_head {
-	int changed;
-	gen_lock_t *lock;
-	struct rtpp_notify_node *rtpp_list;
-};
-
-
 /* parameter type for set_rtp_proxy_set() */
 
 #define NH_VAL_SET_FIXED            0
-#define NH_VAL_SET_SPEC             1
 #define NH_VAL_SET_UNDEF            2
 
 typedef struct rtpp_set_param{
         int t;
         union {
                 struct rtpp_set * fixed_set;
-                pv_spec_t var_set;
                 int int_set;
         } v;
 } nh_set_param_t;
+
+struct rtpp_dtmf_event {
+	char digit;
+	unsigned int volume;
+	unsigned int duration;
+	unsigned int is_callid;
+	unsigned int stream;
+	str id;
+};
+int rtpproxy_raise_dtmf_event(struct rtpp_dtmf_event *dtmf);
 
 extern rw_lock_t *nh_lock;
 extern str rtpp_notify_socket;
 extern int rtpp_notify_socket_un;
 extern struct dlg_binds dlg_api;
 extern int detect_rtp_idle;
+extern int rtpproxy_tout;
 extern struct rtpp_set_head ** rtpp_set_list;
-extern struct rtpp_notify_head * rtpp_notify_h;
-int init_rtpp_notify_list();
-void timeout_listener_process(int rank);
+int init_rtpp_notify();
+void update_rtpp_notify();
+void notification_listener_process(int rank);
 
 /* Functions from nathelper */
-struct rtpp_set *get_rtpp_set(struct sip_msg *, nh_set_param_t *);
+struct rtpp_set *get_rtpp_set(nh_set_param_t *);
 struct rtpp_node *select_rtpp_node(struct sip_msg *, str, struct rtpp_set *, pv_spec_p, int);
-char *send_rtpp_command(struct rtpp_node *, struct iovec *, int);
-int force_rtp_proxy_body(struct sip_msg* msg, struct force_rtpp_args *args,
+char *send_rtpp_command(struct rtpp_node *, struct rtpproxy_vcmd *, int);
+int force_rtp_proxy_body(struct sip_msg* msg, struct rtpp_args *args,
                pv_spec_p var, pv_spec_p ipvar);
 
 #endif

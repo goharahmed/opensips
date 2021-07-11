@@ -268,19 +268,15 @@ modparam("nathelper", "force_socket", "localhost:33333")
 	</section>
 
 	<section id="param_sipping_bflag" xreflabel="sipping_bflag">
-		<title><varname>sipping_bflag</varname> (string/integer)</title>
+		<title><varname>sipping_bflag</varname> (string)</title>
 		<para>
 		What branch flag should be used by the module to identify NATed
 		contacts for which it should perform NAT ping via a SIP request
 		instead if dummy UDP package.
 		</para>
 		<para>
-		<emphasis>WARNING: </emphasis>Setting INT flags is deprecated!
-		Use quoted strings instead!
-		</para>
-		<para>
 		<emphasis>
-			Default value is "NULL" (disabled).
+			Default value is NULL (disabled).
 		</emphasis>
 		</para>
 		<example>
@@ -294,18 +290,14 @@ modparam("nathelper", "sipping_bflag", "SIPPING_ENABLE")
 	</section>
 
 	<section id="param_remove_on_timeout_bflag" xreflabel="remove_on_timeout_bflag">
-		<title><varname>remove_on_timeout_bflag</varname> (string/integer)</title>
+		<title><varname>remove_on_timeout_bflag</varname> (string)</title>
 		<para>
 		What branch flag to be used in order to activate usrloc contact removal when
 		the <xref linkend="param_ping_threshold"/> is exceeded.
 		</para>
 		<para>
-		<emphasis>WARNING: </emphasis>Setting INT flags is deprecated!
-		Use quoted strings instead!
-		</para>
-		<para>
 		<emphasis>
-			Default value is "NULL" (disabled).
+			Default value is NULL (disabled).
 		</emphasis>
 		</para>
 		<example>
@@ -319,7 +311,7 @@ modparam("nathelper", "remove_on_timeout_bflag", "SIPPING_RTO")
 	</section>
 
 	<section id="param_sipping_latency_flag" xreflabel="sipping_latency_flag">
-		<title><varname>sipping_latency_flag</varname> (string/integer)</title>
+		<title><varname>sipping_latency_flag</varname> (string)</title>
 		<para>
 		The branch flag which will be used in order to enable contact pinging
 		latency computation and reporting via the usrloc E_UL_LATENCY_UPDATE
@@ -327,7 +319,7 @@ modparam("nathelper", "remove_on_timeout_bflag", "SIPPING_RTO")
 		</para>
 		<para>
 		<emphasis>
-			Default value is "NULL" (disabled).
+			Default value is NULL (disabled).
 		</emphasis>
 		</para>
 		<example>
@@ -448,7 +440,7 @@ modparam("nathelper", "nortpproxy_str", "a=sdpmangled:yes\r\n")
 		</emphasis>
 		</para>
 		<example>
-		<title>Set <varname>natping_interval</varname> parameter</title>
+		<title>Set <varname>natping_tcp</varname> parameter</title>
 		<programlisting format="linespecific">
 ...
 modparam("nathelper", "natping_tcp", 1)
@@ -471,7 +463,7 @@ modparam("nathelper", "natping_tcp", 1)
 		</emphasis>
 		</para>
 		<example>
-		<title>Set <varname>natping_interval</varname> parameter</title>
+		<title>Set <varname>oldip_skip</varname> parameter</title>
 		<programlisting format="linespecific">
 ...
 modparam("nathelper", "oldip_skip", "oc")
@@ -514,7 +506,7 @@ modparam("nathelper", "ping_threshold", 10)
 		</emphasis>
 		</para>
 		<example>
-		<title>Set <varname>ping_threshold</varname> parameter</title>
+		<title>Set <varname>max_pings_lost</varname> parameter</title>
 		<programlisting format="linespecific">
 ...
 modparam("nathelper", "max_pings_lost", 5)
@@ -609,6 +601,12 @@ modparam("nathelper", "cluster_sharing_tag", "vip")
 		not be seen in the async resume route. So make sure you call it in all the
 		resume routes where you need the contact fixed.
 		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>uri_params (string, optional)</emphasis>
+			</para></listitem>
+		</itemizedlist>
 		<para>
 		This function can be used from REQUEST_ROUTE, ONREPLY_ROUTE, BRANCH_ROUTE.
 		</para>
@@ -639,7 +637,7 @@ if (search("User-Agent: Cisco ATA.*") {
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 			<listitem><para>
-			<emphasis>flags</emphasis> - the value may be a bitwise OR of
+			<emphasis>flags (int)</emphasis> - the value may be a bitwise OR of
 			the following flags:
 			</para>
 			<itemizedlist>
@@ -651,7 +649,7 @@ if (search("User-Agent: Cisco ATA.*") {
 				<listitem>
 					<para><emphasis>0x02</emphasis> - rewrite media
 					&ip; address (c=) with source address of the message
-					or the provided IP address (the provide IP address take
+					or the provided IP address (the provided IP address takes
 					precedence over the source address).</para>
 				</listitem>
 				<listitem>
@@ -661,7 +659,7 @@ if (search("User-Agent: Cisco ATA.*") {
 				<listitem>
 					<para><emphasis>0x08</emphasis> - rewrite IP from
 					origin description (o=) with source address of the message
-					or the provided IP address (the provide IP address take
+					or the provided IP address (the provided IP address takes
 					precedence over the source address).</para>
 				</listitem>
 				<listitem>
@@ -672,15 +670,14 @@ if (search("User-Agent: Cisco ATA.*") {
 			</itemizedlist>
 			</listitem>
 			<listitem><para>
-			<emphasis>ip_address</emphasis> - IP to be used for rewriting SDP.
-			If not specified, the received signalling IP will be used. The
-			parameter allows pseudo-variables usage. NOTE: For the IP to be
-			used, you need to use 0x02 or 0x08 flags, otherwise it will have
-			no effect.
+			<emphasis>ip_address (string, optional)</emphasis> - IP to be used for
+			rewriting SDP. If not specified, the received signalling IP will be used.
+			NOTE: For the IP to be used, you need to use 0x02 or 0x08 flags,
+			otherwise it will have no effect.
 			</para>
 			</listitem>
 			<listitem><para>
-			<emphasis>sdp_fields</emphasis> - SDP field(s) to be appended to SDP.
+			<emphasis>sdp_fields (string, optional)</emphasis> - SDP field(s) to be appended to SDP.
 			Note: Each SDP field must be preceded by "\r\n".
 			</para>
 			</listitem>
@@ -698,7 +695,7 @@ if (search("User-Agent: Cisco ATA.*") {
 # Add extra "a=x-attr1" SDP line
 # Add extra "a=x-attr2" SDP line
 if (search("User-Agent: Cisco ATA.*")
-    {fix_nated_sdp("3",,"\r\na=x-attr1\r\na=x-attr2");};
+    {fix_nated_sdp(3,,"\r\na=x-attr1\r\na=x-attr2");};
 ...
 </programlisting>
 		</example>
@@ -719,11 +716,11 @@ if (search("User-Agent: Cisco ATA.*")
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 			<listitem><para>
-			<emphasis>flag</emphasis> - flags to indicate if the parameter
-			should be added to Contact URI or Contact header. If the flag is
-			non-zero, the parameter will be added to the Contact URI. If not
-			used or equal to zero, the parameter will go to the Contact
-			header.
+			<emphasis>flag (int, optional)</emphasis> - flags to indicate if
+			the parameter should be added to Contact URI or Contact header.
+			If the flag is non-zero, the parameter will be added to the Contact
+			URI. If not used or equal to zero, the parameter will go to the
+			Contact header.
 			</para></listitem>
 		</itemizedlist>
 		<para>
@@ -735,7 +732,7 @@ if (search("User-Agent: Cisco ATA.*")
 ...
 add_rcv_param(); # add the parameter to the Contact header
 ....
-add_rcv_param("1"); # add the parameter to the Contact URI
+add_rcv_param(1); # add the parameter to the Contact URI
 ...
 </programlisting>
 		</example>
@@ -770,7 +767,8 @@ fix_nated_register();
 			Tries to guess if client's request originated behind a nat.
 			The parameter determines what heuristics is used.
 		</para>
-		<para>Meaning of the flags is as follows:</para>
+		<para>Meaning of the <emphasis>flags (int)</emphasis> parameter
+		is as follows:</para>
 		<itemizedlist>
 			<listitem><para>
 			<emphasis>1</emphasis> -  Contact header field is searched

@@ -507,10 +507,8 @@ static int ospReportUsageFromCookie(
  */
 int ospReportUsage(
     struct sip_msg* msg,
-    char* whorelease,
-    char* ignore2)
+    int* whorelease)
 {
-    str relstr;
     OSPE_RELEASE release;
     char* tmp;
     char* token;
@@ -522,8 +520,8 @@ int ospReportUsage(
 
     if (callid != NULL) {
         /* Who releases the call first, 0 orig, 1 term */
-        if (fixup_get_svalue(msg, (gparam_p)whorelease, &relstr) == 0) {
-            if ((relstr.len <= 0) || (sscanf(relstr.s, "%d", &release) != 1) || ((release != OSPC_RELEASE_SOURCE) && (release != OSPC_RELEASE_DESTINATION))) {
+            release = *whorelease;
+            if (((release != OSPC_RELEASE_SOURCE) && (release != OSPC_RELEASE_DESTINATION))) {
                 release = OSPC_RELEASE_UNKNOWN;
             }
             LM_DBG("who releases the call first '%d'\n", release);
@@ -563,7 +561,7 @@ int ospReportUsage(
                 ospReportUsageFromCookie(msg, NULL, callid, release, OSPC_ROLE_SOURCE);
                 result = MODULE_RETURNCODE_TRUE;
             }
-        }
+
         OSPPCallIdDelete(&callid);
     }
 
@@ -775,8 +773,8 @@ void ospReportTermSetupUsage(void)
     OSPE_ROLE_STATE rstate;
     int errorcode;
 
-    if (inbound == NULL) {
-        if (dest == NULL) {
+    if (inbound != NULL) {
+        if (dest != NULL) {
             if (dest->reported == 0) {
                 dest->reported = 1;
                 LM_INFO("report term setup for call_id '%.*s' transaction_id '%llu'\n",

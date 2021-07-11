@@ -26,15 +26,13 @@
 #include "../../dprint.h"
 #include "../../str.h"
 
-typedef int (*sl_send_reply_f)(struct sip_msg *msg, int code, str *reason);
-typedef int (*sl_send_reply_dlg_f)(struct sip_msg *msg, int code, str *reason,
-		str *tag);
-typedef int (*sl_get_totag_f)(struct sip_msg *msg, str *totag);
+typedef int (*sl_send_reply_f)(struct sip_msg *msg, int code,
+    const str *reason, str *tag);
+typedef int (*sl_gen_totag_f)(struct sip_msg *msg, str *totag);
 
 struct sl_binds {
-	sl_send_reply_f     reply;
-	sl_send_reply_dlg_f reply_dlg;
-	sl_get_totag_f      get_totag;
+	sl_send_reply_f      reply;
+	sl_gen_totag_f       gen_totag;
 };
 
 typedef int(*load_sl_f)(struct sl_binds *slb);
@@ -47,7 +45,7 @@ static inline int load_sl_api( struct sl_binds *slb )
 	load_sl_f load_sl;
 
 	/* import the SL auto-loading function */
-	if ( !(load_sl=(load_sl_f)find_export("load_sl", 0, 0))) {
+	if ( !(load_sl=(load_sl_f)find_export("load_sl", 0))) {
 		LM_ERR("can't import load_sl\n");
 		return -1;
 	}

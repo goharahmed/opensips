@@ -61,6 +61,7 @@
 #include "fix_lumps.h"
 #include "config.h"
 #include "cluster.h"
+#include "../usrloc/ul_evi.h"
 #include "../../msg_callbacks.h"
 #include "../../mod_fix.h"
 
@@ -184,7 +185,7 @@ static inline int pre_print_uac_request( struct cell *t, int branch,
 		swap_route_type( backup_route_type, BRANCH_ROUTE);
 
 		_tm_branch_index = branch;
-		if (run_top_route(branch_rlist[t->on_branch].a, request)&ACT_FL_DROP) {
+		if(run_top_route(sroutes->branch[t->on_branch],request)&ACT_FL_DROP){
 			LM_DBG("dropping branch <%.*s>\n", request->new_uri.len,
 					request->new_uri.s);
 			_tm_branch_index = 0;
@@ -203,8 +204,10 @@ static inline int pre_print_uac_request( struct cell *t, int branch,
 	}
 
 	/* run the specific callbacks for this transaction */
+	_tm_branch_index = branch;
 	run_trans_callbacks( TMCB_REQUEST_FWDED, t, request, 0,
 			-request->REQ_METHOD);
+	_tm_branch_index = 0;
 
 	/* copy dst_uri into branch (after branch route possible updated it) */
 	if (request->dst_uri.len) {
@@ -247,7 +250,7 @@ static inline char *print_uac_request(struct sip_msg *i_req, unsigned int *len,
 
 
 static inline void post_print_uac_request(struct sip_msg *request,
-				str *org_uri, str *org_dst, struct sip_msg_body *body_clone)
+			const str *org_uri, str *org_dst, struct sip_msg_body *body_clone)
 {
 	reset_init_lump_flags();
 	/* delete inserted branch lumps */
@@ -381,8 +384,11 @@ static inline unsigned int count_local_rr(struct sip_msg *req)
 /* introduce a new uac to transaction; returns its branch id (>=0)
    or error (<0); it doesn't send a message yet -- a reply to it
    might interfere with the processes of adding multiple branches
+
+   NOTICE: do NOT provide (str *) buffers pointing to @request itself, as this
+   may break the function logic!
 */
-static int add_uac( struct cell *t, struct sip_msg *request, str *uri,
+static int add_uac( struct cell *t, struct sip_msg *request, const str *uri,
 		str* next_hop, unsigned int bflags, str* path, struct proxy_l *proxy)
 {
 	unsigned short branch;
@@ -483,7 +489,7 @@ error:
 }
 
 
-int add_phony_uac( struct cell *t)
+int add_phony_uac( struct cell *t, int br_flags)
 {
 	str dummy_buffer = str_init("DUMMY");
 	unsigned short branch;
@@ -516,6 +522,7 @@ int add_phony_uac( struct cell *t)
 	t->uac[branch].request.my_T = t;
 	t->uac[branch].request.branch = branch;
 	t->uac[branch].flags = T_UAC_IS_PHONY;
+	t->uac[branch].br_flags = br_flags;
 
 	/* in invalid proto will prevent adding this retransmission buffer
 	 * to the retransmission timer (there is nothing to retransmit here :P */
@@ -562,16 +569,9 @@ int t_set_reason(struct sip_msg *msg, str *val)
 }
 
 
-int t_add_reason(struct sip_msg *msg, char *val)
+int t_add_reason(struct sip_msg *msg, str *reason)
 {
-	str reason;
-
-	if (fixup_get_svalue(msg, (gparam_p)val, &reason)!=0) {
-		LM_ERR("invalid reason value\n");
-		return -1;
-	}
-
-	return t_set_reason(msg, &reason);
+	return t_set_reason(msg, reason);
 }
 
 void get_cancel_reason(struct sip_msg *msg, int flags, str *reason)
@@ -628,8 +628,12 @@ void cancel_invite(struct sip_msg *cancel_msg,
 
 	get_cancel_reason(cancel_msg, t_cancel->flags, &reason);
 
+	LOCK_REPLIES(t_invite);
+	/* we need to check which branches should be canceled under lock to avoid
+	 * concurrency with replies that are coming in the same time */
 	/* generate local cancels for all branches */
 	which_cancel(t_invite, &cancel_bitmap );
+	UNLOCK_REPLIES(t_invite);
 
 	set_cancel_extra_hdrs( reason.s, reason.len);
 	cancel_uacs(t_invite, cancel_bitmap );
@@ -641,6 +645,18 @@ void cancel_invite(struct sip_msg *cancel_msg,
 	 * timer; this helps with better coping with missed/lated provisional
 	 * replies in the context of cancelling the transaction
 	 */
+
+	 /* Handle a special case here, when there is only one PHONY
+	  * branch (not a real signaling branch, just a fake one
+	  * to force keeping the transaction alive) - if the case,
+	  * it means there are no other real signaling branches, 
+	  * so we can force a 487 reply on the PHONY branch, in order
+	  * to terminate the whole transaction on the spot */
+	if ( (t_invite->nr_of_outgoings-t_invite->first_branch)==1 &&
+	(t_invite->uac[t_invite->first_branch].flags & T_UAC_IS_PHONY) ) {
+		relay_reply( t_invite, FAKED_REPLY, t_invite->first_branch,
+			487, &cancel_bitmap);
+	}
 #if 0
 	/* internally cancel branches with no received reply */
 	for (i=t_invite->first_branch; i<t_invite->nr_of_outgoings; i++) {
@@ -679,9 +695,6 @@ int t_forward_nonack( struct cell *t, struct sip_msg* p_msg ,
 	int idx;
 	str path;
 	str bk_path;
-
-	/* make -Wall happy */
-	current_uri.s=0;
 
 	/* before doing enything, update the t flags from msg */
 	t->uas.request->flags = p_msg->flags;
@@ -744,8 +757,9 @@ int t_forward_nonack( struct cell *t, struct sip_msg* p_msg ,
 			t->first_branch--;
 	}
 
-	/* as first branch, use current uri */
-	current_uri = *GET_RURI(p_msg);
+	current_uri = *GET_RURI(p_msg); /* separate storage required! */
+
+	/* as first branch, use current R-URI, bflags, etc. */
 	branch_ret = add_uac( t, p_msg, &current_uri, &backup_dst,
 		getb0flags(p_msg), &p_msg->path_vec, proxy);
 	if (branch_ret>=0)
@@ -801,6 +815,14 @@ int t_forward_nonack( struct cell *t, struct sip_msg* p_msg ,
 			if (t->uac[i].br_flags & tcp_no_new_conn_bflag)
 				tcp_no_new_conn = 1;
 
+			/* successfully sent out -> run callbacks */
+			if ( has_tran_tmcbs( t, TMCB_REQUEST_BUILT) ) {
+				set_extra_tmcb_params( &t->uac[i].request.buffer,
+					&t->uac[i].request.dst);
+				run_trans_callbacks( TMCB_REQUEST_BUILT, t,
+					p_msg, 0, 0);
+			}
+
 			do {
 				if (check_blacklists( t->uac[i].request.dst.proto,
 				&t->uac[i].request.dst.to,
@@ -809,6 +831,8 @@ int t_forward_nonack( struct cell *t, struct sip_msg* p_msg ,
 					LM_DBG("blocked by blacklists\n");
 					ser_error=E_IP_BLOCKED;
 				} else {
+					set_extra_tmcb_params( &t->uac[i].request.buffer,
+							&t->uac[i].request.dst);
 					run_trans_callbacks(TMCB_PRE_SEND_BUFFER, t, p_msg, 0, i);
 
 					if (SEND_BUFFER( &t->uac[i].request)==0) {
@@ -845,10 +869,10 @@ int t_forward_nonack( struct cell *t, struct sip_msg* p_msg ,
 			set_kr(REQ_FWDED);
 
 			/* successfully sent out -> run callbacks */
-			if ( has_tran_tmcbs( t, TMCB_REQUEST_BUILT|TMCB_MSG_SENT_OUT) ) {
+			if ( has_tran_tmcbs( t, TMCB_MSG_SENT_OUT) ) {
 				set_extra_tmcb_params( &t->uac[i].request.buffer,
 					&t->uac[i].request.dst);
-				run_trans_callbacks( TMCB_REQUEST_BUILT|TMCB_MSG_SENT_OUT, t,
+				run_trans_callbacks( TMCB_MSG_SENT_OUT, t,
 					p_msg, 0, 0);
 			}
 
@@ -862,14 +886,14 @@ int t_forward_nonack( struct cell *t, struct sip_msg* p_msg ,
 static int ul_contact_event_to_msg(struct sip_msg *req)
 {
 	static enum ul_attrs { UL_URI, UL_RECEIVED, UL_PATH, UL_QVAL,
-		UL_SOCKET, UL_BFLAGS, UL_ATTR, UL_MAX } ul_attr;
-	/* keep the names of the AVPs aligned with the contact-related events
-	 * from USRLOC module !!!! */
-	static str ul_names[UL_MAX]= {str_init("uri"),str_init("received"),
-	                              str_init("path"),str_init("qval"),
-	                              str_init("socket"),str_init("bflags"),
-	                              str_init("attr") };
-	static int avp_ids[UL_MAX] = { -1, -1, -1, -1, -1, -1, -1};
+		UL_SOCKET, UL_BFLAGS, UL_MAX } ul_attr;
+	static str ul_names[UL_MAX]= {str_init(UL_EV_PARAM_CT_URI),
+	                              str_init(UL_EV_PARAM_CT_RCV),
+	                              str_init(UL_EV_PARAM_CT_PATH),
+	                              str_init(UL_EV_PARAM_CT_QVAL),
+	                              str_init(UL_EV_PARAM_CT_SOCK),
+	                              str_init(UL_EV_PARAM_CT_BFL) };
+	static int avp_ids[UL_MAX] = { -1, -1, -1, -1, -1, -1 };
 	int_str vals[UL_MAX];
 	int proto, port;
 	str host;
@@ -898,14 +922,13 @@ static int ul_contact_event_to_msg(struct sip_msg *req)
 
 	/* OK, we have the values, lets inject them into the SIP msg */
 	LM_DBG("injecting new branch: uri=<%.*s>, received=<%.*s>,"
-		"path=<%.*s>, qval=%d, socket=<%.*s>, bflags=%X, attr=<%.*s>\n",
+		"path=<%.*s>, qval=%d, socket=<%.*s>, bflags=%X\n",
 		vals[UL_URI].s.len, vals[UL_URI].s.s,
 		vals[UL_RECEIVED].s.len, vals[UL_RECEIVED].s.s,
 		vals[UL_PATH].s.len, vals[UL_PATH].s.s,
 		vals[UL_QVAL].n,
 		vals[UL_SOCKET].s.len, vals[UL_SOCKET].s.s,
-		vals[UL_BFLAGS].n,
-		vals[UL_ATTR].s.len, vals[UL_ATTR].s.s);
+		vals[UL_BFLAGS].n);
 
 	/* contact URI goes as RURI */
 	if (set_ruri( req, &vals[UL_URI].s)<0) {
@@ -992,10 +1015,30 @@ static int dst_to_msg(struct sip_msg *s_msg, struct sip_msg *d_msg)
 }
 
 
+int t_wait_no_more_branches( struct cell *t)
+{
+	int b;
+
+	/* look back (in the set of active branches for a PHONY branch
+	 * that might contoll the EBR waiting. If found, update it
+	 * (the br_flags field), so that this is the lasr allowed injected
+	 * branch (the max number of allowed branches is set to the current
+	 * number of branches) */
+	for ( b=t->nr_of_outgoings-1; b>=t->first_branch ; b-- ) {
+		if (t->uac[b].flags & T_UAC_IS_PHONY) {
+			t->uac[b].br_flags=t->nr_of_outgoings+1;
+			return 0;
+		}
+	}
+
+	return -1;
+}
+
+
 int t_inject_branch( struct cell *t, struct sip_msg *msg, int flags)
 {
 	static struct sip_msg faked_req;
-	branch_bm_t cancel_bm;
+	branch_bm_t cancel_bm = 0;
 	str reason = str_init(CANCEL_REASON_200);
 	int rc;
 
@@ -1006,7 +1049,7 @@ int t_inject_branch( struct cell *t, struct sip_msg *msg, int flags)
 		return -2;
 	}
 
-	if (!fake_req( &faked_req, t->uas.request, &t->uas, NULL, 0)) {
+	if (!fake_req( &faked_req, t->uas.request, &t->uas, NULL)) {
 		LM_ERR("fake_req failed\n");
 		return -1;
 	}
@@ -1044,6 +1087,9 @@ int t_inject_branch( struct cell *t, struct sip_msg *msg, int flags)
 	if (flags&TM_INJECT_FLAG_CANCEL) {
 		which_cancel( t, &cancel_bm );
 	}
+
+	if (flags&TM_INJECT_FLAG_LAST)
+		t_wait_no_more_branches(t);
 
 	/* generated the new branches, without branch counter reset */
 	rc = t_forward_nonack( t, &faked_req , NULL, 0, 1/*locked*/ );
@@ -1113,7 +1159,15 @@ int t_replicate(struct sip_msg *p_msg, str *dst, int flags)
 	}
 }
 
+
 int get_branch_index(void)
 {
 	return _tm_branch_index;
+}
+
+
+int t_inject_ul_event_branch(void)
+{
+	return w_t_inject_branches(NULL,
+	            (void *)(unsigned long)TM_INJECT_SRC_EVENT, (void *)0);
 }

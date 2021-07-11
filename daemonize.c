@@ -61,8 +61,11 @@
 #include "dprint.h"
 #include "pt.h"
 
+/* working dir at startup, before daemonizing; may be NULL if daemonizing 
+ * was not performed. It points to a allocated buffer in system memory */
+char *startup_wdir = NULL;
+
 static int status_pipe[2];
-static int *init_timer_no;
 
 static enum opensips_states *osips_state = NULL;
 
@@ -70,7 +73,7 @@ static enum opensips_states *osips_state = NULL;
  * proper status code returning
  *
  * must be called before any forking */
-int create_status_pipe( int no_timers )
+int create_status_pipe(void)
 {
 	int rc;
 
@@ -79,33 +82,17 @@ int create_status_pipe( int no_timers )
 
 retry:
 	rc = pipe(status_pipe);
-	if (rc < 0 && errno == EINTR)
-		goto retry;
+	if (rc < 0) {
+		if (errno == EINTR)
+			goto retry;
 
-	LM_DBG("pipe created ? rc = %d, errno = %s\n",rc,strerror(errno));
-
-	if (no_timers)
-		return rc;
-
-	/* also create SHM var which the attendent will use
-	 * to notify us about the overall number of timers
-	 * that need init
-	 *
-	 * at this point we do not know how many timers we will need */
-	init_timer_no = shm_malloc(sizeof(int));
-	if (!init_timer_no) {
-		LM_ERR("no more shm\n");
-		return -1;
+		LM_ERR("pipe() failed (%d): %d, %s\n", rc, errno, strerror(errno));
+	} else {
+		LM_DBG("created status pipe, fds=[%d, %d]\n",
+		       status_pipe[0], status_pipe[1]);
 	}
 
-	*init_timer_no = 0;
 	return rc;
-}
-
-void inc_init_timer(void)
-{
-	LM_DBG("incrementing init timer no\n");
-	(*init_timer_no)++;
 }
 
 /* attempts to send the val
@@ -116,10 +103,15 @@ int send_status_code(char val)
 
 retry:
 	rc = write(status_pipe[1], &val, 1);
-	if (rc < 0 && errno == EINTR)
-		goto retry;
+	if (rc < 0) {
+		if (errno == EINTR)
+			goto retry;
 
-	LM_DBG("send %d ? rc = %d , errno=%s\n",val,rc,strerror(errno));
+		LM_ERR("write(%d) failed (%d): %d, %s\n", val, rc,
+		       errno, strerror(errno));
+	} else {
+		LM_DBG("sent code %d (%d byte)\n", val, rc);
+	}
 
 	if (rc == 1)
 		return 0;
@@ -140,10 +132,14 @@ static int wait_status_code(char *code)
 
 retry:
 	rc = read(status_pipe[0], code, 1);
-	if (rc < 0 && errno == EINTR)
+	if (rc < 0) {
+		if (errno == EINTR)
 			goto retry;
 
-	LM_DBG("read code %d ? rc = %d, errno=%s\n",*code,rc,strerror(errno));
+		LM_ERR("read(1) failed (%d): %d, %s\n", rc, errno, strerror(errno));
+	} else {
+		LM_DBG("read code %d (%d byte)\n", *code, rc);
+	}
 
 	if (rc == 1)
 		return 0;
@@ -174,19 +170,6 @@ int wait_for_all_children(void)
 	for (i=0;i<procs_no;i++) {
 		ret = wait_status_code(&rc);
 		if (ret < 0 || rc < 0)
-			return -1;
-	}
-
-	/* we got this far, means everything went ok with
-	 * SIP listeners and module procs
-	 *
-	 * still need to see if
-	 * timers initialized ok */
-
-	for (i=0;i<*init_timer_no;i++) {
-		LM_DBG("waiting for timer\n");
-		ret = wait_status_code(&rc);
-		if (ret < 0 || rc < 0 )
 			return -1;
 	}
 
@@ -230,6 +213,12 @@ int daemonize(char* name, int * own_pgid)
 	int pid_items;
 
 	p=-1;
+
+	if ( (startup_wdir=getcwd(NULL,0))==NULL) {
+		LM_ERR("failed to determin the working dir %d/%s\n", errno,
+			strerror(errno));
+		goto error;
+	}
 
 	/* flush std file descriptors to avoid flushes after fork
 	 *  (same message appearing multiple times)
@@ -279,6 +268,8 @@ int daemonize(char* name, int * own_pgid)
 			/*parent process => exit */
 			exit(0);
 		}
+
+		is_pre_daemon = 0;  /* attendant process at this point */
 	}
 
 #ifdef __OS_linux
@@ -360,13 +351,13 @@ int daemonize(char* name, int * own_pgid)
 			strerror(errno));
 		/* continue, leave it open */
 	};
-	if (freopen("/dev/null", "w", stdout)==0){
+	if (!log_stdout && freopen("/dev/null", "w", stdout)==0){
 		LM_WARN("unable to replace stdout with /dev/null: %s\n",
 			strerror(errno));
 		/* continue, leave it open */
 	};
 	/* close stderr only if not to be used */
-	if ( (!log_stderr) && (freopen("/dev/null", "w", stderr)==0)){
+	if (!log_stderr && (freopen("/dev/null", "w", stderr)==0)){
 		LM_WARN("unable to replace stderr with /dev/null: %s\n",
 			strerror(errno));
 		/* continue, leave it open */

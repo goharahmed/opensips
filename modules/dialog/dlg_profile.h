@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2014 OpenSIPS Solutions
+ * Copyright (C) 2009-2020 OpenSIPS Solutions
  * Copyright (C) 2008 Voice System SRL
  *
  * This file is part of opensips, a free SIP server.
@@ -16,13 +16,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
- *
- * History:
- * --------
- * 2008-04-20  initial version (bogdan)
- * 2009-09-16  speed optimization (andreidragus)
- *
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include "../../map.h"
@@ -46,6 +40,7 @@ struct lock_set_list
 struct dlg_profile_link {
 	str value;
 	int hash_idx;
+	int it_marker;
 	struct dlg_profile_link  *next;
 	struct dlg_profile_table *profile;
 };
@@ -54,7 +49,7 @@ struct prof_rcv_count;
 
 struct prof_local_count {
 	int n;
-	struct dlg_cell *dlg;
+	str shtag;
 	struct prof_local_count *next;
 };
 
@@ -113,9 +108,9 @@ void destroy_dlg_profiles();
 struct dlg_profile_table* search_dlg_profile(str *name);
 struct dlg_profile_table *get_dlg_profile(str *name);
 
-void destroy_linkers(struct dlg_cell *dlg, char is_replicated);
-void destroy_linkers_unsafe(struct dlg_cell *dlg, char is_replicated);
-void remove_dlg_prof_table(struct dlg_cell *dlg, char is_replicated);
+void destroy_linkers(struct dlg_cell *dlg);
+void destroy_linkers_unsafe(struct dlg_cell *dlg);
+void remove_dlg_prof_table(struct dlg_cell *dlg, char cachedb_dec);
 
 int set_dlg_profile(struct dlg_cell *dlg, str *value,
 		struct dlg_profile_table *profile, char is_replicated);

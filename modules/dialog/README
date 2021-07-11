@@ -70,7 +70,7 @@ dialog Module
 
         1.7. Exported Functions
 
-              1.7.1. create_dialog()
+              1.7.1. create_dialog([flags])
               1.7.2. match_dialog([dlg_match_mode])
               1.7.3. validate_dialog()
               1.7.4. fix_route_dialog()
@@ -85,17 +85,26 @@ dialog Module
                       get_dialogs_by_profile(name,value,out_avp,out_
                       dlg_no)
 
-              1.7.9. set_dlg_profile(profile,[value])
-              1.7.10. unset_dlg_profile(profile,[value])
-              1.7.11. is_in_profile(profile,[value])
-              1.7.12. get_profile_size(profile,[value],size)
-              1.7.13. set_dlg_flag(idx)
-              1.7.14. test_and_set_dlg_flag(idx, value)
-              1.7.15. reset_dlg_flag(idx)
-              1.7.16. is_dlg_flag_set(idx)
-              1.7.17. store_dlg_value(name,val)
-              1.7.18. fetch_dlg_value(name,pvar)
-              1.7.19. set_dlg_sharing_tag(tag_name)
+              1.7.9. load_dialog_ctx( dialog [, id_type])
+              1.7.10. unload_dialog_ctx()
+              1.7.11. set_dlg_profile(profile,[value])
+              1.7.12. unset_dlg_profile(profile,[value])
+              1.7.13. is_in_profile(profile,[value])
+              1.7.14. get_profile_size(profile,[value],size)
+              1.7.15. set_dlg_flag(idx)
+              1.7.16. test_and_set_dlg_flag(idx, value)
+              1.7.17. reset_dlg_flag(idx)
+              1.7.18. is_dlg_flag_set(idx)
+              1.7.19. store_dlg_value(name,val)
+              1.7.20. fetch_dlg_value(name,val)
+              1.7.21. set_dlg_sharing_tag(tag_name)
+              1.7.22. dlg_on_answer([route_name])
+              1.7.23. dlg_on_timeout([route_name])
+              1.7.24. dlg_on_hangup([route_name])
+              1.7.25. dlg_send_sequential(method, leg, [, body] [,
+                      content-type] [, headers])
+
+              1.7.26. cluster_auto_sync (string)
 
         1.8. Exported Statistics
 
@@ -125,6 +134,7 @@ dialog Module
               1.9.10. dlg_restore_db
               1.9.11. list_all_profiles
               1.9.12. dlg_push_var
+              1.9.13. dlg_send_sequential
 
         1.10. Exported Pseudo-Variables
 
@@ -229,17 +239,23 @@ dialog Module
    1.57. get_dialog_vals usage
    1.58. get_dialog_vals usage
    1.59. get_dialog_vals usage
-   1.60. set_dlg_profile usage
-   1.61. unset_dlg_profile usage
-   1.62. is_in_profile usage
-   1.63. get_profile_size usage
-   1.64. set_dlg_flag usage
-   1.65. test_and_set_dlg_flag usage
-   1.66. reset_dlg_flag usage
-   1.67. is_dlg_flag_set usage
-   1.68. store_dlg_value usage
-   1.69. fetch_dlg_value usage
-   1.70. set_dlg_sharing_tag usage
+   1.60. load_dialog_ctx usage
+   1.61. set_dlg_profile usage
+   1.62. unset_dlg_profile usage
+   1.63. is_in_profile usage
+   1.64. get_profile_size usage
+   1.65. set_dlg_flag usage
+   1.66. test_and_set_dlg_flag usage
+   1.67. reset_dlg_flag usage
+   1.68. is_dlg_flag_set usage
+   1.69. store_dlg_value usage
+   1.70. fetch_dlg_value usage
+   1.71. set_dlg_sharing_tag usage
+   1.72. dlg_on_answer usage
+   1.73. dlg_on_timeout usage
+   1.74. dlg_on_hangup usage
+   1.75. dlg_send_sequential usage to convert DTMF codes
+   1.76. Set cluster_auto_sync parameter
 
 Chapter 1. Admin Guide
 
@@ -347,11 +363,10 @@ Chapter 1. Admin Guide
    failsafe for obtaining restart persistency for dialog data is
    useful in case all nodes in the cluster are down. This approach
    makes the most sense if a separate, local DB is used for each
-   node in the cluster. In consequence dialogs loaded from the
-   database at startup are dropped and also deleted from the DB
-   once the sync from cluster is complete. This is done for
-   dialogs that are not reconfirmed as being active in the
-   meantime (SIP updates, received in sync data).
+   node in the cluster. Dialogs loaded from the database at
+   startup, which are not reconfirmed through syncing, are dropped
+   and also deleted from the database once the sync from cluster
+   is complete.
 
    Also configuring profile replication via the
    profile_replication_cluster parameter is not necessary when
@@ -759,7 +774,7 @@ modparam("dialog", "to_sock_column", "to_sock_c_name")
    The column's name in the database to store the dialogs' id
    information.
 
-   Default value is “hash_id”.
+   Default value is “dlg_id”.
 
    Example 1.27. Set dlg_id_column parameter
 ...
@@ -915,9 +930,10 @@ modparam("dialog", "timer_bulk_del_no", 10)
 
 1.6.40. race_condition_timeout (int)
 
-   If dialog is created using the 'E' flag, and a 200OK with
-   CANCEL race condition occurs, then the dialog will be
-   terminated after 'race_condition_timeout' seconds.
+   If dialog is created using the 'E' flag, and a SIP Race
+   condition happens, then the dialog will be terminated after
+   'race_condition_timeout' seconds. Currently, the only supported
+   race conditions are (200OK vs CANCEL) and (early BYE vs 200OK)
 
    Default value is “5” seconds.
 
@@ -1074,24 +1090,34 @@ modparam("dialog", "replicate_profiles_expire", 10)
 
 1.7. Exported Functions
 
-1.7.1.  create_dialog()
+1.7.1.  create_dialog([flags])
 
    The function creats the dialog for the currently processed
    request. The request must be an initial request. Optionally,the
    function also receives a string parameter, which specifies
-   whether the dialog end-points should be pinged via SIP options
-   messages. The parameter can be "P" to specify to only ping the
-   caller, "p" to only ping the callee or "Pp" to ping both dialog
-   sides. If the extra string parameter is provided and one
-   end-point fails to respond to a options ping, OpenSIPS will
-   terminate the dialog from the middle. Also, the end-points can
-   be pinged via in-dialog Re-INVITE SIP messages. This behaviour
-   is controlled via the "R" flags for pinging the caller side,
-   and the "r" flag for re-invite pinging the callee side. If one
-   end-points fails to re-negociate the session via the Re-INVITE
-   pings, OpenSIPS will terminate the dialog from the middle The
-   string parameter can also contain "B" to activate the bye on
-   timeout behavior.
+   special behavior to be done for the current dialog.
+
+   Parameters:
+     * flags (string, optional) Possible values here are :
+          + B - Upon reaching dialog lifetime, BYEs will be
+            triggered both ways
+          + P - Ping caller side with OPTIONS messages, once every
+            options_ping_interval seconds
+          + p - Ping callee side with OPTIONS messages, once every
+            options_ping_interval seconds
+          + R - Ping caller side with RE-INVITE messages, once
+            every reinvite_ping_interval seconds
+          + r - Ping callee side with RE-INVITE messages, once
+            every reinvite_ping_interval seconds
+          + E - Upon detecting a SIP Race condition (see RFC
+            5407), end the call after race_condition_timeout
+            seconds
+       Multiple string flags can be used at the same time, ie.
+       passing "BPp" flags will enable all 3 flags.
+
+   NOTE: both RE-INVITE and OPTIONS pinging cannot be enabled at
+   the same time for a single dialog leg. If both flags ("PR" or
+   "pr") are provided only RE-INVITE pinging will be used.
 
    The function returns true if the dialog was successfully
    created or if the dialog was previously created.
@@ -1129,6 +1155,9 @@ create_dialog("B");
    dialog matching is done and (B) to cope with bogus sequential
    requests that do not have Route headers, so they are not
    handled by loose_route().
+
+   Parameters:
+     * dlg_match_mode (string, optional)
 
    The function returns true if a dialog exists for the request.
 
@@ -1217,25 +1246,25 @@ create_dialog("B");
    for other dialogs.
 
    Meaning of the parameters is as follows:
-     * attr - the name of the dialog variable (from the found
-       dialog) to be returned;
-     * avp - an avp where to store the values of the "attr" dialog
-       variable. Since the function checks through all dialogs,
-       this needs to be an actual AVP in order to support pushing
-       values from all matched dialogs.
-     * key - name of a dialog variable to be used a search key
-       (when looking after the target dialog)
-     * key_val - the value of the dialog variable that is used as
-       key in searching the target dialog.
-     * no_dlgs - the total number of dialogs containing the key
-       variable
+     * attr (string) - the name of the dialog variable (from the
+       found dialog) to be returned;
+     * avp (var) - an avp where to store the values of the "attr"
+       dialog variable. Since the function checks through all
+       dialogs, this needs to be an actual AVP in order to support
+       pushing values from all matched dialogs.
+     * key (string) - name of a dialog variable to be used a
+       search key (when looking after the target dialog)
+     * key_val (string) - the value of the dialog variable that is
+       used as key in searching the target dialog.
+     * no_dlgs (var) - the total number of dialogs containing the
+       key variable
 
    This function can be used from ALL ROUTES.
 
    Example 1.56. get_dialog_info usage
 ...
-if ( get_dialog_info("callee","$avp(callee_array)","caller","$fu","$var(
-dlg_no)) ) {
+if ( get_dialog_info("callee",$avp(callee_array),"caller",$fu,$var(dlg_n
+o)) ) {
         xlog("caller $fu has $var(dlg_no) other ongoing calls, talking w
 ith :");
         $var(it) = 0;
@@ -1269,18 +1298,18 @@ $dlg_val(callee) = $ru;
    for other dialogs.
 
    Meaning of the parameters is as follows:
-     * names - the name of an AVP variable to hold all the names
-       of the variables from the found dialog.
-     * vals - the name of an AVP variable to hold all the values
-       of the variables from the found dialog.
-     * callid - the callid of a dialog to be searched (and have
-       the variables fetched).
+     * names (var) - an AVP variable to hold all the names of the
+       variables from the found dialog.
+     * vals (var) - an AVP variable to hold all the values of the
+       variables from the found dialog.
+     * callid (string) - the callid of a dialog to be searched
+       (and have the variables fetched).
 
    This function can be used from any type of route.
 
    Example 1.57. get_dialog_vals usage
 ...
-if ( get_dialog_vals("$avp(d_names)","$avp(d_vals)","$var(callid)") ) {
+if ( get_dialog_vals($avp(d_names),$avp(d_vals),$var(callid)) ) {
         xlog("the call $var(callid) has the variables:\n);
         $var(i) = 0;
         while ( $(avp(d_names)[$var(i)])!=NULL ) {
@@ -1304,19 +1333,19 @@ als)[$var(i)])'\n");
    for other dialogs.
 
    Meaning of the parameters is as follows:
-     * name - the name of the dialog variable used for the lookup
-     * value - the value of the above dialog val
-     * out_avp - the AVP which will be populated will the dialog
-       JSONs for all the matched calls
-     * dlg_no - the out var which will contain the total number of
-       matched dialogs
+     * name (string) - the name of the dialog variable used for
+       the lookup
+     * value (string) - the value of the above dialog val
+     * out_avp (var) - the AVP which will be populated will the
+       dialog JSONs for all the matched calls
+     * dlg_no (var) - the out var which will contain the total
+       number of matched dialogs
 
    This function can be used from any type of route.
 
    Example 1.58. get_dialog_vals usage
 ...
-if ( get_dialogs_by_val("caller","$fU","$avp(dlg_jsons)","$avp(dlg_no)")
- ) {
+if ( get_dialogs_by_val("caller",$fU,$avp(dlg_jsons),$avp(dlg_no)) ) {
         xlog("Caller $fU has $avp(dlg_no) other calls \n);
         $var(i) = 0;
         while ( $(avp(dlg_jsons)[$var(i)])!=NULL ) {
@@ -1342,19 +1371,21 @@ if ( get_dialogs_by_val("caller","$fU","$avp(dlg_jsons)","$avp(dlg_no)")
    for other dialogs.
 
    Meaning of the parameters is as follows:
-     * name - the name of the dialog profile used for the lookup
-     * value - the value of the above dialog profile ( optional )
-     * out_avp - the AVP which will be populated will the dialog
-       JSONs for all the matched calls
-     * dlg_no - the out var which will contain the total number of
-       matched dialogs
+     * name (string) - the name of the dialog profile used for the
+       lookup
+     * value (string) - the value of the above dialog profile (
+       optional )
+     * out_avp (var) - the AVP which will be populated will the
+       dialog JSONs for all the matched calls
+     * dlg_no (var) - the out var which will contain the total
+       number of matched dialogs
 
    This function can be used from any type of route.
 
    Example 1.59. get_dialog_vals usage
 ...
-if ( get_dialogs_by_profile("caller","$fU","$avp(dlg_jsons)","$avp(dlg_n
-o)") ) {
+if ( get_dialogs_by_profile("caller",$fU,$avp(dlg_jsons),$avp(dlg_no)) )
+ {
         xlog("Caller $fU has $avp(dlg_no) other calls \n);
         $var(i) = 0;
         while ( $(avp(dlg_jsons)[$var(i)])!=NULL ) {
@@ -1365,7 +1396,54 @@ o)") ) {
 }
 ...
 
-1.7.9.  set_dlg_profile(profile,[value])
+1.7.9.  load_dialog_ctx( dialog [, id_type])
+
+   The function loads and switches to the context of the given
+   dialog. The context of a dialog is given by the dialog flags,
+   variables, profiles and any other value/state related to the
+   dialog. By switching to the context of another dialog, you will
+   see at the script level, by default, all the data from the new
+   dialog.
+
+   NOTE: you cannot perform a new load until doing an unload - no
+   nested loadings are possible.
+
+   Meaning of the parameters is as follows:
+     * dialog (string) - the identifier of the dialog to be
+       loaded, it may be a SIP Call-ID or a Dialog ID.
+     * id_type (string,optional) - what kind of dialog identified
+       was used in the first parameter. It can be callid (SIP
+       Call-ID) or did (internal Dialog ID). By default callid
+       will be assumed.
+
+   This function can be used from any type of route.
+
+   Example 1.60. load_dialog_ctx usage
+...
+if (load_dialog_ctx("$var(callid)")) {
+        xlog("The dialog '$var(callid)' already has a duration "
+             "of $DLG_lifetime seconds\n");
+        if (is_in_profile("inbound_call"))
+                xlog("this dialog is an inbound call\n");
+        unload_dialog_ctx();
+}
+...
+
+1.7.10.  unload_dialog_ctx()
+
+   The function off-loads the loaded context of another dialog,
+   exposing whatever dialog context was present before doing the
+   load.
+
+   NOTE: you MUST perform from script an explicit unload for each
+   load you did, otherwise the loaded dialog will remain hanged
+   for ever.
+
+   This function can be used from any type of route.
+
+   For usage example, see the load_dialog_ctx()
+
+1.7.11.  set_dlg_profile(profile,[value])
 
    Inserts the current dialog into a profile. Note that if the
    profile does not support values, this will be silently
@@ -1376,22 +1454,21 @@ o)") ) {
    (use create_dialog() function before).
 
    Meaning of the parameters is as follows:
-     * profile - name of the profile to be added to;
-       pseudo-variables are supported.
-     * value (optional) - string value to define the belonging of
-       the dialog to the profile - note that the profile must
-       support values. Pseudo-variables are supported.
+     * profile (string) - name of the profile to be added to.
+     * value (string, optional) - string value to define the
+       belonging of the dialog to the profile - note that the
+       profile must support values.
 
    This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
    REPLY_ROUTE and FAILURE_ROUTE.
 
-   Example 1.60. set_dlg_profile usage
+   Example 1.61. set_dlg_profile usage
 ...
 set_dlg_profile("inbound_call");
-set_dlg_profile("caller","$fu");
+set_dlg_profile("caller",$fu);
 ...
 
-1.7.10.  unset_dlg_profile(profile,[value])
+1.7.12.  unset_dlg_profile(profile,[value])
 
    Removes the current dialog from a profile.
 
@@ -1399,22 +1476,21 @@ set_dlg_profile("caller","$fu");
    (use create_dialog() function before).
 
    Meaning of the parameters is as follows:
-     * profile - name of the profile to be removed from;
-       pseudo-variables are supported.
-     * value (optional) - string value to define the belonging of
-       the dialog to the profile - note that the profile must
-       support values. Pseudo-variables are supported.
+     * profile (string) - name of the profile to be removed from.
+     * value (string, optional) - string value to define the
+       belonging of the dialog to the profile - note that the
+       profile must support values.
 
    This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
    REPLY_ROUTE and FAILURE_ROUTE.
 
-   Example 1.61. unset_dlg_profile usage
+   Example 1.62. unset_dlg_profile usage
 ...
 unset_dlg_profile("inbound_call");
-unset_dlg_profile("caller","$fu");
+unset_dlg_profile("caller",$fu);
 ...
 
-1.7.11.  is_in_profile(profile,[value])
+1.7.13.  is_in_profile(profile,[value])
 
    Checks if the current dialog belongs to a profile. If the
    profile supports values, the check can be reinforced to take
@@ -1428,15 +1504,15 @@ unset_dlg_profile("caller","$fu");
    (use create_dialog() function before).
 
    Meaning of the parameters is as follows:
-     * profile - name of the profile to be checked against;
-       pseudo-variables are supported.
-     * value (optional) - string value to toughen the check.
-       Pseudo-variables are supported.
+     * profile (string) - name of the profile to be checked
+       against.
+     * value (string. optional) - string value to toughen the
+       check.
 
    This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
    REPLY_ROUTE and FAILURE_ROUTE.
 
-   Example 1.62. is_in_profile usage
+   Example 1.63. is_in_profile usage
 ...
 if (is_in_profile("inbound_call")) {
         log("this request belongs to a inbound call\n");
@@ -1447,7 +1523,7 @@ if (is_in_profile("caller","XX")) {
 }
 ...
 
-1.7.12.  get_profile_size(profile,[value],size)
+1.7.14.  get_profile_size(profile,[value],size)
 
    Returns the number of dialogs belonging to a profile. If the
    profile supports values, the check can be reinforced to take
@@ -1458,34 +1534,34 @@ if (is_in_profile("caller","XX")) {
    silently discarded.
 
    Meaning of the parameters is as follows:
-     * profile - name of the profile to get the size for;
-       pseudo-variables are supported.
-     * value (optional) - string value to toughen the check;
-       pseudo-variables are supported.
-     * size - an AVP or script variable to return the profile size
-       in.
+     * profile (string) - name of the profile to get the size for.
+     * value (string, optional) - string value to toughen the
+       check.
+     * size (var) - an AVP or script variable to return the
+       profile size in.
 
    This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
    REPLY_ROUTE and FAILURE_ROUTE.
 
-   Example 1.63. get_profile_size usage
+   Example 1.64. get_profile_size usage
 modparam("dialog", "profiles_no_value", "inboundCalls")
 modparam("dialog", "profiles_with_value", "caller")
 ...
-get_profile_size("inboundCalls",,"$var(size)");
+get_profile_size("inboundCalls",,$var(size));
 xlog("inboundCalls: $var(size)\n");
 ...
-get_profile_size("caller", "$fu", "$var(size)");
+get_profile_size("caller", $fu, $var(size));
 xlog("currently, the user $fu has $var(size) active outgoing calls\n");
 ...
 
-1.7.13.  set_dlg_flag(idx)
+1.7.15.  set_dlg_flag(idx)
 
    Sets the dialog flag index idx to true. The dialog flags are
    dialog persistent and they can be accessed (set and test) for
    all requests belonging to the dialog.
 
-   The flag index can be between 0 and 31.
+   Parameters:
+     * idx (int) - The flag index can be between 0 and 31.
 
    NOTE: the dialog must be created before using this function
    (use create_dialog() function before).
@@ -1493,20 +1569,18 @@ xlog("currently, the user $fu has $var(size) active outgoing calls\n");
    This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
    REPLY_ROUTE and FAILURE_ROUTE.
 
-   Example 1.64. set_dlg_flag usage
+   Example 1.65. set_dlg_flag usage
 ...
-set_dlg_flag("3");
+set_dlg_flag(3);
 ...
 
-1.7.14.  test_and_set_dlg_flag(idx, value)
+1.7.16.  test_and_set_dlg_flag(idx, value)
 
    Atomically checks if the dialog flag index idx is equal to
    value. If true, changes the value with the opposite one. This
    operation is done under the dialog lock.
-
-   The flag index can be between 0 and 31.
-
-   The value should be 0 (false) or 1 (true).
+     * idx (int) - The flag index can be between 0 and 31.
+     * value (int) - The value should be 0 (false) or 1 (true).
 
    NOTE: the dialog must be created before using this function
    (use create_dialog() function before).
@@ -1514,18 +1588,19 @@ set_dlg_flag("3");
    This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
    REPLY_ROUTE and FAILURE_ROUTE.
 
-   Example 1.65. test_and_set_dlg_flag usage
+   Example 1.66. test_and_set_dlg_flag usage
 ...
-test_and_set_dlg_flag("3", "0");
+test_and_set_dlg_flag(3, 0);
 ...
 
-1.7.15.  reset_dlg_flag(idx)
+1.7.17.  reset_dlg_flag(idx)
 
    Resets the dialog flag index idx to false. The dialog flags are
    dialog persistent and they can be accessed (set and test) for
    all requests belonging to the dialog.
 
-   The flag index can be between 0 and 31.
+   Parameters:
+     * idx (int) - The flag index can be between 0 and 31.
 
    NOTE: the dialog must be created before using this function
    (use create_dialog() function before).
@@ -1533,18 +1608,19 @@ test_and_set_dlg_flag("3", "0");
    This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
    REPLY_ROUTE and FAILURE_ROUTE.
 
-   Example 1.66. reset_dlg_flag usage
+   Example 1.67. reset_dlg_flag usage
 ...
-reset_dlg_flag("16");
+reset_dlg_flag(16);
 ...
 
-1.7.16.  is_dlg_flag_set(idx)
+1.7.18.  is_dlg_flag_set(idx)
 
    Returns true if the dialog flag index idx is set. The dialog
    flags are dialog persistent and they can be accessed (set and
    test) for all requests belonging to the dialog.
 
-   The flag index can be between 0 and 31.
+   Parameters:
+     * idx (int) - The flag index can be between 0 and 31.
 
    NOTE: the dialog must be created before using this function
    (use create_dialog() function before).
@@ -1552,21 +1628,23 @@ reset_dlg_flag("16");
    This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
    REPLY_ROUTE and FAILURE_ROUTE.
 
-   Example 1.67. is_dlg_flag_set usage
+   Example 1.68. is_dlg_flag_set usage
 ...
-if (is_dlg_flag_set("16")) {
+if (is_dlg_flag_set(16)) {
         xlog("dialog flag 16 is set\n");
 }
 ...
 
-1.7.17.  store_dlg_value(name,val)
+1.7.19.  store_dlg_value(name,val)
 
    Attaches to the dialog the value val under the name name. The
    values attached to dialogs are dialog persistent and they can
    be accessed (read and write) for all requests belonging to the
    dialog.
 
-   Parameter val may contain pseudo-variables.
+   Parameters:
+     * name (string)
+     * val (string)
 
    NOTE: the dialog must be created before using this function
    (use create_dialog() function before).
@@ -1577,22 +1655,24 @@ if (is_dlg_flag_set("16")) {
    This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
    REPLY_ROUTE and FAILURE_ROUTE.
 
-   Example 1.68. store_dlg_value usage
+   Example 1.69. store_dlg_value usage
 ...
-store_dlg_value("inv_src_ip","$si");
+store_dlg_value("inv_src_ip",$si);
 store_dlg_value("account type","prepaid");
 # or
 $dlg_val(account_type) = "prepaid";
 ...
 
-1.7.18.  fetch_dlg_value(name,pvar)
+1.7.20.  fetch_dlg_value(name,val)
 
    Fetches from the dialog the value of attribute named name. The
    values attached to dialogs are dialog persistent and they can
    be accessed (read and write) for all requests belonging to the
    dialog.
 
-   Parameter pvar may be a script var ($var) or and avp ($avp).
+   Parameters:
+     * name (string)
+     * val (var)
 
    NOTE: the dialog must be created before using this function
    (use create_dialog() function before).
@@ -1603,15 +1683,15 @@ $dlg_val(account_type) = "prepaid";
    This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
    REPLY_ROUTE and FAILURE_ROUTE.
 
-   Example 1.69. fetch_dlg_value usage
+   Example 1.70. fetch_dlg_value usage
 ...
-fetch_dlg_value("inv_src_ip","$avp(2)");
-fetch_dlg_value("account type","$var(account)");
+fetch_dlg_value("inv_src_ip",$avp(2));
+fetch_dlg_value("account type",$var(account));
 # or
 $var(account) = $dlg_val(account_type);
 ...
 
-1.7.19.  set_dlg_sharing_tag(tag_name)
+1.7.21.  set_dlg_sharing_tag(tag_name)
 
    Marks the current dialog with the sharing tag tag_name. From
    this point on, actions like in-dialog pinging, BYEs on timeout
@@ -1620,15 +1700,171 @@ $var(account) = $dlg_val(account_type);
 
    For more details see the Dialog clustering chapter.
 
+   Parameters:
+     * tag_name (string)
+
    NOTE: the dialog must be created before using this function
    (use create_dialog() function before).
 
    This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
    REPLY_ROUTE and FAILURE_ROUTE.
 
-   Example 1.70. set_dlg_sharing_tag usage
+   Example 1.71. set_dlg_sharing_tag usage
 ...
 set_dlg_sharing_tag("vip1");
+...
+
+1.7.22.  dlg_on_answer([route_name])
+
+   The function arms a script route to be executed when the
+   current dialog will be later answered. When the route will be
+   executed, the dialog context will be exposed, but with no valid
+   SIP message (just a phony one).
+
+   You must use this function AFTER creating the dialog and before
+   the dialog being answered.
+
+   If the parameter is missing, the function does a reset of any
+   route previously set; there will be no triggering.
+
+   Parameters:
+     * route_name (string,optional) - the name of the script route
+       to be executed.
+
+   This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
+   REPLY_ROUTE and FAILURE_ROUTE.
+
+   Example 1.72. dlg_on_answer usage
+...
+create_dialog();
+dlg_on_answer("dlg_answered");
+...
+route[dlg_answered] {
+        xlog("The dialog $DLG_did was answered\n");
+}
+
+1.7.23.  dlg_on_timeout([route_name])
+
+   The function arms a script route to be executed when (and if)
+   the current dialog will timeout (as duration). When the route
+   will be executed, the dialog context will be exposed, but with
+   no valid SIP message (just a phony one)
+
+   When the route is executed, the dialog is not yet terminated,
+   just its lifetime reached the set limit. In the timeout route
+   you can increase the dialog expiration timeout (and the dialog
+   will continue) or you can let the dialog to be terminated
+   (after the end of this route).
+
+   You must use this function AFTER creating the dialog and before
+   the dialog being answered.
+
+   You must use this function AFTER creating the dialog and before
+   the dialog being answered.
+
+   Parameters:
+     * route_name (string,optional) - the name of the script route
+       to be executed.
+
+   This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
+   REPLY_ROUTE and FAILURE_ROUTE.
+
+   Example 1.73. dlg_on_timeout usage
+...
+create_dialog();
+$DLG_timeout=120;
+dlg_on_timeout("dlg_timeout");
+...
+route[dlg_timeout] {
+        xlog("The dialog $DLG_did timed out\n");
+        if (_some_prolongation_condition)
+                $DLG_timeout = 60; # give it 1 min more
+}
+
+1.7.24.  dlg_on_hangup([route_name])
+
+   The function arms a script route to be executed when the
+   current dialog will be terminated. When the route will be
+   executed, the dialog context will be exposed, but with no valid
+   SIP message (just a phony one). Note that the dialog will be
+   already terminated and there is nothing you can do about it
+   besides reading data from its context.
+
+   You must use this function AFTER creating the dialog and before
+   the dialog being answered.
+
+   If the parameter is missing, the function does a reset of any
+   route previously set; there will be no triggering.
+
+   Parameters:
+     * route_name (string,optional) - the name of the script route
+       to be executed.
+
+   This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
+   REPLY_ROUTE and FAILURE_ROUTE.
+
+   Example 1.74. dlg_on_hangup usage
+...
+create_dialog();
+dlg_on_hangup("dlg_hangup");
+...
+route[dlg_hangup] {
+        xlog("The dialog $DLG_did terminated after $DLG_lifetime secs\n"
+);
+}
+
+1.7.25.  dlg_send_sequential(method, leg, [, body] [, content-type]
+[, headers])
+
+   Used to send an in-dialog request towards one if the dialog's
+   legs. The function assumes that is runs inside a dialog context
+   - if you are running it from a different context (such as an
+   event_route), make sure you first load the dialog context using
+   the load_dialog_ctx() function.
+
+   Parameters:
+     * method (string) - the method of the request sent.
+     * leg (string) - the leg where the request is sent. Must be
+       either caller or callee.
+     * body (string, optional) - an optional body sent in the
+       request. If missing, no body is sent.
+     * content-type (string, optional) - the content type of the
+       body sent. Make sure you specify this every time you send a
+       request with a body, otherwise there are high changes that
+       your UAC will reject the request.
+     * headers (string, optional) - additional headers attached to
+       the request sent.
+
+   This function can be used from ANY route.
+
+   Example 1.75. dlg_send_sequential usage to convert DTMF codes
+...
+event_route[E_RTPPROXY_DTMF] {
+    if (load_dialog_ctx("$param(id)", "did")) {
+        if ($param(stream) == 0) {
+            $var(direction) = "callee";
+        } else {
+            $var(direction) = "caller";
+        }
+        dlg_send_sequential($var(direction), "INFO",
+                "Signal=$param(digit)\nDuration=160",
+                "application/dtmf-relay");
+        unload_dialog_ctx();
+    }
+}
+...
+
+1.7.26. cluster_auto_sync (string)
+
+   Specifies whether to automatically issue a sync request (for
+   dialogs marked with a sharing tag in backup state) when a node
+   becomes reachable. A value of 1 means enabled and 0 disabled.
+
+   Default value is 1 (enabled).
+
+   Example 1.76. Set cluster_auto_sync parameter
+...
+modparam("dialog", "cluster_auto_sync", 0)
 ...
 
 1.8. Exported Statistics
@@ -1715,11 +1951,11 @@ set_dlg_sharing_tag("vip1");
                 ## list all ongoing dialogs
                 opensips-cli -x mi dlg_list
                 ## list the dialog by callid and From TAG
-                opensips-cli -x mi dlg_list abcdrssfrs122444@192.168.1.1
- AAdfeEFF33
+                opensips-cli -x mi dlg_list callid=abcdrssfrs122444@192.
+168.1.1 from_tag=AAdfeEFF33
                 ## list 10 dialogs, starting from the position 40
                 ## (in the list of all ongoing dialogs)
-                opensips-cli -x mi dlg_list 40 10
+                opensips-cli -x mi dlg_list index=40 counter=10
 
 1.9.2. dlg_list_ctx
 
@@ -1748,9 +1984,8 @@ set_dlg_sharing_tag("vip1");
 
    Parameters are:
      * dialog_id - this is an identifier of the dialog - it can be
-       either (1) the numerical unique ID of the dialog (as
-       provided by dlg_list), either (2) the SIP Call-ID of the
-       dialog.
+       either (1) the unique ID of the dialog (as provided by
+       dlg_list), either (2) the SIP Call-ID of the dialog.
      * extra_hdrs - (optional) string containg the extra headers
        (full format) to be added to the BYE requests.
 
@@ -1758,7 +1993,7 @@ set_dlg_sharing_tag("vip1");
 
    MI FIFO Command Format:
                 # terminate the dialog via the internal Dialog-ID
-                opensips-cli -x mi dlg_end_dlg 1391569858236
+                opensips-cli -x mi dlg_end_dlg 6ae.4b38d013
                 # terminate the dialog via its SIP Call-ID
                 opensips-cli -x mi dlg_end_dlg Y2IwYjQ2YmE2ZDg5MWVkNDNkZ
 GIwZjAzNGM1ZDY
@@ -1855,19 +2090,21 @@ GIwZjAzNGM1ZDY
    This command will only take effect if dialog replication is
    enabled.
 
-   The current node will locate a suitable donor node within the
-   dialog_replication_cluster and issue a sync request to it. The
-   donor node will then push all the dialog information to the
-   current node, via the the binary interface. For dialogs that
-   already exist in memory, the information will be not be treated
-   as an update but discarded instead.
+   Fully synchronize the dialog information in memory from a
+   suitable donor node within the dialog_replication_cluster.
+   Dialogs that already exist in memory which are not reconfirmed
+   through syncing will be discarded. A sharing tag can be
+   specified in order to sync only dialogs marked with that
+   sharing tag.
 
    Name: dlg_cluster_sync
 
-   It takes no parameters
+   Parameters:
+     * sharing_tag - name of the sharing tag that dialogs have to
+       be marked with in order to be synced
 
    MI FIFO Command Format:
-                opensips-cli -x mi dlg_cluster_sync
+                opensips-cli -x mi dlg_cluster_sync vip1
 
 1.9.10. dlg_restore_db
 
@@ -1911,6 +2148,82 @@ GIwZjAzNGM1ZDY
    MI FIFO Command Format:
                 opensips-cli -x mi dlg_push_var var_name var_value DID1
 [ DID2 DID3 ...  DIDN ]
+
+1.9.13. dlg_send_sequential
+
+   Sends a sequential request within an ongoing dialog.
+
+   Name: dlg_send_sequential
+
+   Parameters:
+     * callid - the callid of the dialog you need to trigger the
+       sequential message for.
+     * method - (optional) the method used for the sequential
+       message. Default value is INVITE.
+     * mode - (optional) can be used to tune the behavior of the
+       sequential message. Possible values for the mode are:
+          + caller - (default) sends the sequential message to the
+            caller. This mode can be useful in high availability
+            scenarios when you want to update the upstream's
+            routing set, specifically the contact.
+          + callee - same as caller, but sends the sequential
+            message to the callee.
+          + challenge - sends a sequential INVITE (or UPDATE) to
+            the caller to challenge it for its advertised SDP
+            body. When the body is received, it is forwarded to
+            the callee. This mode is useful when trying to change
+            both endpoints (upstream and downstream) routing set.
+            It can also be useful when trying to trigger a
+            re-negotiation for SDP body.
+          + challenge-caller - same as challenge
+          + challenge-callee - same as challenge-caller, only that
+            it first challenges the callee, instead of the caller.
+     * body - (optional) can be used to specify a body for the
+       initial sequential message. Possible values for the body
+       parameter are:
+          + none - (default) no body added to the sequential
+            message.
+          + inbound - advertises in the body of the sequential
+            message generated the last body received from its
+            pair. For example, if the mode=challenge-caller, the
+            message will contain the body sent to OpenSIPS by the
+            callee. This is useful when you need to alter the body
+            previously sent to the caller, because you want to
+            re-negotiate a different media proxy for the call.
+            This can be achieved by catching the generated request
+            in local_route, and re-engage the Media proxy.
+          + outbound - advertises in the body of the sequential
+            message generated the last body sent to that UAC. For
+            example, if the mode=challenge-caller, the message
+            will contain the last body sent by OpenSIPS to the
+            caller. This is useful in a high availability scenario
+            when trying to re-negotiate the contact of the server,
+            but there is no need to alter the body sent earlier.
+          + custom:CONTENT_TYPE:BODY - this can be used to specify
+            a specific Content-Type ehader and body for the
+            sequential message generated.
+
+   This functions runs asynchronously and returns the status code
+   and reason of the last reply received for either the challenge
+   or normal mode.
+
+   MI Command Format:
+                        opensips-cli -x mi dlg_send_sequential \
+                                callid=5291231-testing@127.0.0.1
+
+   MI Command used to trigger media re-negotiation:
+                        opensips-cli -x mi dlg_send_sequential \
+                                callid=5291231-testing@127.0.0.1 \
+                                mode=challenge \
+                                body=inbound
+
+   MI Command used to UPDATE the callee's remote Contact after a
+   server failover:
+                        opensips-cli -x mi dlg_send_sequential \
+                                callid=5291231-testing@127.0.0.1 \
+                                mode=challenge-callee \
+                                body=outbound \
+                                method=UPDATE
 
 1.10. Exported Pseudo-Variables
 
@@ -1956,18 +2269,20 @@ GIwZjAzNGM1ZDY
 
 1.10.5. $DLG_dir
 
-   Returns the direction of the request in dialog (as "UPSTREAM"
-   or "DOWNSTREAM" string) - to be used for sequential request.
-   This PV will be available only for sequential requests (on
-   replies), after doing loose_route().
+   Returns the direction of the request in dialog (as "upstream"
+   string if the request is generated by callee or "downstream"
+   string if the request is generated by caller) - to be used for
+   sequential request. This PV will be available only for
+   sequential requests (not for replies), after doing
+   loose_route().
 
    NULL will be returned if there is no dialog for the request.
 
 1.10.6. $DLG_did
 
    Returns the id of the dialog corresponding to the processed
-   sequential request. The output format is entry ':' id (as
-   returned by the dlg_list MI function). This PV will be
+   sequential request. The output format is a string identical to
+   the one returned by the dlg_list MI function. This PV will be
    available only for sequential requests, after doing
    loose_route().
 
@@ -1981,9 +2296,12 @@ GIwZjAzNGM1ZDY
      * Downstream BYE - Caller has sent a BYE
      * Lifetime Timeout - Dialog lifetime expired
      * MI Termination - Dialog ended via the MI interface
-     * Ping Timeout - Dialog ended because no reply to in-dialog
+     * Ping Timeout - Dialog ended because no reply to option
        pings
+     * ReINVITE Ping Timeout - Dialog ended because no reply to
+       reinvite pings
      * RTPProxy Timeout - Media timeout signaled by RTPProxy
+     * SIP Race Condition - SIP Race Condition occurred
 
    NULL will be returned if there is no dialog for the request, or
    if the dialog is not ended in the current context.
@@ -2037,10 +2355,9 @@ GIwZjAzNGM1ZDY
    This event is raised when the dialog state is changed.
 
    Parameters:
-     * hash_entry - the entry in the dialog table. This is used,
-       along with the hash_id, to uniquely identify the dialog.
-     * hash_id - the id in the dialog table. This is used, along
-       with the hash_entry, to uniquely identify the dialog.
+     * id - the hex representation of the dialog id.
+     * db_id - the integer representation of the dialog id, as it
+       is stored in the database dlg_id field.
      * callid - the callid.
      * from_tag - the From tag.
      * to_tag - the To tag.
@@ -2105,64 +2422,64 @@ Chapter 3. Frequently Asked Questions
 
    3.1.
 
-       What happened with “topology_hiding()” function?
+   What happened with “topology_hiding()” function?
 
-       The respective functionality was moved into the topology_hiding
-       module. Function prototype has remained the same.
+   The respective functionality was moved into the topology_hiding
+   module. Function prototype has remained the same.
 
    3.2.
 
-       What happened with “use_tight_match” parameter?
+   What happened with “use_tight_match” parameter?
 
-       The parameter was removed with version 1.3 as the option of
-       tight matching became mandatory and not configurable. Now, the
-       tight matching is done all the time (when using DID matching).
+   The parameter was removed with version 1.3 as the option of
+   tight matching became mandatory and not configurable. Now, the
+   tight matching is done all the time (when using DID matching).
 
    3.3.
 
-       What happened with “bye_on_timeout_flag” parameter?
+   What happened with “bye_on_timeout_flag” parameter?
 
-       The parameter was removed in a dialog module parameter
-       restructuring. To keep the bye on timeout behavior, you need to
-       provide a "B" string parameter to the create_dialog() function.
+   The parameter was removed in a dialog module parameter
+   restructuring. To keep the bye on timeout behavior, you need to
+   provide a "B" string parameter to the create_dialog() function.
 
    3.4.
 
-       What happened with “dlg_flag” parameter?
+   What happened with “dlg_flag” parameter?
 
-       The parameter is considered obsolete. The only way to create a
-       dialog is to call the create_dialog() function
+   The parameter is considered obsolete. The only way to create a
+   dialog is to call the create_dialog() function
 
    3.5.
 
-       Where can I find more about OpenSIPS?
+   Where can I find more about OpenSIPS?
 
-       Take a look at http://www.opensips.org/.
+   Take a look at https://opensips.org/.
 
    3.6.
 
-       Where can I post a question about this module?
+   Where can I post a question about this module?
 
-       First at all check if your question was already answered on one
-       of our mailing lists:
-         * User Mailing List -
-           http://lists.opensips.org/cgi-bin/mailman/listinfo/users
-         * Developer Mailing List -
-           http://lists.opensips.org/cgi-bin/mailman/listinfo/devel
+   First at all check if your question was already answered on one
+   of our mailing lists:
+     * User Mailing List -
+       http://lists.opensips.org/cgi-bin/mailman/listinfo/users
+     * Developer Mailing List -
+       http://lists.opensips.org/cgi-bin/mailman/listinfo/devel
 
-       E-mails regarding any stable OpenSIPS release should be sent to
-       <users@lists.opensips.org> and e-mails regarding development
-       versions should be sent to <devel@lists.opensips.org>.
+   E-mails regarding any stable OpenSIPS release should be sent to
+   <users@lists.opensips.org> and e-mails regarding development
+   versions should be sent to <devel@lists.opensips.org>.
 
-       If you want to keep the mail private, send it to
-       <users@lists.opensips.org>.
+   If you want to keep the mail private, send it to
+   <users@lists.opensips.org>.
 
    3.7.
 
-       How can I report a bug?
+   How can I report a bug?
 
-       Please follow the guidelines provided at:
-       https://github.com/OpenSIPS/opensips/issues.
+   Please follow the guidelines provided at:
+   https://github.com/OpenSIPS/opensips/issues.
 
 Chapter 4. Contributors
 
@@ -2171,26 +2488,27 @@ Chapter 4. Contributors
    Table 4.1. Top contributors by DevScore^(1), authored
    commits^(2) and lines added/removed^(3)
      Name DevScore Commits Lines ++ Lines --
-   1. Bogdan-Andrei Iancu (@bogdan-iancu) 394 248 11836 2951
-   2. Vlad Paiu (@vladpaiu) 250 140 7051 3004
-   3. Razvan Crainea (@razvancrainea) 141 107 2768 648
-   4. Vlad Patrascu (@rvlad-patrascu) 124 58 2854 2366
-   5. Liviu Chircu (@liviuchircu) 101 70 2245 722
-   6. Ovidiu Sas (@ovidiusas) 27 21 482 107
-   7. Dan Pascu (@danpascu) 26 22 160 106
-   8. Eseanu Marius Cristian (@eseanucristian) 19 6 722 341
+   1. Bogdan-Andrei Iancu (@bogdan-iancu) 435 274 12809 3398
+   2. Razvan Crainea (@razvancrainea) 256 192 4875 1461
+   3. Vlad Paiu (@vladpaiu) 252 143 7199 3026
+   4. Vlad Patrascu (@rvlad-patrascu) 168 86 3583 3164
+   5. Liviu Chircu (@liviuchircu) 150 108 2777 1128
+   6. Dan Pascu (@danpascu) 30 25 233 179
+   7. Ovidiu Sas (@ovidiusas) 29 23 487 111
+   8. Eseanu Marius Cristian (@eseanucristian) 18 6 722 341
    9. Daniel-Constantin Mierla (@miconda) 16 13 76 66
    10. Henning Westerholt (@henningw) 16 10 172 187
 
    All remaining contributors: Anca Vamanu, Ionut Ionita
-   (@ionutrazvanionita), Andrei Dragus, Ionel Cerghit
-   (@ionel-cerghit), Walter Doekes (@wdoekes), John Riordan,
-   Hugues Mitonneau, Carsten Bock, Jerome Martin, Klaus Darilion,
-   Jarrod Baumann (@jarrodb), Michel Bensoussan, Richard Revels,
-   Elena-Ramona Modroiu, Tavis Paquette, Andrei Datcu
-   (@andrei-datcu), Jeffrey Magder, Ron Winacott, Andy Pyles,
-   Julián Moreno Patiño, Konstantin Bokarius, Alex Massover,
-   Damien Sandras (@dsandras), Alex Hermann, Dusan Klinec, Norman
+   (@ionutrazvanionita), Walter Doekes (@wdoekes), Ionel Cerghit
+   (@ionel-cerghit), Andrei Dragus, Maksym Sobolyev (@sobomax),
+   John Riordan, Hugues Mitonneau, Carsten Bock, Jerome Martin,
+   Klaus Darilion, Jarrod Baumann (@jarrodb), Zero King (@l2dy),
+   Michel Bensoussan, Richard Revels, Elena-Ramona Modroiu, Tavis
+   Paquette, Andrei Datcu (@andrei-datcu), Jeffrey Magder, Ron
+   Winacott, Andy Pyles, Julián Moreno Patiño, Konstantin
+   Bokarius, sergei lavrov, Alex Massover, Damien Sandras
+   (@dsandras), Alex Hermann, Dusan Klinec (@ph4r05), Norman
    Brandinger (@NormB), Peter Lemenkov (@lemenkov), UnixDev, Eliot
    Gable, Ryan Bullock (@rrb3942), Nick Altmann (@nikbyte), Edson
    Gellert Schubert.
@@ -2215,29 +2533,30 @@ Chapter 4. Contributors
 
    Table 4.2. Most recently active contributors^(1) to this module
                       Name                   Commit Activity
-   1.  Razvan Crainea (@razvancrainea)     Aug 2010 - Mar 2019
-   2.  Liviu Chircu (@liviuchircu)         Aug 2012 - Feb 2019
-   3.  Vlad Patrascu (@rvlad-patrascu)     Jul 2016 - Feb 2019
-   4.  Bogdan-Andrei Iancu (@bogdan-iancu) Apr 2006 - Jan 2019
-   5.  Vlad Paiu (@vladpaiu)               Oct 2010 - Sep 2018
-   6.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
-   7.  Ovidiu Sas (@ovidiusas)             Feb 2008 - Mar 2017
-   8.  Ionel Cerghit (@ionel-cerghit)      Jul 2015 - Dec 2016
-   9.  Jarrod Baumann (@jarrodb)           Apr 2015 - Apr 2016
-   10. Ionut Ionita (@ionutrazvanionita)   Oct 2014 - Feb 2016
+   1.  Razvan Crainea (@razvancrainea)     Aug 2010 - May 2021
+   2.  Liviu Chircu (@liviuchircu)         Aug 2012 - Apr 2021
+   3.  Walter Doekes (@wdoekes)            Apr 2010 - Apr 2021
+   4.  Vlad Patrascu (@rvlad-patrascu)     Jul 2016 - Apr 2021
+   5.  Maksym Sobolyev (@sobomax)          Nov 2020 - Jan 2021
+   6.  sergei lavrov                       Dec 2020 - Dec 2020
+   7.  Bogdan-Andrei Iancu (@bogdan-iancu) Apr 2006 - Dec 2020
+   8.  Ovidiu Sas (@ovidiusas)             Feb 2008 - Nov 2020
+   9.  Vlad Paiu (@vladpaiu)               Oct 2010 - Apr 2020
+   10. Zero King (@l2dy)                   Mar 2020 - Mar 2020
 
-   All remaining contributors: Julián Moreno Patiño, Dusan Klinec,
-   Walter Doekes (@wdoekes), Eseanu Marius Cristian
+   All remaining contributors: Dan Pascu (@danpascu), Peter
+   Lemenkov (@lemenkov), Ionel Cerghit (@ionel-cerghit), Jarrod
+   Baumann (@jarrodb), Ionut Ionita (@ionutrazvanionita), Julián
+   Moreno Patiño, Dusan Klinec (@ph4r05), Eseanu Marius Cristian
    (@eseanucristian), Andrei Datcu (@andrei-datcu), Nick Altmann
    (@nikbyte), Norman Brandinger (@NormB), Damien Sandras
    (@dsandras), Ryan Bullock (@rrb3942), Anca Vamanu, Alex
    Massover, Andrei Dragus, John Riordan, Hugues Mitonneau,
-   Richard Revels, UnixDev, Dan Pascu (@danpascu), Alex Hermann,
-   Henning Westerholt (@henningw), Carsten Bock, Klaus Darilion,
-   Daniel-Constantin Mierla (@miconda), Konstantin Bokarius, Edson
-   Gellert Schubert, Jerome Martin, Tavis Paquette, Michel
-   Bensoussan, Eliot Gable, Andy Pyles, Elena-Ramona Modroiu,
-   Jeffrey Magder, Ron Winacott.
+   Richard Revels, UnixDev, Alex Hermann, Henning Westerholt
+   (@henningw), Carsten Bock, Klaus Darilion, Daniel-Constantin
+   Mierla (@miconda), Konstantin Bokarius, Edson Gellert Schubert,
+   Jerome Martin, Tavis Paquette, Michel Bensoussan, Eliot Gable,
+   Andy Pyles, Elena-Ramona Modroiu, Jeffrey Magder, Ron Winacott.
 
    (1) including any documentation-related commits, excluding
    merge commits
@@ -2247,16 +2566,16 @@ Chapter 5. Documentation
 5.1. Contributors
 
    Last edited by: Razvan Crainea (@razvancrainea), Vlad Patrascu
-   (@rvlad-patrascu), Bogdan-Andrei Iancu (@bogdan-iancu), Vlad
-   Paiu (@vladpaiu), Liviu Chircu (@liviuchircu), Peter Lemenkov
-   (@lemenkov), Julián Moreno Patiño, Ionut Ionita
-   (@ionutrazvanionita), Ionel Cerghit (@ionel-cerghit), Walter
-   Doekes (@wdoekes), Eseanu Marius Cristian (@eseanucristian),
-   Norman Brandinger (@NormB), Anca Vamanu, Andrei Dragus, Hugues
-   Mitonneau, Klaus Darilion, Henning Westerholt (@henningw),
-   Ovidiu Sas (@ovidiusas), Daniel-Constantin Mierla (@miconda),
-   Konstantin Bokarius, Edson Gellert Schubert, Dan Pascu
-   (@danpascu), Michel Bensoussan, Andy Pyles, Elena-Ramona
+   (@rvlad-patrascu), Liviu Chircu (@liviuchircu), Bogdan-Andrei
+   Iancu (@bogdan-iancu), Vlad Paiu (@vladpaiu), Zero King
+   (@l2dy), Dan Pascu (@danpascu), Peter Lemenkov (@lemenkov),
+   Julián Moreno Patiño, Ionut Ionita (@ionutrazvanionita), Ionel
+   Cerghit (@ionel-cerghit), Walter Doekes (@wdoekes), Eseanu
+   Marius Cristian (@eseanucristian), Norman Brandinger (@NormB),
+   Anca Vamanu, Andrei Dragus, Hugues Mitonneau, Klaus Darilion,
+   Henning Westerholt (@henningw), Ovidiu Sas (@ovidiusas),
+   Daniel-Constantin Mierla (@miconda), Konstantin Bokarius, Edson
+   Gellert Schubert, Michel Bensoussan, Andy Pyles, Elena-Ramona
    Modroiu.
 
    Documentation Copyrights:

@@ -81,7 +81,8 @@
 		<column><field>password</field><type>DB_STR</type></column>
 		<column><field>email_address</field><type>DB_STR</type></column>
 		<column><field>ha1</field><type>DB_STR</type></column>
-		<column><field>ha1b</field><type>DB_STR</type></column>
+		<column><field>ha1_sha256</field><type>DB_STR</type></column>
+		<column><field>ha1_sha512t256</field><type>DB_STR</type></column>
 		<column><field>rpid</field><type>DB_STR</type></column>
 	</db_table>
 	<!-- Declaration of uri table-->
@@ -93,6 +94,24 @@
 		<column><field>domain</field><type>DB_STR</type></column>
 		<column><field>uri_user</field><type>DB_STR</type></column>
 		<column><field>last_modified</field><type>DB_DATETIME</type></column>
+	</db_table>
+	<!-- Declaration of jwt_profiles table-->
+	<db_table id="jwt_profiles">
+		<table_name>jwt_profiles</table_name>
+		<db_url_id>mysql</db_url_id>
+		<column><field>id</field><type>DB_INT</type></column>
+		<column><field>tag</field><type>DB_STR</type></column>
+		<column><field>sip_username</field><type>DB_STR</type></column>
+	</db_table>
+	<!-- Declaration of jwt_secrets table-->
+	<db_table id="jwt_secrets">
+		<table_name>jwt_secrets</table_name>
+		<db_url_id>mysql</db_url_id>
+		<column><field>id</field><type>DB_INT</type></column>
+		<column><field>corresponding_tag</field><type>DB_STR</type></column>
+		<column><field>secret</field><type>DB_BLOB</type></column>
+		<column><field>start_ts</field><type>DB_INT</type></column>
+		<column><field>end_ts</field><type>DB_INT</type></column>
 	</db_table>
 	<!-- Declaration of usr_preferences table-->
 	<db_table id="usr_preferences">
@@ -130,6 +149,8 @@
 		<column><field>route1</field><type>DB_BLOB</type></column>
 		<column><field>sockinfo_srv</field><type>DB_STR</type></column>
 		<column><field>param</field><type>DB_STR</type></column>
+		<column><field>mod_name</field><type>DB_STR</type></column>
+		<column><field>storage</field><type>DB_BLOB</type></column>
 		<column><field>lm</field><type>DB_INT</type></column>
 		<column><field>lrc</field><type>DB_INT</type></column>
 		<column><field>lic</field><type>DB_INT</type></column>
@@ -147,12 +168,6 @@
 		<column><field>si_key</field><type>DB_STR</type></column>
 		<column><field>scenario</field><type>DB_STR</type></column>
 		<column><field>sstate</field><type>DB_INT</type></column>
-		<column><field>next_sstate</field><type>DB_INT</type></column>
-		<column><field>sparam0</field><type>DB_STR</type></column>
-		<column><field>sparam1</field><type>DB_STR</type></column>
-		<column><field>sparam2</field><type>DB_STR</type></column>
-		<column><field>sparam3</field><type>DB_STR</type></column>
-		<column><field>sparam4</field><type>DB_STR</type></column>
 		<column><field>sdp</field><type>DB_BLOB</type></column>
 		<column><field>lifetime</field><type>DB_INT</type></column>
 		<column><field>e1_type</field><type>DB_INT</type></column>
@@ -233,6 +248,7 @@
 	<db_table id="cachedb">
 		<table_name>cachedb</table_name>
 		<db_url_id>mysql</db_url_id>
+		<column><field>id</field><type>DB_INT</type></column>
 		<column><field>keyname</field><type>DB_STR</type></column>
 		<column><field>value</field><type>DB_BLOB</type></column>
 		<column><field>counter</field><type>DB_INT</type></column>
@@ -247,8 +263,15 @@
 		<column><field>priority</field><type>DB_INT</type></column>
 		<column><field>skill</field><type>DB_STR</type></column>
 		<column><field>prependcid</field><type>DB_STR</type></column>
+		<column><field>max_wrapup_time</field><type>DB_INT</type></column>
+		<column><field>dissuading_hangup</field><type>DB_INT</type></column>
+		<column><field>dissuading_onhold_th</field><type>DB_INT</type></column>
+		<column><field>dissuading_ewt_th</field><type>DB_INT</type></column>
+		<column><field>dissuading_qsize_th</field><type>DB_INT</type></column>
 		<column><field>message_welcome</field><type>DB_STR</type></column>
 		<column><field>message_queue</field><type>DB_STR</type></column>
+		<column><field>message_dissuading</field><type>DB_STR</type></column>
+		<column><field>message_flow_id</field><type>DB_STR</type></column>
 	</db_table>
 	<!-- Declaration of cc_agents table-->
 	<db_table id="cc_agents">
@@ -259,7 +282,8 @@
 		<column><field>location</field><type>DB_STR</type></column>
 		<column><field>logstate</field><type>DB_INT</type></column>
 		<column><field>skills</field><type>DB_STR</type></column>
-		<column><field>last_call_end</field><type>DB_INT</type></column>
+		<column><field>wrapup_end_time</field><type>DB_INT</type></column>
+		<column><field>wrapup_time</field><type>DB_INT</type></column>
 	</db_table>
 	<!-- Declaration of cc_cdrs table-->
 	<db_table id="cc_cdrs">
@@ -295,6 +319,7 @@
 		<column><field>b2buaid</field><type>DB_STR</type></column>
 		<column><field>flow</field><type>DB_STR</type></column>
 		<column><field>agent</field><type>DB_STR</type></column>
+		<column><field>script_param</field><type>DB_STR</type></column>
 	</db_table>
 	<!-- Declaration of carrierroute table-->
 	<db_table id="carrierroute">
@@ -402,6 +427,9 @@
 		<column><field>script_flags</field><type>DB_INT</type></column>
 		<column><field>module_flags</field><type>DB_INT</type></column>
 		<column><field>flags</field><type>DB_INT</type></column>
+		<column><field>rt_on_answer</field><type>DB_STR</type></column>
+		<column><field>rt_on_timeout</field><type>DB_STR</type></column>
+		<column><field>rt_on_hangup</field><type>DB_STR</type></column>
 	</db_table>
 	<!-- Declaration of dialplan table-->
 	<db_table id="dialplan">
@@ -480,6 +508,8 @@
 		<column><field>priority</field><type>DB_INT</type></column>
 		<column><field>routeid</field><type>DB_STR</type></column>
 		<column><field>gwlist</field><type>DB_STR</type></column>
+		<column><field>sort_alg</field><type>DB_STR</type></column>
+		<column><field>sort_profile</field><type>DB_INT</type></column>
 		<column><field>attrs</field><type>DB_STR</type></column>
 		<column><field>description</field><type>DB_STR</type></column>
 	</db_table>
@@ -491,6 +521,7 @@
 		<column><field>carrierid</field><type>DB_STR</type></column>
 		<column><field>gwlist</field><type>DB_STR</type></column>
 		<column><field>flags</field><type>DB_INT</type></column>
+		<column><field>sort_alg</field><type>DB_STR</type></column>
 		<column><field>state</field><type>DB_INT</type></column>
 		<column><field>attrs</field><type>DB_STR</type></column>
 		<column><field>description</field><type>DB_STR</type></column>
@@ -642,6 +673,7 @@
 		<column><field>dst_uri</field><type>DB_STR</type></column>
 		<column><field>resources</field><type>DB_STR</type></column>
 		<column><field>probe_mode</field><type>DB_INT</type></column>
+		<column><field>attrs</field><type>DB_STR</type></column>
 		<column><field>description</field><type>DB_STR</type></column>
 	</db_table>
 	<!-- Declaration of silo table-->
@@ -734,7 +766,7 @@
 		<column><field>id</field><type>DB_INT</type></column>
 		<column><field>username</field><type>DB_STR</type></column>
 		<column><field>domain</field><type>DB_STR</type></column>
-		<column><field>doc</field><type>LONGBLOB</type></column>
+		<column><field>doc</field><type>DB_BLOB</type></column>
 		<column><field>doc_type</field><type>DB_INT</type></column>
 		<column><field>etag</field><type>DB_STR</type></column>
 		<column><field>source</field><type>DB_INT</type></column>
@@ -765,6 +797,70 @@
 		<column><field>remote_contact</field><type>DB_STR</type></column>
 		<column><field>version</field><type>DB_INT</type></column>
 		<column><field>extra_headers</field><type>DB_BLOB</type></column>
+		<column><field>sharing_tag</field><type>DB_STR</type></column>
+	</db_table>
+	<!-- Declaration of qr_profiles table-->
+	<db_table id="qr_profiles">
+		<table_name>qr_profiles</table_name>
+		<db_url_id>mysql</db_url_id>
+		<column><field>id</field><type>DB_INT</type></column>
+		<column><field>profile_name</field><type>DB_STR</type></column>
+		<column><field>warn_threshold_asr</field><type>DB_DOUBLE</type></column>
+		<column><field>warn_threshold_ccr</field><type>DB_DOUBLE</type></column>
+		<column><field>warn_threshold_pdd</field><type>DB_DOUBLE</type></column>
+		<column><field>warn_threshold_ast</field><type>DB_DOUBLE</type></column>
+		<column><field>warn_threshold_acd</field><type>DB_DOUBLE</type></column>
+		<column><field>crit_threshold_asr</field><type>DB_DOUBLE</type></column>
+		<column><field>crit_threshold_ccr</field><type>DB_DOUBLE</type></column>
+		<column><field>crit_threshold_pdd</field><type>DB_DOUBLE</type></column>
+		<column><field>crit_threshold_ast</field><type>DB_DOUBLE</type></column>
+		<column><field>crit_threshold_acd</field><type>DB_DOUBLE</type></column>
+		<column><field>warn_penalty_asr</field><type>DB_DOUBLE</type></column>
+		<column><field>warn_penalty_ccr</field><type>DB_DOUBLE</type></column>
+		<column><field>warn_penalty_pdd</field><type>DB_DOUBLE</type></column>
+		<column><field>warn_penalty_ast</field><type>DB_DOUBLE</type></column>
+		<column><field>warn_penalty_acd</field><type>DB_DOUBLE</type></column>
+		<column><field>crit_penalty_asr</field><type>DB_DOUBLE</type></column>
+		<column><field>crit_penalty_ccr</field><type>DB_DOUBLE</type></column>
+		<column><field>crit_penalty_pdd</field><type>DB_DOUBLE</type></column>
+		<column><field>crit_penalty_ast</field><type>DB_DOUBLE</type></column>
+		<column><field>crit_penalty_acd</field><type>DB_DOUBLE</type></column>
+	</db_table>
+	<!-- Declaration of rc_clients table-->
+	<db_table id="rc_clients">
+		<table_name>rc_clients</table_name>
+		<db_url_id>mysql</db_url_id>
+		<column><field>id</field><type>DB_INT</type></column>
+		<column><field>client_id</field><type>DB_STR</type></column>
+		<column><field>wholesale_rate</field><type>DB_INT</type></column>
+		<column><field>retail_rate</field><type>DB_INT</type></column>
+	</db_table>
+	<!-- Declaration of rc_vendors table-->
+	<db_table id="rc_vendors">
+		<table_name>rc_vendors</table_name>
+		<db_url_id>mysql</db_url_id>
+		<column><field>id</field><type>DB_INT</type></column>
+		<column><field>vendor_id</field><type>DB_STR</type></column>
+		<column><field>vendor_rate</field><type>DB_INT</type></column>
+	</db_table>
+	<!-- Declaration of rc_ratesheets table-->
+	<db_table id="rc_ratesheets">
+		<table_name>rc_ratesheets</table_name>
+		<db_url_id>mysql</db_url_id>
+		<column><field>id</field><type>DB_INT</type></column>
+		<column><field>ratesheet_table</field><type>DB_STR</type></column>
+		<column><field>currency</field><type>DB_STR</type></column>
+	</db_table>
+	<!-- Declaration of rc_demo_ratesheet table-->
+	<db_table id="rc_demo_ratesheet">
+		<table_name>rc_demo_ratesheet</table_name>
+		<db_url_id>mysql</db_url_id>
+		<column><field>id</field><type>DB_INT</type></column>
+		<column><field>prefix</field><type>DB_STR</type></column>
+		<column><field>destination</field><type>DB_STR</type></column>
+		<column><field>price</field><type>DB_DOUBLE</type></column>
+		<column><field>minimum</field><type>DB_INT</type></column>
+		<column><field>increment</field><type>DB_INT</type></column>
 	</db_table>
 	<!-- Declaration of registrant table-->
 	<db_table id="registrant">
@@ -782,6 +878,7 @@
 		<column><field>expiry</field><type>DB_INT</type></column>
 		<column><field>forced_socket</field><type>DB_STR</type></column>
 		<column><field>cluster_shtag</field><type>DB_STR</type></column>
+		<column><field>state</field><type>DB_INT</type></column>
 	</db_table>
 	<!-- Declaration of rls_presentity table-->
 	<db_table id="rls_presentity">
@@ -838,26 +935,6 @@
 		<column><field>id</field><type>DB_INT</type></column>
 		<column><field>rtpproxy_sock</field><type>DB_BLOB</type></column>
 		<column><field>set_id</field><type>DB_INT</type></column>
-	</db_table>
-	<!-- Declaration of sip_trace table-->
-	<db_table id="sip_trace">
-		<table_name>sip_trace</table_name>
-		<db_url_id>mysql</db_url_id>
-		<column><field>id</field><type>DB_INT</type></column>
-		<column><field>time_stamp</field><type>DB_DATETIME</type></column>
-		<column><field>callid</field><type>DB_STR</type></column>
-		<column><field>trace_attrs</field><type>DB_STR</type></column>
-		<column><field>msg</field><type>DB_BLOB</type></column>
-		<column><field>method</field><type>DB_STR</type></column>
-		<column><field>status</field><type>DB_STR</type></column>
-		<column><field>from_proto</field><type>DB_STR</type></column>
-		<column><field>from_ip</field><type>DB_STR</type></column>
-		<column><field>from_port</field><type>DB_INT</type></column>
-		<column><field>to_proto</field><type>DB_STR</type></column>
-		<column><field>to_ip</field><type>DB_STR</type></column>
-		<column><field>to_port</field><type>DB_INT</type></column>
-		<column><field>fromtag</field><type>DB_STR</type></column>
-		<column><field>direction</field><type>DB_STR</type></column>
 	</db_table>
 	<!-- Declaration of smpp table-->
 	<db_table id="smpp">
@@ -918,6 +995,26 @@
 		<column><field>cipher_list</field><type>DB_STR</type></column>
 		<column><field>dh_params</field><type>DB_BLOB</type></column>
 		<column><field>ec_curve</field><type>DB_STR</type></column>
+	</db_table>
+	<!-- Declaration of sip_trace table-->
+	<db_table id="sip_trace">
+		<table_name>sip_trace</table_name>
+		<db_url_id>mysql</db_url_id>
+		<column><field>id</field><type>DB_INT</type></column>
+		<column><field>time_stamp</field><type>DB_DATETIME</type></column>
+		<column><field>callid</field><type>DB_STR</type></column>
+		<column><field>trace_attrs</field><type>DB_STR</type></column>
+		<column><field>msg</field><type>DB_BLOB</type></column>
+		<column><field>method</field><type>DB_STR</type></column>
+		<column><field>status</field><type>DB_STR</type></column>
+		<column><field>from_proto</field><type>DB_STR</type></column>
+		<column><field>from_ip</field><type>DB_STR</type></column>
+		<column><field>from_port</field><type>DB_INT</type></column>
+		<column><field>to_proto</field><type>DB_STR</type></column>
+		<column><field>to_ip</field><type>DB_STR</type></column>
+		<column><field>to_port</field><type>DB_INT</type></column>
+		<column><field>fromtag</field><type>DB_STR</type></column>
+		<column><field>direction</field><type>DB_STR</type></column>
 	</db_table>
 	<!-- Declaration of userblacklist table-->
 	<db_table id="userblacklist">
@@ -1182,7 +1279,8 @@
 				<col><field>password</field></col>
 				<col><field>email_address</field></col>
 				<col><field>ha1</field></col>
-				<col><field>ha1b</field></col>
+				<col><field>ha1_sha256</field></col>
+				<col><field>ha1_sha512t256</field></col>
 				<col><field>rpid</field></col>
 			</query_cols>
 		</cmd>
@@ -1195,7 +1293,8 @@
 				<col><field>password</field></col>
 				<col><field>email_address</field></col>
 				<col><field>ha1</field></col>
-				<col><field>ha1b</field></col>
+				<col><field>ha1_sha256</field></col>
+				<col><field>ha1_sha512t256</field></col>
 				<col><field>rpid</field></col>
 			</query_cols>
 		</cmd>
@@ -1211,7 +1310,8 @@
 				<col><field>password</field></col>
 				<col><field>email_address</field></col>
 				<col><field>ha1</field></col>
-				<col><field>ha1b</field></col>
+				<col><field>ha1_sha256</field></col>
+				<col><field>ha1_sha512t256</field></col>
 				<col><field>rpid</field></col>
 			</query_cols>
 		</cmd>
@@ -1261,6 +1361,88 @@
 		</cmd>
 		<cmd><cmd_name>delete</cmd_name>
 			<db_table_id>uri</db_table_id>
+			<cmd_type>DB_DELETE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+		</cmd>
+	</mod>
+	<!-- jwt_profiles provisionning -->
+	<mod><mod_name>jwt_profiles</mod_name>
+		<cmd><cmd_name>show</cmd_name>
+			<db_table_id>jwt_profiles</db_table_id>
+			<cmd_type>DB_QUERY</cmd_type>
+			<query_cols>
+				<col><field>id</field><link_cmd>update</link_cmd></col>
+				<col><field>tag</field></col>
+				<col><field>sip_username</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>add</cmd_name>
+			<db_table_id>jwt_profiles</db_table_id>
+			<cmd_type>DB_INSERT</cmd_type>
+			<query_cols>
+				<col><field>tag</field></col>
+				<col><field>sip_username</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>update</cmd_name>
+			<db_table_id>jwt_profiles</db_table_id>
+			<cmd_type>DB_UPDATE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+			<query_cols>
+				<col><field>tag</field></col>
+				<col><field>sip_username</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>delete</cmd_name>
+			<db_table_id>jwt_profiles</db_table_id>
+			<cmd_type>DB_DELETE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+		</cmd>
+	</mod>
+	<!-- jwt_secrets provisionning -->
+	<mod><mod_name>jwt_secrets</mod_name>
+		<cmd><cmd_name>show</cmd_name>
+			<db_table_id>jwt_secrets</db_table_id>
+			<cmd_type>DB_QUERY</cmd_type>
+			<query_cols>
+				<col><field>id</field><link_cmd>update</link_cmd></col>
+				<col><field>corresponding_tag</field></col>
+				<col><field>secret</field></col>
+				<col><field>start_ts</field></col>
+				<col><field>end_ts</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>add</cmd_name>
+			<db_table_id>jwt_secrets</db_table_id>
+			<cmd_type>DB_INSERT</cmd_type>
+			<query_cols>
+				<col><field>corresponding_tag</field></col>
+				<col><field>secret</field></col>
+				<col><field>start_ts</field></col>
+				<col><field>end_ts</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>update</cmd_name>
+			<db_table_id>jwt_secrets</db_table_id>
+			<cmd_type>DB_UPDATE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+			<query_cols>
+				<col><field>corresponding_tag</field></col>
+				<col><field>secret</field></col>
+				<col><field>start_ts</field></col>
+				<col><field>end_ts</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>delete</cmd_name>
+			<db_table_id>jwt_secrets</db_table_id>
 			<cmd_type>DB_DELETE</cmd_type>
 			<clause_cols>
 				<col><field>id</field><operator>=</operator></col>
@@ -1345,6 +1527,8 @@
 				<col><field>route1</field></col>
 				<col><field>sockinfo_srv</field></col>
 				<col><field>param</field></col>
+				<col><field>mod_name</field></col>
+				<col><field>storage</field></col>
 				<col><field>lm</field></col>
 				<col><field>lrc</field></col>
 				<col><field>lic</field></col>
@@ -1377,6 +1561,8 @@
 				<col><field>route1</field></col>
 				<col><field>sockinfo_srv</field></col>
 				<col><field>param</field></col>
+				<col><field>mod_name</field></col>
+				<col><field>storage</field></col>
 				<col><field>lm</field></col>
 				<col><field>lrc</field></col>
 				<col><field>lic</field></col>
@@ -1412,6 +1598,8 @@
 				<col><field>route1</field></col>
 				<col><field>sockinfo_srv</field></col>
 				<col><field>param</field></col>
+				<col><field>mod_name</field></col>
+				<col><field>storage</field></col>
 				<col><field>lm</field></col>
 				<col><field>lrc</field></col>
 				<col><field>lic</field></col>
@@ -1440,12 +1628,6 @@
 				<col><field>si_key</field></col>
 				<col><field>scenario</field></col>
 				<col><field>sstate</field></col>
-				<col><field>next_sstate</field></col>
-				<col><field>sparam0</field></col>
-				<col><field>sparam1</field></col>
-				<col><field>sparam2</field></col>
-				<col><field>sparam3</field></col>
-				<col><field>sparam4</field></col>
 				<col><field>sdp</field></col>
 				<col><field>lifetime</field></col>
 				<col><field>e1_type</field></col>
@@ -1472,12 +1654,6 @@
 				<col><field>si_key</field></col>
 				<col><field>scenario</field></col>
 				<col><field>sstate</field></col>
-				<col><field>next_sstate</field></col>
-				<col><field>sparam0</field></col>
-				<col><field>sparam1</field></col>
-				<col><field>sparam2</field></col>
-				<col><field>sparam3</field></col>
-				<col><field>sparam4</field></col>
 				<col><field>sdp</field></col>
 				<col><field>lifetime</field></col>
 				<col><field>e1_type</field></col>
@@ -1507,12 +1683,6 @@
 				<col><field>si_key</field></col>
 				<col><field>scenario</field></col>
 				<col><field>sstate</field></col>
-				<col><field>next_sstate</field></col>
-				<col><field>sparam0</field></col>
-				<col><field>sparam1</field></col>
-				<col><field>sparam2</field></col>
-				<col><field>sparam3</field></col>
-				<col><field>sparam4</field></col>
 				<col><field>sdp</field></col>
 				<col><field>lifetime</field></col>
 				<col><field>e1_type</field></col>
@@ -1734,7 +1904,8 @@
 			<db_table_id>cachedb</db_table_id>
 			<cmd_type>DB_QUERY</cmd_type>
 			<query_cols>
-				<col><field>keyname</field><link_cmd>update</link_cmd></col>
+				<col><field>id</field><link_cmd>update</link_cmd></col>
+				<col><field>keyname</field></col>
 				<col><field>value</field></col>
 				<col><field>counter</field></col>
 				<col><field>expires</field></col>
@@ -1754,9 +1925,10 @@
 			<db_table_id>cachedb</db_table_id>
 			<cmd_type>DB_UPDATE</cmd_type>
 			<clause_cols>
-				<col><field>keyname</field><operator>=</operator></col>
+				<col><field>id</field><operator>=</operator></col>
 			</clause_cols>
 			<query_cols>
+				<col><field>keyname</field></col>
 				<col><field>value</field></col>
 				<col><field>counter</field></col>
 				<col><field>expires</field></col>
@@ -1766,7 +1938,7 @@
 			<db_table_id>cachedb</db_table_id>
 			<cmd_type>DB_DELETE</cmd_type>
 			<clause_cols>
-				<col><field>keyname</field><operator>=</operator></col>
+				<col><field>id</field><operator>=</operator></col>
 			</clause_cols>
 		</cmd>
 	</mod>
@@ -1781,8 +1953,15 @@
 				<col><field>priority</field></col>
 				<col><field>skill</field></col>
 				<col><field>prependcid</field></col>
+				<col><field>max_wrapup_time</field></col>
+				<col><field>dissuading_hangup</field></col>
+				<col><field>dissuading_onhold_th</field></col>
+				<col><field>dissuading_ewt_th</field></col>
+				<col><field>dissuading_qsize_th</field></col>
 				<col><field>message_welcome</field></col>
 				<col><field>message_queue</field></col>
+				<col><field>message_dissuading</field></col>
+				<col><field>message_flow_id</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>add</cmd_name>
@@ -1793,8 +1972,15 @@
 				<col><field>priority</field></col>
 				<col><field>skill</field></col>
 				<col><field>prependcid</field></col>
+				<col><field>max_wrapup_time</field></col>
+				<col><field>dissuading_hangup</field></col>
+				<col><field>dissuading_onhold_th</field></col>
+				<col><field>dissuading_ewt_th</field></col>
+				<col><field>dissuading_qsize_th</field></col>
 				<col><field>message_welcome</field></col>
 				<col><field>message_queue</field></col>
+				<col><field>message_dissuading</field></col>
+				<col><field>message_flow_id</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>update</cmd_name>
@@ -1808,8 +1994,15 @@
 				<col><field>priority</field></col>
 				<col><field>skill</field></col>
 				<col><field>prependcid</field></col>
+				<col><field>max_wrapup_time</field></col>
+				<col><field>dissuading_hangup</field></col>
+				<col><field>dissuading_onhold_th</field></col>
+				<col><field>dissuading_ewt_th</field></col>
+				<col><field>dissuading_qsize_th</field></col>
 				<col><field>message_welcome</field></col>
 				<col><field>message_queue</field></col>
+				<col><field>message_dissuading</field></col>
+				<col><field>message_flow_id</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>delete</cmd_name>
@@ -1831,7 +2024,8 @@
 				<col><field>location</field></col>
 				<col><field>logstate</field></col>
 				<col><field>skills</field></col>
-				<col><field>last_call_end</field></col>
+				<col><field>wrapup_end_time</field></col>
+				<col><field>wrapup_time</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>add</cmd_name>
@@ -1842,7 +2036,8 @@
 				<col><field>location</field></col>
 				<col><field>logstate</field></col>
 				<col><field>skills</field></col>
-				<col><field>last_call_end</field></col>
+				<col><field>wrapup_end_time</field></col>
+				<col><field>wrapup_time</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>update</cmd_name>
@@ -1856,7 +2051,8 @@
 				<col><field>location</field></col>
 				<col><field>logstate</field></col>
 				<col><field>skills</field></col>
-				<col><field>last_call_end</field></col>
+				<col><field>wrapup_end_time</field></col>
+				<col><field>wrapup_time</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>delete</cmd_name>
@@ -1951,6 +2147,7 @@
 				<col><field>b2buaid</field></col>
 				<col><field>flow</field></col>
 				<col><field>agent</field></col>
+				<col><field>script_param</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>add</cmd_name>
@@ -1969,6 +2166,7 @@
 				<col><field>b2buaid</field></col>
 				<col><field>flow</field></col>
 				<col><field>agent</field></col>
+				<col><field>script_param</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>update</cmd_name>
@@ -1990,6 +2188,7 @@
 				<col><field>b2buaid</field></col>
 				<col><field>flow</field></col>
 				<col><field>agent</field></col>
+				<col><field>script_param</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>delete</cmd_name>
@@ -2344,6 +2543,9 @@
 				<col><field>script_flags</field></col>
 				<col><field>module_flags</field></col>
 				<col><field>flags</field></col>
+				<col><field>rt_on_answer</field></col>
+				<col><field>rt_on_timeout</field></col>
+				<col><field>rt_on_hangup</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>add</cmd_name>
@@ -2376,6 +2578,9 @@
 				<col><field>script_flags</field></col>
 				<col><field>module_flags</field></col>
 				<col><field>flags</field></col>
+				<col><field>rt_on_answer</field></col>
+				<col><field>rt_on_timeout</field></col>
+				<col><field>rt_on_hangup</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>update</cmd_name>
@@ -2410,6 +2615,9 @@
 				<col><field>script_flags</field></col>
 				<col><field>module_flags</field></col>
 				<col><field>flags</field></col>
+				<col><field>rt_on_answer</field></col>
+				<col><field>rt_on_timeout</field></col>
+				<col><field>rt_on_hangup</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>delete</cmd_name>
@@ -2701,6 +2909,8 @@
 				<col><field>priority</field></col>
 				<col><field>routeid</field></col>
 				<col><field>gwlist</field></col>
+				<col><field>sort_alg</field></col>
+				<col><field>sort_profile</field></col>
 				<col><field>attrs</field></col>
 				<col><field>description</field></col>
 			</query_cols>
@@ -2715,6 +2925,8 @@
 				<col><field>priority</field></col>
 				<col><field>routeid</field></col>
 				<col><field>gwlist</field></col>
+				<col><field>sort_alg</field></col>
+				<col><field>sort_profile</field></col>
 				<col><field>attrs</field></col>
 				<col><field>description</field></col>
 			</query_cols>
@@ -2732,6 +2944,8 @@
 				<col><field>priority</field></col>
 				<col><field>routeid</field></col>
 				<col><field>gwlist</field></col>
+				<col><field>sort_alg</field></col>
+				<col><field>sort_profile</field></col>
 				<col><field>attrs</field></col>
 				<col><field>description</field></col>
 			</query_cols>
@@ -2754,6 +2968,7 @@
 				<col><field>carrierid</field></col>
 				<col><field>gwlist</field></col>
 				<col><field>flags</field></col>
+				<col><field>sort_alg</field></col>
 				<col><field>state</field></col>
 				<col><field>attrs</field></col>
 				<col><field>description</field></col>
@@ -2766,6 +2981,7 @@
 				<col><field>carrierid</field></col>
 				<col><field>gwlist</field></col>
 				<col><field>flags</field></col>
+				<col><field>sort_alg</field></col>
 				<col><field>state</field></col>
 				<col><field>attrs</field></col>
 				<col><field>description</field></col>
@@ -2781,6 +2997,7 @@
 				<col><field>carrierid</field></col>
 				<col><field>gwlist</field></col>
 				<col><field>flags</field></col>
+				<col><field>sort_alg</field></col>
 				<col><field>state</field></col>
 				<col><field>attrs</field></col>
 				<col><field>description</field></col>
@@ -3373,6 +3590,7 @@
 				<col><field>dst_uri</field></col>
 				<col><field>resources</field></col>
 				<col><field>probe_mode</field></col>
+				<col><field>attrs</field></col>
 				<col><field>description</field></col>
 			</query_cols>
 		</cmd>
@@ -3384,6 +3602,7 @@
 				<col><field>dst_uri</field></col>
 				<col><field>resources</field></col>
 				<col><field>probe_mode</field></col>
+				<col><field>attrs</field></col>
 				<col><field>description</field></col>
 			</query_cols>
 		</cmd>
@@ -3398,6 +3617,7 @@
 				<col><field>dst_uri</field></col>
 				<col><field>resources</field></col>
 				<col><field>probe_mode</field></col>
+				<col><field>attrs</field></col>
 				<col><field>description</field></col>
 			</query_cols>
 		</cmd>
@@ -3810,6 +4030,7 @@
 				<col><field>remote_contact</field></col>
 				<col><field>version</field></col>
 				<col><field>extra_headers</field></col>
+				<col><field>sharing_tag</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>add</cmd_name>
@@ -3835,6 +4056,7 @@
 				<col><field>remote_contact</field></col>
 				<col><field>version</field></col>
 				<col><field>extra_headers</field></col>
+				<col><field>sharing_tag</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>update</cmd_name>
@@ -3863,10 +4085,270 @@
 				<col><field>remote_contact</field></col>
 				<col><field>version</field></col>
 				<col><field>extra_headers</field></col>
+				<col><field>sharing_tag</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>delete</cmd_name>
 			<db_table_id>pua</db_table_id>
+			<cmd_type>DB_DELETE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+		</cmd>
+	</mod>
+	<!-- qr_profiles provisionning -->
+	<mod><mod_name>qr_profiles</mod_name>
+		<cmd><cmd_name>show</cmd_name>
+			<db_table_id>qr_profiles</db_table_id>
+			<cmd_type>DB_QUERY</cmd_type>
+			<query_cols>
+				<col><field>id</field><link_cmd>update</link_cmd></col>
+				<col><field>profile_name</field></col>
+				<col><field>warn_threshold_asr</field></col>
+				<col><field>warn_threshold_ccr</field></col>
+				<col><field>warn_threshold_pdd</field></col>
+				<col><field>warn_threshold_ast</field></col>
+				<col><field>warn_threshold_acd</field></col>
+				<col><field>crit_threshold_asr</field></col>
+				<col><field>crit_threshold_ccr</field></col>
+				<col><field>crit_threshold_pdd</field></col>
+				<col><field>crit_threshold_ast</field></col>
+				<col><field>crit_threshold_acd</field></col>
+				<col><field>warn_penalty_asr</field></col>
+				<col><field>warn_penalty_ccr</field></col>
+				<col><field>warn_penalty_pdd</field></col>
+				<col><field>warn_penalty_ast</field></col>
+				<col><field>warn_penalty_acd</field></col>
+				<col><field>crit_penalty_asr</field></col>
+				<col><field>crit_penalty_ccr</field></col>
+				<col><field>crit_penalty_pdd</field></col>
+				<col><field>crit_penalty_ast</field></col>
+				<col><field>crit_penalty_acd</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>add</cmd_name>
+			<db_table_id>qr_profiles</db_table_id>
+			<cmd_type>DB_INSERT</cmd_type>
+			<query_cols>
+				<col><field>profile_name</field></col>
+				<col><field>warn_threshold_asr</field></col>
+				<col><field>warn_threshold_ccr</field></col>
+				<col><field>warn_threshold_pdd</field></col>
+				<col><field>warn_threshold_ast</field></col>
+				<col><field>warn_threshold_acd</field></col>
+				<col><field>crit_threshold_asr</field></col>
+				<col><field>crit_threshold_ccr</field></col>
+				<col><field>crit_threshold_pdd</field></col>
+				<col><field>crit_threshold_ast</field></col>
+				<col><field>crit_threshold_acd</field></col>
+				<col><field>warn_penalty_asr</field></col>
+				<col><field>warn_penalty_ccr</field></col>
+				<col><field>warn_penalty_pdd</field></col>
+				<col><field>warn_penalty_ast</field></col>
+				<col><field>warn_penalty_acd</field></col>
+				<col><field>crit_penalty_asr</field></col>
+				<col><field>crit_penalty_ccr</field></col>
+				<col><field>crit_penalty_pdd</field></col>
+				<col><field>crit_penalty_ast</field></col>
+				<col><field>crit_penalty_acd</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>update</cmd_name>
+			<db_table_id>qr_profiles</db_table_id>
+			<cmd_type>DB_UPDATE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+			<query_cols>
+				<col><field>profile_name</field></col>
+				<col><field>warn_threshold_asr</field></col>
+				<col><field>warn_threshold_ccr</field></col>
+				<col><field>warn_threshold_pdd</field></col>
+				<col><field>warn_threshold_ast</field></col>
+				<col><field>warn_threshold_acd</field></col>
+				<col><field>crit_threshold_asr</field></col>
+				<col><field>crit_threshold_ccr</field></col>
+				<col><field>crit_threshold_pdd</field></col>
+				<col><field>crit_threshold_ast</field></col>
+				<col><field>crit_threshold_acd</field></col>
+				<col><field>warn_penalty_asr</field></col>
+				<col><field>warn_penalty_ccr</field></col>
+				<col><field>warn_penalty_pdd</field></col>
+				<col><field>warn_penalty_ast</field></col>
+				<col><field>warn_penalty_acd</field></col>
+				<col><field>crit_penalty_asr</field></col>
+				<col><field>crit_penalty_ccr</field></col>
+				<col><field>crit_penalty_pdd</field></col>
+				<col><field>crit_penalty_ast</field></col>
+				<col><field>crit_penalty_acd</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>delete</cmd_name>
+			<db_table_id>qr_profiles</db_table_id>
+			<cmd_type>DB_DELETE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+		</cmd>
+	</mod>
+	<!-- rc_clients provisionning -->
+	<mod><mod_name>rc_clients</mod_name>
+		<cmd><cmd_name>show</cmd_name>
+			<db_table_id>rc_clients</db_table_id>
+			<cmd_type>DB_QUERY</cmd_type>
+			<query_cols>
+				<col><field>id</field><link_cmd>update</link_cmd></col>
+				<col><field>client_id</field></col>
+				<col><field>wholesale_rate</field></col>
+				<col><field>retail_rate</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>add</cmd_name>
+			<db_table_id>rc_clients</db_table_id>
+			<cmd_type>DB_INSERT</cmd_type>
+			<query_cols>
+				<col><field>client_id</field></col>
+				<col><field>wholesale_rate</field></col>
+				<col><field>retail_rate</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>update</cmd_name>
+			<db_table_id>rc_clients</db_table_id>
+			<cmd_type>DB_UPDATE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+			<query_cols>
+				<col><field>client_id</field></col>
+				<col><field>wholesale_rate</field></col>
+				<col><field>retail_rate</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>delete</cmd_name>
+			<db_table_id>rc_clients</db_table_id>
+			<cmd_type>DB_DELETE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+		</cmd>
+	</mod>
+	<!-- rc_vendors provisionning -->
+	<mod><mod_name>rc_vendors</mod_name>
+		<cmd><cmd_name>show</cmd_name>
+			<db_table_id>rc_vendors</db_table_id>
+			<cmd_type>DB_QUERY</cmd_type>
+			<query_cols>
+				<col><field>id</field><link_cmd>update</link_cmd></col>
+				<col><field>vendor_id</field></col>
+				<col><field>vendor_rate</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>add</cmd_name>
+			<db_table_id>rc_vendors</db_table_id>
+			<cmd_type>DB_INSERT</cmd_type>
+			<query_cols>
+				<col><field>vendor_id</field></col>
+				<col><field>vendor_rate</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>update</cmd_name>
+			<db_table_id>rc_vendors</db_table_id>
+			<cmd_type>DB_UPDATE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+			<query_cols>
+				<col><field>vendor_id</field></col>
+				<col><field>vendor_rate</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>delete</cmd_name>
+			<db_table_id>rc_vendors</db_table_id>
+			<cmd_type>DB_DELETE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+		</cmd>
+	</mod>
+	<!-- rc_ratesheets provisionning -->
+	<mod><mod_name>rc_ratesheets</mod_name>
+		<cmd><cmd_name>show</cmd_name>
+			<db_table_id>rc_ratesheets</db_table_id>
+			<cmd_type>DB_QUERY</cmd_type>
+			<query_cols>
+				<col><field>id</field><link_cmd>update</link_cmd></col>
+				<col><field>ratesheet_table</field></col>
+				<col><field>currency</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>add</cmd_name>
+			<db_table_id>rc_ratesheets</db_table_id>
+			<cmd_type>DB_INSERT</cmd_type>
+			<query_cols>
+				<col><field>ratesheet_table</field></col>
+				<col><field>currency</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>update</cmd_name>
+			<db_table_id>rc_ratesheets</db_table_id>
+			<cmd_type>DB_UPDATE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+			<query_cols>
+				<col><field>ratesheet_table</field></col>
+				<col><field>currency</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>delete</cmd_name>
+			<db_table_id>rc_ratesheets</db_table_id>
+			<cmd_type>DB_DELETE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+		</cmd>
+	</mod>
+	<!-- rc_demo_ratesheet provisionning -->
+	<mod><mod_name>rc_demo_ratesheet</mod_name>
+		<cmd><cmd_name>show</cmd_name>
+			<db_table_id>rc_demo_ratesheet</db_table_id>
+			<cmd_type>DB_QUERY</cmd_type>
+			<query_cols>
+				<col><field>id</field><link_cmd>update</link_cmd></col>
+				<col><field>prefix</field></col>
+				<col><field>destination</field></col>
+				<col><field>price</field></col>
+				<col><field>minimum</field></col>
+				<col><field>increment</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>add</cmd_name>
+			<db_table_id>rc_demo_ratesheet</db_table_id>
+			<cmd_type>DB_INSERT</cmd_type>
+			<query_cols>
+				<col><field>prefix</field></col>
+				<col><field>destination</field></col>
+				<col><field>price</field></col>
+				<col><field>minimum</field></col>
+				<col><field>increment</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>update</cmd_name>
+			<db_table_id>rc_demo_ratesheet</db_table_id>
+			<cmd_type>DB_UPDATE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+			<query_cols>
+				<col><field>prefix</field></col>
+				<col><field>destination</field></col>
+				<col><field>price</field></col>
+				<col><field>minimum</field></col>
+				<col><field>increment</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>delete</cmd_name>
+			<db_table_id>rc_demo_ratesheet</db_table_id>
 			<cmd_type>DB_DELETE</cmd_type>
 			<clause_cols>
 				<col><field>id</field><operator>=</operator></col>
@@ -3891,6 +4373,7 @@
 				<col><field>expiry</field></col>
 				<col><field>forced_socket</field></col>
 				<col><field>cluster_shtag</field></col>
+				<col><field>state</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>add</cmd_name>
@@ -3908,6 +4391,7 @@
 				<col><field>expiry</field></col>
 				<col><field>forced_socket</field></col>
 				<col><field>cluster_shtag</field></col>
+				<col><field>state</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>update</cmd_name>
@@ -3928,6 +4412,7 @@
 				<col><field>expiry</field></col>
 				<col><field>forced_socket</field></col>
 				<col><field>cluster_shtag</field></col>
+				<col><field>state</field></col>
 			</query_cols>
 		</cmd>
 		<cmd><cmd_name>delete</cmd_name>
@@ -4162,80 +4647,6 @@
 			</clause_cols>
 		</cmd>
 	</mod>
-	<!-- sip_trace provisionning -->
-	<mod><mod_name>sip_trace</mod_name>
-		<cmd><cmd_name>show</cmd_name>
-			<db_table_id>sip_trace</db_table_id>
-			<cmd_type>DB_QUERY</cmd_type>
-			<query_cols>
-				<col><field>id</field><link_cmd>update</link_cmd></col>
-				<col><field>time_stamp</field></col>
-				<col><field>callid</field></col>
-				<col><field>trace_attrs</field></col>
-				<col><field>msg</field></col>
-				<col><field>method</field></col>
-				<col><field>status</field></col>
-				<col><field>from_proto</field></col>
-				<col><field>from_ip</field></col>
-				<col><field>from_port</field></col>
-				<col><field>to_proto</field></col>
-				<col><field>to_ip</field></col>
-				<col><field>to_port</field></col>
-				<col><field>fromtag</field></col>
-				<col><field>direction</field></col>
-			</query_cols>
-		</cmd>
-		<cmd><cmd_name>add</cmd_name>
-			<db_table_id>sip_trace</db_table_id>
-			<cmd_type>DB_INSERT</cmd_type>
-			<query_cols>
-				<col><field>time_stamp</field></col>
-				<col><field>callid</field></col>
-				<col><field>trace_attrs</field></col>
-				<col><field>msg</field></col>
-				<col><field>method</field></col>
-				<col><field>status</field></col>
-				<col><field>from_proto</field></col>
-				<col><field>from_ip</field></col>
-				<col><field>from_port</field></col>
-				<col><field>to_proto</field></col>
-				<col><field>to_ip</field></col>
-				<col><field>to_port</field></col>
-				<col><field>fromtag</field></col>
-				<col><field>direction</field></col>
-			</query_cols>
-		</cmd>
-		<cmd><cmd_name>update</cmd_name>
-			<db_table_id>sip_trace</db_table_id>
-			<cmd_type>DB_UPDATE</cmd_type>
-			<clause_cols>
-				<col><field>id</field><operator>=</operator></col>
-			</clause_cols>
-			<query_cols>
-				<col><field>time_stamp</field></col>
-				<col><field>callid</field></col>
-				<col><field>trace_attrs</field></col>
-				<col><field>msg</field></col>
-				<col><field>method</field></col>
-				<col><field>status</field></col>
-				<col><field>from_proto</field></col>
-				<col><field>from_ip</field></col>
-				<col><field>from_port</field></col>
-				<col><field>to_proto</field></col>
-				<col><field>to_ip</field></col>
-				<col><field>to_port</field></col>
-				<col><field>fromtag</field></col>
-				<col><field>direction</field></col>
-			</query_cols>
-		</cmd>
-		<cmd><cmd_name>delete</cmd_name>
-			<db_table_id>sip_trace</db_table_id>
-			<cmd_type>DB_DELETE</cmd_type>
-			<clause_cols>
-				<col><field>id</field><operator>=</operator></col>
-			</clause_cols>
-		</cmd>
-	</mod>
 	<!-- smpp provisionning -->
 	<mod><mod_name>smpp</mod_name>
 		<cmd><cmd_name>show</cmd_name>
@@ -4450,6 +4861,80 @@
 		</cmd>
 		<cmd><cmd_name>delete</cmd_name>
 			<db_table_id>tls_mgm</db_table_id>
+			<cmd_type>DB_DELETE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+		</cmd>
+	</mod>
+	<!-- sip_trace provisionning -->
+	<mod><mod_name>sip_trace</mod_name>
+		<cmd><cmd_name>show</cmd_name>
+			<db_table_id>sip_trace</db_table_id>
+			<cmd_type>DB_QUERY</cmd_type>
+			<query_cols>
+				<col><field>id</field><link_cmd>update</link_cmd></col>
+				<col><field>time_stamp</field></col>
+				<col><field>callid</field></col>
+				<col><field>trace_attrs</field></col>
+				<col><field>msg</field></col>
+				<col><field>method</field></col>
+				<col><field>status</field></col>
+				<col><field>from_proto</field></col>
+				<col><field>from_ip</field></col>
+				<col><field>from_port</field></col>
+				<col><field>to_proto</field></col>
+				<col><field>to_ip</field></col>
+				<col><field>to_port</field></col>
+				<col><field>fromtag</field></col>
+				<col><field>direction</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>add</cmd_name>
+			<db_table_id>sip_trace</db_table_id>
+			<cmd_type>DB_INSERT</cmd_type>
+			<query_cols>
+				<col><field>time_stamp</field></col>
+				<col><field>callid</field></col>
+				<col><field>trace_attrs</field></col>
+				<col><field>msg</field></col>
+				<col><field>method</field></col>
+				<col><field>status</field></col>
+				<col><field>from_proto</field></col>
+				<col><field>from_ip</field></col>
+				<col><field>from_port</field></col>
+				<col><field>to_proto</field></col>
+				<col><field>to_ip</field></col>
+				<col><field>to_port</field></col>
+				<col><field>fromtag</field></col>
+				<col><field>direction</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>update</cmd_name>
+			<db_table_id>sip_trace</db_table_id>
+			<cmd_type>DB_UPDATE</cmd_type>
+			<clause_cols>
+				<col><field>id</field><operator>=</operator></col>
+			</clause_cols>
+			<query_cols>
+				<col><field>time_stamp</field></col>
+				<col><field>callid</field></col>
+				<col><field>trace_attrs</field></col>
+				<col><field>msg</field></col>
+				<col><field>method</field></col>
+				<col><field>status</field></col>
+				<col><field>from_proto</field></col>
+				<col><field>from_ip</field></col>
+				<col><field>from_port</field></col>
+				<col><field>to_proto</field></col>
+				<col><field>to_ip</field></col>
+				<col><field>to_port</field></col>
+				<col><field>fromtag</field></col>
+				<col><field>direction</field></col>
+			</query_cols>
+		</cmd>
+		<cmd><cmd_name>delete</cmd_name>
+			<db_table_id>sip_trace</db_table_id>
 			<cmd_type>DB_DELETE</cmd_type>
 			<clause_cols>
 				<col><field>id</field><operator>=</operator></col>

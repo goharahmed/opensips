@@ -41,6 +41,7 @@
 #define MSG_PARSER_H
 
 #include <strings.h>
+#include <sys/time.h>
 
 #include "../str.h"
 #include "../lump_struct.h"
@@ -61,7 +62,8 @@
 
 /* convenience short-cut macros */
 #define REQ_LINE(_msg) ((_msg)->first_line.u.request)
-#define REQ_METHOD first_line.u.request.method_value
+#define REQ_METHOD   first_line.u.request.method_value
+#define REQ_METHOD_S first_line.u.request.method
 #define REPLY_STATUS first_line.u.reply.statuscode
 #define REPLY_CLASS(_reply) ((_reply)->REPLY_STATUS/100)
 
@@ -103,7 +105,7 @@ enum request_method {
                                       * callback had already been registered */
 #define FL_NAT_TRACK_DIALOG  (1<<13) /* trigger dialog tracking from the
                                       * nat_traversal module */
-#define FL_USE_SIPTRACE      (1<<14) /* used by siptrace to check if the tm
+#define FL_USE_SIPTRACE      (1<<14) /* used by tracer to check if the tm
                                       * callbacks were registered */
 #define FL_SHM_UPDATABLE     (1<<15) /* a SHM cloned message can be updated
                                       * (TM used, requires FL_SHM_CLONE) */
@@ -121,13 +123,14 @@ enum request_method {
                                       * either in failure route or resume 
                                       * route */
 #define FL_TM_REPLICATED	 (1<<19) /* message received due to a tm replication */
+#define FL_BODY_NO_SDP       (1<<20) /* message does not have an SDP body */
 
 /* define the # of unknown URI parameters to parse */
 #define URI_MAX_U_PARAMS 10
 
 #define IFISMETHOD(methodname,firstchar)                                  \
 if (  (*tmp==(firstchar) || *tmp==((firstchar) | 32)) &&                  \
-        strncasecmp( tmp+1, #methodname +1, methodname##_LEN-1)==0 &&     \
+        strncasecmp( tmp+1, (char *)#methodname+1, methodname##_LEN-1)==0 &&     \
         *(tmp+methodname##_LEN)==' ') {                                   \
                 fl->type=SIP_REQUEST;                                     \
                 fl->u.request.method.len=methodname##_LEN;                \
@@ -158,7 +161,7 @@ if (  (*tmp==(firstchar) || *tmp==((firstchar) | 32)) &&                  \
 (((m)->new_uri.s && (m)->new_uri.len) ? (&(m)->new_uri) : (&(m)->first_line.u.request.uri))
 
 
-enum _uri_type{ERROR_URI_T=0, SIP_URI_T, SIPS_URI_T, TEL_URI_T, TELS_URI_T, URN_SERVICE_URI_T};
+enum _uri_type{ERROR_URI_T=0, SIP_URI_T, SIPS_URI_T, TEL_URI_T, TELS_URI_T, URN_SERVICE_URI_T, URN_NENA_SERVICE_URI_T};
 typedef enum _uri_type uri_type;
 
 struct sip_uri {
@@ -171,7 +174,8 @@ struct sip_uri {
 	unsigned short port_no;
 	unsigned short proto; /* from transport */
 	uri_type type; /* uri scheme */
-	/* parameters */
+
+	/* parameters [+ "=value" parts, if any] */
 	str transport;
 	str ttl;
 	str user_param;
@@ -180,7 +184,12 @@ struct sip_uri {
 	str lr;
 	str r2; /* ser specific rr parameter */
 	str gr; /* GRUU */
-	/* values */
+	str pn_provider; /* RFC 8599 (SIP PN) */
+	str pn_prid;
+	str pn_param;
+	str pn_purr;
+
+	/* just values */
 	str transport_val;
 	str ttl_val;
 	str user_param_val;
@@ -189,6 +198,11 @@ struct sip_uri {
 	str lr_val; /* lr value placeholder for lr=on a.s.o*/
 	str r2_val;
 	str gr_val;
+	str pn_provider_val;
+	str pn_prid_val;
+	str pn_param_val;
+	str pn_purr_val;
+
 	/* unknown params */
 	str u_name[URI_MAX_U_PARAMS]; /* Unknown param names */
 	str u_val[URI_MAX_U_PARAMS];  /* Unknown param valss */
@@ -256,6 +270,8 @@ struct sip_msg {
 	struct hdr_field* www_authenticate;
 	struct hdr_field* proxy_authenticate;
 	struct hdr_field* min_expires;
+	struct hdr_field* feature_caps;
+	struct hdr_field* replaces;
 
 	struct sip_msg_body *body;
 
@@ -317,6 +333,12 @@ struct sip_msg {
 	str set_global_address;
 	str set_global_port;
 
+	/* used to store a particular time of the message - note that the time is
+	 * not stored when the message was received, but only the first time
+	 * someone gets interested in it - this way we have a consistent timestamp
+	 * of the message, without being affected by lazy callbacks */
+	struct timeval time;
+
 	struct msg_callback *msg_cb;
 };
 
@@ -336,6 +358,8 @@ int parse_headers(struct sip_msg* msg, hdr_flags_t flags, int next);
 char* get_hdr_field(char* buf, char* end, struct hdr_field* hdr);
 
 void free_sip_msg(struct sip_msg* msg);
+
+int clone_headers(struct sip_msg *from_msg, struct sip_msg *to_msg);
 
 /* make sure all HFs needed for transaction identification have been
    parsed; return 0 if those HFs can't be found
@@ -476,6 +500,27 @@ int set_ruri(struct sip_msg* msg, str* uri);
 int set_dst_uri(struct sip_msg* msg, str* uri);
 
 
+void reset_dst_uri(struct sip_msg *msg);
+
+
+int set_dst_host_port(struct sip_msg *msg, str *host, str *port);
+
+
+enum rw_ruri_part {
+	RW_RURI_HOST = 1,
+	RW_RURI_HOSTPORT,
+	RW_RURI_USER,
+	RW_RURI_USERPASS,
+	RW_RURI_PORT,
+	RW_RURI_PREFIX,
+	RW_RURI_STRIP,
+	RW_RURI_STRIP_TAIL
+};
+
+int rewrite_ruri(struct sip_msg *msg, str *sval, int ival,
+				enum rw_ruri_part part);
+
+
 /*
  * Set the q value of the Request-URI
  */
@@ -508,6 +553,7 @@ int set_dst_uri(struct sip_msg* msg, str* uri);
  * Make a private copy of the string and assign it to path_vec
  */
 int set_path_vector(struct sip_msg* msg, str* path);
+void clear_path_vector(struct sip_msg* msg);
 
 
 /*
@@ -515,5 +561,17 @@ int set_path_vector(struct sip_msg* msg, str* path);
  * for FROM , TO , CSEQ and CALL-ID headers.
  */
 int extract_ftc_hdrs( char *buf, int len, str *from, str *to, str *cseq,str *callid);
+
+inline static struct timeval *get_msg_time(struct sip_msg *msg)
+{
+	static struct timeval static_time;
+	if (!msg || msg == (struct sip_msg *)-1) {
+		gettimeofday(&static_time, NULL);
+		return &static_time;
+	}
+	if (msg->time.tv_sec == 0 && msg->time.tv_usec == 0)
+		gettimeofday(&msg->time, NULL);
+	return &msg->time;
+}
 
 #endif

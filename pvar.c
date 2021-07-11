@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2010-2016 OpenSIPS Solutions
+ * Copyright (C) 2010-2020 OpenSIPS Solutions
  * Copyright (C) 2005-2009 Voice Sistem SRL
  * Copyright (C) 2001-2003 FhG Fokus
  *
@@ -84,38 +84,11 @@ static str str_marker = { PV_MARKER_STR, 1 };
    be read-write (as they may be changed by the script interpreter), so
    we need to allocated as array and not as pointing to RO data segment
    */
-static char _str_null_hlp[7] = {'<','n','u','l','l','>',0};
-static str str_null   = { _str_null_hlp, 6 };
+static char _str_null_hlp[] = "<null>";
+static str str_null         = str_init(_str_null_hlp);
 
-static char _str_empty_hlp[1]  = { 0 };
-static str str_empty  = { _str_empty_hlp, 0 };
-
-static char _str_request_route_hlp[] = {'r','e','q','u','e','s','t','_','r','o','u','t','e',0};
-static str str_request_route    = { _str_request_route_hlp, 13 };
-
-static char _str_failure_route_hlp[] = {'f','a','i','l','u','r','e','_','r','o','u','t','e',0};
-static str str_failure_route    = { _str_failure_route_hlp, 13 };
-
-static char _str_onreply_route_hlp[] = {'o','n','r','e','p','l','y','_','r','o','u','t','e',0};
-static str str_onreply_route    = { _str_onreply_route_hlp, 13 };
-
-static char _str_branch_route_hlp[] = {'b','r','a','n','c','h','_','r','o','u','t','e',0};
-static str str_branch_route    = { _str_branch_route_hlp, 12 };
-
-static char _str_error_route_hlp[] = {'e','r','r','o','r','_','r','o','u','t','e',0};
-static str str_error_route    = { _str_error_route_hlp, 11 };
-
-static char _str_local_route_hlp[] = {'l','o','c','a','l','_','r','o','u','t','e',0};
-static str str_local_route    = { _str_local_route_hlp, 11 };
-
-static char _str_startup_route_hlp[] = {'s','t','a','r','t','u','p','_','r','o','u','t','e',0};
-static str str_startup_route    = { _str_startup_route_hlp, 13 };
-
-static char _str_timer_route_hlp[] = {'t','i','m','e','r','_','r','o','u','t','e',0};
-static str str_timer_route    = { _str_timer_route_hlp, 11 };
-
-static char _str_event_route_hlp[] = {'e','v','e','n','t','_','r','o','u','t','e',0};
-static str str_event_route    = { _str_event_route_hlp, 11 };
+static char _str_empty_hlp[] = "";
+static str str_empty         = str_init(_str_empty_hlp);
 
 int _pv_pid = 0;
 
@@ -128,15 +101,54 @@ static char pv_local_buf[PV_LOCAL_BUF_SIZE+1];
 /* pv context list */
 pv_context_t* pv_context_lst = NULL;
 
-pv_context_t* pv_get_context(str* name);
-pv_context_t* add_pv_context(str* name, pv_contextf_t get_context);
+static pv_context_t* pv_get_context(const str* name);
+static pv_context_t* add_pv_context(const str* name, pv_contextf_t get_context);
+
+static int pv_parse_argv_name(pv_spec_p sp, const str *in);
+static int pv_get_argv(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res);
+static int pv_contextlist_check(void);
+/* always obtain a printable version of the given (pv_value_t *) */
+static str pv_value_print(const pv_value_t *val);
+
 static int pvc_before_check = 1;
 
+int pv_print_buf_size = 20000;
+#define PV_PRINT_BUF_NO   7
+str *pv_print_buf;
 
+#define is_pv_print_buf(p) (p >= (char *)pv_print_buf && \
+			p <= (char *)pv_print_buf + \
+				PV_PRINT_BUF_NO * (sizeof(*pv_print_buf) + pv_print_buf_size))
+
+int init_pvar_support(void)
+{
+	int i;
+
+	/* check pv context list */
+	if (pv_contextlist_check() != 0) {
+		LM_ERR("used pv context that was not defined\n");
+		return -1;
+	}
+
+	pv_print_buf = pkg_malloc(PV_PRINT_BUF_NO * (sizeof(str)
+	                               + pv_print_buf_size));
+	if (!pv_print_buf) {
+		LM_ERR("oom\n");
+		return -1;
+	}
+
+	for (i = 0; i < PV_PRINT_BUF_NO; i++) {
+		pv_print_buf[i].s = (char *)(pv_print_buf + PV_PRINT_BUF_NO)
+		                              + i * pv_print_buf_size;
+		pv_print_buf[i].len = pv_print_buf_size;
+	}
+
+	return 0;
+}
 
 /* route param variable */
 static int pv_get_param(struct sip_msg *msg,  pv_param_t *ip, pv_value_t *res);
-static int pv_parse_param_name(pv_spec_p sp, str *in);
+static int pv_parse_param_name(pv_spec_p sp, const str *in);
 
 /********** helper functions ********/
 /**
@@ -198,7 +210,7 @@ int pv_get_strval(struct sip_msg *msg, pv_param_t *param,
 /**
  * convert str-int to pv_value_t (type is str)
  */
-int pv_get_strintval(struct sip_msg *msg, pv_param_t *param,
+static int pv_get_strintval(struct sip_msg *msg, pv_param_t *param,
 		pv_value_t *res, str *sval, int ival)
 {
 	if(res==NULL)
@@ -213,7 +225,7 @@ int pv_get_strintval(struct sip_msg *msg, pv_param_t *param,
 /**
  * convert int-str to pv_value_t (type is int)
  */
-int pv_get_intstrval(struct sip_msg *msg, pv_param_t *param,
+static int pv_get_intstrval(struct sip_msg *msg, pv_param_t *param,
 		pv_value_t *res, int ival, str *sval)
 {
 	if(res==NULL)
@@ -260,6 +272,127 @@ static int pv_get_return_code(struct sip_msg *msg, pv_param_t *param,
 	return pv_get_sintval(msg, param, res, return_code);
 }
 
+static int pv_get_route_name(struct sip_msg *msg, pv_param_t *param,
+		pv_value_t *res)
+{
+	static str rn_buf;
+
+	str s;
+	int i, idx, idx_flags, len, rlen, has_name;
+
+	if (pv_get_spec_index(msg, param, &idx, &idx_flags) != 0) {
+		LM_ERR("invalid index\n");
+		return -1;
+	}
+
+	if (idx_flags == PV_IDX_ALL) {
+		get_top_route_type(&s, &has_name);
+		if (!has_name)
+			goto unnamed_route;
+
+		len = strlen(route_stack[0]);
+		if (pkg_str_extend(&rn_buf, s.len + 2 + len + 1) != 0) {
+			LM_ERR("oom\n");
+			return pv_get_null(msg, param, res);
+		}
+
+		len = sprintf(rn_buf.s, "%.*s[%s]", s.len, s.s, route_stack[idx]);
+		goto print_remaining;
+
+	unnamed_route:
+		if (pkg_str_extend(&rn_buf, s.len + 1) != 0) {
+			LM_ERR("oom\n");
+			return pv_get_null(msg, param, res);
+		}
+
+		len = sprintf(rn_buf.s, "%.*s", s.len, s.s);
+
+	print_remaining:
+		s = str_route;
+
+		for (i = 1; i < route_stack_size; i++) {
+			if (!route_stack[i]) {
+				if (pkg_str_extend(&rn_buf, len + 3 + s.len + 1) != 0) {
+					LM_ERR("oom\n");
+					return pv_get_null(msg, param, res);
+				}
+
+				len += sprintf(rn_buf.s + len, " > %.*s", s.len, s.s);
+			} else if (route_stack[i][0] != '!') {
+				rlen = strlen(route_stack[i]);
+
+				if (pkg_str_extend(&rn_buf, len + s.len + 5 + rlen + 1) != 0) {
+					LM_ERR("oom\n");
+					return pv_get_null(msg, param, res);
+				}
+
+				len += sprintf(rn_buf.s + len, " > %.*s[%s]",
+									s.len, s.s, route_stack[i]);
+			} else {
+				rlen = strlen(route_stack[i]);
+
+				/* the "!" marker tells us to print that route name as-is */
+				if (pkg_str_extend(&rn_buf, len + rlen + 3) != 0) {
+					LM_ERR("oom\n");
+					return pv_get_null(msg, param, res);
+				}
+
+				len += sprintf(rn_buf.s + len, " > %s", route_stack[i] + 1);
+			}
+		}
+
+		s.s = rn_buf.s;
+		s.len = len;
+		return pv_get_strval(msg, param, res, &s);
+	}
+
+	if (idx < 0)
+		idx += route_stack_size;
+
+	/* index out of bounds -- play nice and return NULL */
+	if (idx > route_stack_size - 1 || idx < 0)
+		return pv_get_null(msg, param, res);
+
+	/* reverse the index, since we index the route stack backwards */
+	idx = route_stack_size - idx - 1;
+
+	if (idx == 0) {
+		get_top_route_type(&s, &has_name);
+		if (!has_name)
+			goto out_ok;
+
+	} else {
+		s = str_route;
+		if (!route_stack[idx])
+			goto out_ok;
+	}
+
+	len = strlen(route_stack[idx]);
+
+	if (route_stack[idx][0] != '!') {
+		if (pkg_str_extend(&rn_buf, s.len + 2 + len + 1) != 0) {
+			LM_ERR("oom\n");
+			return pv_get_null(msg, param, res);
+		}
+
+		s.len = sprintf(rn_buf.s, "%.*s[%s]", s.len, s.s, route_stack[idx]);
+		s.s = rn_buf.s;
+	} else {
+		/* the "!" marker tells us to print that route name as-is */
+		if (pkg_str_extend(&rn_buf, len) != 0) {
+			LM_ERR("oom\n");
+			return pv_get_null(msg, param, res);
+		}
+
+		s.len = sprintf(rn_buf.s, "%s", route_stack[idx] + 1);
+		s.s = rn_buf.s;
+	}
+
+
+out_ok:
+	return pv_get_strval(msg, param, res, &s);
+}
+
 static int pv_get_times(struct sip_msg *msg, pv_param_t *param,
 		pv_value_t *res)
 {
@@ -290,7 +423,7 @@ static int pv_get_start_times(struct sip_msg *msg, pv_param_t *param,
 	return pv_get_uintval(msg, param, res, (unsigned int)startup_time);
 }
 
-static int pv_parse_time_name(pv_spec_p sp, str *in)
+static int pv_parse_time_name(pv_spec_p sp, const str *in)
 {
 	sp->pvp.pvn.type = PV_NAME_INTSTR;
 	sp->pvp.pvn.u.isname.type = AVP_NAME_STR;
@@ -309,14 +442,15 @@ static int pv_get_formated_time(struct sip_msg *msg, pv_param_t *param,
 		pv_value_t *res)
 {
 	static char buf[128];
+	struct tm ltime;
 	time_t t;
 
 	if(msg==NULL)
 		return -1;
 
 	time( &t );
-	res->rs.len = strftime( buf, 127, param->pvn.u.isname.name.s.s,
-			localtime( &t ) );
+	localtime_r(&t, &ltime);
+	res->rs.len = strftime( buf, 127, param->pvn.u.isname.name.s.s, &ltime);
 
 	if (res->rs.len<=0)
 		return pv_get_null(msg, param, res);
@@ -326,9 +460,15 @@ static int pv_get_formated_time(struct sip_msg *msg, pv_param_t *param,
 	return 0;
 }
 
+#define CTIME_BUFFER_NO 5
+#define CTIME_BUFFER_SIZE 26
+
 static int pv_get_timef(struct sip_msg *msg, pv_param_t *param,
 		pv_value_t *res)
 {
+	static char ctime_bufs[CTIME_BUFFER_NO][CTIME_BUFFER_SIZE];
+	static char *buf;
+	static int ctime_buf_no = 0;
 	time_t t;
 	str s;
 
@@ -336,7 +476,9 @@ static int pv_get_timef(struct sip_msg *msg, pv_param_t *param,
 		return -1;
 
 	t = time(NULL);
-	s.s = ctime(&t);
+	buf = ctime_bufs[ctime_buf_no];
+	ctime_buf_no = (ctime_buf_no + 1) % CTIME_BUFFER_NO;
+	s.s = ctime_r(&t, buf);
 	s.len = strlen(s.s)-1;
 	return pv_get_strintval(msg, param, res, &s, (int)t);
 }
@@ -555,7 +697,7 @@ static int pv_get_path(struct sip_msg *msg, pv_param_t *param,
 #define CT_PARAMS_LEN    (sizeof(CT_PARAMS_S)-1)
 #define CT_PARAMS_ID     7
 
-int pv_parse_ct_name(pv_spec_p sp, str *in)
+static int pv_parse_ct_name(pv_spec_p sp, const str *in)
 {
 	if (sp==NULL)
 		return -1;
@@ -1032,46 +1174,6 @@ static int pv_get_srcport(struct sip_msg *msg, pv_param_t *param,
 	return pv_get_uintval(msg, param, res, msg->rcv.src_port);
 }
 
-static int pv_get_rcvip(struct sip_msg *msg, pv_param_t *param,
-		pv_value_t *res)
-{
-	if(msg==NULL)
-		return -1;
-
-	if(msg->rcv.bind_address==NULL
-			|| msg->rcv.bind_address->address_str.s==NULL)
-		return pv_get_null(msg, param, res);
-
-	return pv_get_strval(msg, param, res, &msg->rcv.bind_address->address_str);
-}
-
-static int pv_get_rcvport(struct sip_msg *msg, pv_param_t *param,
-		pv_value_t *res)
-{
-	if(msg==NULL)
-		return -1;
-
-	if(msg->rcv.bind_address==NULL
-			|| msg->rcv.bind_address->port_no_str.s==NULL)
-		return pv_get_null(msg, param, res);
-
-	return pv_get_intstrval(msg, param, res,
-			(int)msg->rcv.bind_address->port_no,
-			&msg->rcv.bind_address->port_no_str);
-}
-
-static int pv_get_force_sock(struct sip_msg *msg, pv_param_t *param,
-		pv_value_t *res)
-{
-	if(msg==NULL)
-		return -1;
-
-	if (msg->force_send_socket==0)
-		return pv_get_null(msg, param, res);
-
-	return pv_get_strval(msg, param, res, &msg->force_send_socket->sock_str);
-}
-
 static int pv_get_useragent(struct sip_msg *msg, pv_param_t *param,
 		pv_value_t *res)
 {
@@ -1103,47 +1205,6 @@ static int pv_get_refer_to(struct sip_msg *msg, pv_param_t *param,
 		return pv_get_null(msg, param, res);
 
 	return pv_get_strval(msg, param, res, &(get_refer_to(msg)->uri));
-}
-
-static int pv_get_route_type(struct sip_msg *msg, pv_param_t *param,
-		pv_value_t *res)
-{
-	str s;
-
-	switch(route_type)
-	{
-		case REQUEST_ROUTE:
-			s = str_request_route;
-			break;
-		case FAILURE_ROUTE:
-			s = str_failure_route;
-			break;
-		case ONREPLY_ROUTE:
-			s = str_onreply_route;
-			break;
-		case BRANCH_ROUTE:
-			s = str_branch_route;
-			break;
-		case ERROR_ROUTE:
-			s = str_error_route;
-			break;
-		case LOCAL_ROUTE:
-			s = str_local_route;
-			break;
-		case STARTUP_ROUTE:
-			s = str_startup_route;
-			break;
-		case TIMER_ROUTE:
-			s = str_timer_route;
-			break;
-		case EVENT_ROUTE:
-			s = str_event_route;
-			break;
-		default:
-			s = str_null;
-	}
-
-	return pv_get_strval(msg, param, res, &s);
 }
 
 static int pv_get_diversion(struct sip_msg *msg, pv_param_t *param,
@@ -1288,26 +1349,6 @@ static int pv_get_pai(struct sip_msg *msg, pv_param_t *param,
 
 	return pv_get_strval(msg, param, res, &(get_pai(msg)->uri));
 }
-
-/* proto of received message: $pr or $proto*/
-static int pv_get_proto(struct sip_msg *msg, pv_param_t *param,
-		pv_value_t *res)
-{
-	str s;
-	if(msg==NULL)
-		return -1;
-
-	if ( msg->rcv.proto>=PROTO_FIRST && msg->rcv.proto<PROTO_LAST &&
-	protos[msg->rcv.proto].id ) {
-		s.s = protos[msg->rcv.proto].name;
-		s.len = strlen(s.s);
-	} else {
-		s = str_null;
-	}
-
-	return pv_get_strintval(msg, param, res, &s, (int)msg->rcv.proto);
-}
-
 
 static int pv_get_dset(struct sip_msg *msg, pv_param_t *param,
 		pv_value_t *res)
@@ -1515,7 +1556,7 @@ static int pv_get_content_length(struct sip_msg *msg, pv_param_t *param,
 			&msg->content_length->body);
 }
 
-int pv_parse_rb_name(pv_spec_p sp, str *in)
+static int pv_parse_rb_name(pv_spec_p sp, const str *in)
 {
 	if(in==NULL || in->s==NULL || sp==NULL)
 		return -1;
@@ -1809,7 +1850,7 @@ static int pv_get_acc_username(struct sip_msg *msg, pv_param_t *param,
 #define BR_SOCKET_LEN     (sizeof(BR_SOCKET_S)-1)
 #define BR_SOCKET_ID      6
 
-int pv_parse_branch_name(pv_spec_p sp, str *in)
+static int pv_parse_branch_name(pv_spec_p sp, const str *in)
 {
 	if (sp==NULL || in==NULL || in->s==NULL || in->len==0)
 		return -1;
@@ -1970,6 +2011,189 @@ static int pv_get_branch_fields(struct sip_msg *msg, pv_param_t *param,
 }
 
 
+/******** LISTENING SOCKETS related vars & functions **********/
+
+#define SOCK_IP_S             "ip"
+#define SOCK_IP_LEN           (sizeof(SOCK_IP_S)-1)
+#define SOCK_IP_ID            1
+#define SOCK_PORT_S           "port"
+#define SOCK_PORT_LEN         (sizeof(SOCK_PORT_S)-1)
+#define SOCK_PORT_ID          2
+#define SOCK_PROTO_S          "proto"
+#define SOCK_PROTO_LEN        (sizeof(SOCK_PROTO_S)-1)
+#define SOCK_PROTO_ID         3
+#define SOCK_ADV_IP_S         "advertised_ip"
+#define SOCK_ADV_IP_LEN       (sizeof(SOCK_ADV_IP_S)-1)
+#define SOCK_ADV_IP_ID        4
+#define SOCK_ADV_PORT_S       "advertised_port"
+#define SOCK_ADV_PORT_LEN     (sizeof(SOCK_ADV_PORT_S)-1)
+#define SOCK_ADV_PORT_ID      5
+#define SOCK_TAG_S            "tag"
+#define SOCK_TAG_LEN          (sizeof(SOCK_TAG_S)-1)
+#define SOCK_TAG_ID           6
+#define SOCK_ANYCAST_S        "anycast"
+#define SOCK_ANYCAST_LEN      (sizeof(SOCK_ANYCAST_S)-1)
+#define SOCK_ANYCAST_ID       7
+#define SOCK_AF_S             "af"
+#define SOCK_AF_LEN           (sizeof(SOCK_AF_S)-1)
+#define SOCK_AF_ID            8
+
+static int pv_parse_socket_name(pv_spec_p sp, const str *in)
+{
+	if (sp==NULL || in==NULL || in->s==NULL || in->len==0)
+		return -1;
+
+	sp->pvp.pvn.type = PV_NAME_INTSTR;
+	sp->pvp.pvn.u.isname.type = 0;
+
+	if (in->len==SOCK_IP_LEN &&
+	strncasecmp(in->s, SOCK_IP_S, SOCK_IP_LEN)==0 ) {
+		sp->pvp.pvn.u.isname.name.n = SOCK_IP_ID;
+	} else
+	if (in->len==SOCK_PORT_LEN &&
+	strncasecmp(in->s, SOCK_PORT_S, SOCK_PORT_LEN)==0 ) {
+		sp->pvp.pvn.u.isname.name.n = SOCK_PORT_ID;
+	} else
+	if (in->len==SOCK_PROTO_LEN &&
+	strncasecmp(in->s, SOCK_PROTO_S, SOCK_PROTO_LEN)==0 ) {
+		sp->pvp.pvn.u.isname.name.n = SOCK_PROTO_ID;
+	} else
+	if (in->len==SOCK_ADV_IP_LEN &&
+	strncasecmp(in->s, SOCK_ADV_IP_S, SOCK_ADV_IP_LEN)==0 ) {
+		sp->pvp.pvn.u.isname.name.n = SOCK_ADV_IP_ID;
+	} else
+	if (in->len==SOCK_ADV_PORT_LEN &&
+	strncasecmp(in->s, SOCK_ADV_PORT_S, SOCK_ADV_PORT_LEN)==0 ) {
+		sp->pvp.pvn.u.isname.name.n = SOCK_ADV_PORT_ID;
+	} else
+	if (in->len==SOCK_TAG_LEN &&
+	strncasecmp(in->s, SOCK_TAG_S, SOCK_TAG_LEN)==0 ) {
+		sp->pvp.pvn.u.isname.name.n = SOCK_TAG_ID;
+	} else
+	if (in->len==SOCK_ANYCAST_LEN &&
+	strncasecmp(in->s, SOCK_ANYCAST_S, SOCK_ANYCAST_LEN)==0 ) {
+		sp->pvp.pvn.u.isname.name.n = SOCK_ANYCAST_ID;
+	} else
+	if (in->len==SOCK_AF_LEN &&
+	strncasecmp(in->s, SOCK_AF_S, SOCK_AF_LEN)==0 ) {
+		sp->pvp.pvn.u.isname.name.n = SOCK_AF_ID;
+	} else {
+		LM_ERR("unsupported SOCKET_IN/OUT field <%.*s>\n",in->len,in->s);
+		return -1;
+	}
+
+	return 0;
+}
+
+
+static inline int get_socket_field( struct socket_info *si,
+											pv_name_t *pvn, pv_value_t *res)
+{
+	if (si==NULL)
+		return pv_get_null( NULL, NULL, res);
+
+	/* return the field */
+	switch (pvn->u.isname.name.n) {
+		case 0: /* return full socket description */
+			res->rs = si->sock_str;
+			res->flags = PV_VAL_STR;
+			break;
+		case SOCK_IP_ID: /* return IP address */
+			res->rs = si->address_str;
+			res->flags = PV_VAL_STR;
+			break;
+		case SOCK_PORT_ID: /* return PORT */
+			res->rs = si->port_no_str;
+			res->ri = si->port_no;
+			res->flags = PV_VAL_STR|PV_VAL_INT|PV_TYPE_INT;
+			break;
+		case SOCK_PROTO_ID: /* return PROTOCOL */
+			if ( si->proto>=PROTO_FIRST && si->proto<PROTO_LAST &&
+			protos[si->proto].id ) {
+				res->rs.s = protos[si->proto].name;
+				res->rs.len = strlen(res->rs.s);
+				res->flags = PV_VAL_STR;
+			} else {
+				return pv_get_null( NULL, NULL, res);
+			}
+			break;
+		case SOCK_ADV_IP_ID: /* return advertised IP address */
+			if (si->adv_name_str.s) {
+				res->rs = si->adv_name_str;
+				res->flags = PV_VAL_STR;
+			} else {
+				return pv_get_null( NULL, NULL, res);
+			}
+			break;
+		case SOCK_ADV_PORT_ID: /* return advertised PORT */
+			if (si->adv_port_str.s) {
+				res->rs = si->adv_port_str;
+				res->ri = si->adv_port;
+				res->flags = PV_VAL_STR|PV_VAL_INT|PV_TYPE_INT;
+			} else {
+				return pv_get_null( NULL, NULL, res);
+			}
+			break;
+		case SOCK_TAG_ID: /* return internal TAG */
+			if (si->tag.s) {
+				res->rs = si->tag;
+				res->flags = PV_VAL_STR;
+			} else {
+				return pv_get_null( NULL, NULL, res);
+			}
+			break;
+		case SOCK_ANYCAST_ID: /* return ANYCAST */
+			if (si->flags&SI_IS_ANYCAST)
+				res->ri = 1;
+			else
+				res->ri = 0;
+			res->flags = PV_VAL_INT|PV_TYPE_INT;
+			break;
+		case SOCK_AF_ID:  /* returns Address Family */
+			if (si->address.af == AF_INET) {
+				res->rs.s = "INET";
+				res->rs.len = 4;
+			} else if (si->address.af == AF_INET6) {
+				res->rs.s = "INET6";
+				res->rs.len = 5;
+			} else
+				return pv_get_null( NULL, NULL, res);
+			res->flags = PV_VAL_STR;
+			break;
+		default:
+			LM_CRIT("BUG - unsupported ID %d\n",pvn->u.isname.name.n);
+			return pv_get_null(NULL, NULL, res);
+	}
+	return 0;
+}
+
+
+static int pv_get_socket_in_fields(struct sip_msg *msg, pv_param_t *param,
+															pv_value_t *res)
+{
+
+	if(msg==NULL || res==NULL)
+		return -1;
+
+	return get_socket_field( msg->rcv.bind_address, &param->pvn, res);
+}
+
+
+static int pv_get_socket_out_fields(struct sip_msg *msg, pv_param_t *param,
+															pv_value_t *res)
+{
+	struct socket_info *si;
+
+	if(msg==NULL || res==NULL)
+		return -1;
+
+	si = (msg->force_send_socket) ?
+		msg->force_send_socket : msg->rcv.bind_address;
+
+	return get_socket_field( si, &param->pvn, res);
+}
+
+
 
 
 /************************************************************/
@@ -2035,7 +2259,7 @@ static int pv_get_avp(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
 		if(avp->flags & AVP_VAL_STR) {
 			res->rs = avp_value.s;
 		} else if(avp->flags & AVP_VAL_NULL) {
-			res->rs.s = NULL;
+			memset(&res->rs, 0, sizeof res->rs);
 		} else {
 			res->rs.s = sint2str(avp_value.n, &res->rs.len);
 		}
@@ -2054,7 +2278,7 @@ static int pv_get_avp(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
 			if(avp->flags & AVP_VAL_STR) {
 				res->rs = avp_value.s;
 			} else if(avp->flags & AVP_VAL_NULL) {
-				res->rs.s = NULL;
+				memset(&res->rs, 0, sizeof res->rs);
 			} else {
 				res->rs.s = sint2str(avp_value.n, &res->rs.len);
 			}
@@ -2134,7 +2358,7 @@ static int pv_get_avp(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
 }
 
 
-static int pv_resolve_hdr_name(str *in, pv_value_t *tv)
+static int pv_resolve_hdr_name(const str *in, pv_value_t *tv)
 {
 	struct hdr_field hdr;
 	str s;
@@ -2500,29 +2724,10 @@ static int pv_get_scriptvar(struct sip_msg *msg,  pv_param_t *param,
 	return 0;
 }
 
-static int pv_get_af(struct sip_msg *msg,  pv_param_t *param,
-		pv_value_t *res)
-{
-	if(msg==NULL)
-		return -1;
-
-	res->flags = PV_VAL_STR;
-	if (msg->rcv.src_ip.af == AF_INET) {
-		res->rs.s = "INET";
-		res->rs.len = 4;
-	} else if (msg->rcv.src_ip.af == AF_INET6) {
-		res->rs.s = "INET6";
-		res->rs.len = 5;
-	} else
-		return pv_get_null(msg, param, res);
-
-	return 0;
-}
-
 /********* end PV get functions *********/
 
 /********* start PV set functions *********/
-int pv_set_avp(struct sip_msg* msg, pv_param_t *param,
+static int pv_set_avp(struct sip_msg* msg, pv_param_t *param,
 		int op, pv_value_t *val)
 {
 	int avp_name;
@@ -2607,7 +2812,7 @@ error:
 	return -1;
 }
 
-int pv_set_scriptvar(struct sip_msg* msg, pv_param_t *param,
+static int pv_set_scriptvar(struct sip_msg* msg, pv_param_t *param,
 		int op, pv_value_t *val)
 {
 	int_str avp_val;
@@ -2649,11 +2854,9 @@ error:
 	return -1;
 }
 
-int pv_set_dsturi(struct sip_msg* msg, pv_param_t *param,
+static int pv_set_dsturi(struct sip_msg* msg, pv_param_t *param,
 		int op, pv_value_t *val)
 {
-	struct action  act;
-
 	if(msg==NULL || param==NULL)
 	{
 		LM_ERR("bad parameters\n");
@@ -2662,13 +2865,8 @@ int pv_set_dsturi(struct sip_msg* msg, pv_param_t *param,
 
 	if(val == NULL)
 	{
-		memset(&act, 0, sizeof(act));
-		act.type = RESET_DSTURI_T;
-		if (do_action(&act, msg)<0)
-		{
-			LM_ERR("error - do action failed)\n");
-			goto error;
-		}
+		reset_dst_uri(msg);
+
 		return 1;
 	}
 	if(!(val->flags&PV_VAL_STR))
@@ -2685,7 +2883,7 @@ error:
 	return -1;
 }
 
-int pv_set_ruri(struct sip_msg* msg, pv_param_t *param,
+static int pv_set_ruri(struct sip_msg* msg, pv_param_t *param,
 		int op, pv_value_t *val)
 {
 	if(msg==NULL || param==NULL || val==NULL)
@@ -2710,7 +2908,7 @@ error:
 	return -1;
 }
 
-int pv_set_ru_q(struct sip_msg* msg, pv_param_t *param,
+static int pv_set_ru_q(struct sip_msg* msg, pv_param_t *param,
 		int op, pv_value_t *val)
 {
 	if(msg==NULL || param==NULL || val==NULL)
@@ -2734,10 +2932,11 @@ int pv_set_ru_q(struct sip_msg* msg, pv_param_t *param,
 
 	return 0;
 }
-int pv_set_ruri_user(struct sip_msg* msg, pv_param_t *param,
+
+static int pv_set_ruri_user(struct sip_msg* msg, pv_param_t *param,
 		int op, pv_value_t *val)
 {
-	struct action  act;
+	str sval;
 
 	if(msg==NULL || param==NULL)
 	{
@@ -2746,45 +2945,24 @@ int pv_set_ruri_user(struct sip_msg* msg, pv_param_t *param,
 	}
 
 	if(val == NULL)
-	{
-		memset(&act, 0, sizeof(act));
-		act.type = SET_USER_T;
-		act.elem[0].type = STR_ST;
-		act.elem[0].u.s = str_empty;
-		if (do_action(&act, msg)<0)
-		{
-			LM_ERR("do action failed)\n");
-			goto error;
-		}
-		return 0;
-	}
-
-	if(!(val->flags&PV_VAL_STR))
-	{
+		sval = str_empty;
+	else if(!(val->flags&PV_VAL_STR)) {
 		LM_ERR("str value required to set R-URI user\n");
-		goto error;
-	}
+		return -1;
+	} else
+		sval = val->rs;
 
-	memset(&act, 0, sizeof(act));
-	act.elem[0].type = STR_ST;
-	act.elem[0].u.s = val->rs;
-	act.type = SET_USER_T;
-	if (do_action(&act, msg)<0)
-	{
-		LM_ERR("do action failed\n");
-		goto error;
+	if (rewrite_ruri(msg, &sval, 0, RW_RURI_USER) < 0) {
+		LM_ERR("Failed to set R-URI user\n");
+		return -1;
 	}
 
 	return 0;
-error:
-	return -1;
 }
 
-int pv_set_ruri_host(struct sip_msg* msg, pv_param_t *param,
+static int pv_set_ruri_host(struct sip_msg* msg, pv_param_t *param,
 		int op, pv_value_t *val)
 {
-	struct action  act;
-
 	if(msg==NULL || param==NULL || val==NULL)
 	{
 		LM_ERR("bad parameters\n");
@@ -2794,29 +2972,20 @@ int pv_set_ruri_host(struct sip_msg* msg, pv_param_t *param,
 	if(!(val->flags&PV_VAL_STR))
 	{
 		LM_ERR("str value required to set R-URI hostname\n");
-		goto error;
+		return -1;
 	}
 
-	memset(&act, 0, sizeof(act));
-	act.elem[0].type = STR_ST;
-	act.elem[0].u.s = val->rs;
-	act.type = SET_HOST_T;
-	if (do_action(&act, msg)<0)
-	{
-		LM_ERR("do action failed\n");
-		goto error;
+	if (rewrite_ruri(msg, &val->rs, 0, RW_RURI_HOST) < 0) {
+		LM_ERR("Failed to set R-URI hostname\n");
+		return -1;
 	}
 
 	return 0;
-error:
-	return -1;
 }
 
-int pv_set_dsturi_host(struct sip_msg* msg, pv_param_t *param,
+static int pv_set_dsturi_host(struct sip_msg* msg, pv_param_t *param,
 		int op, pv_value_t *val)
 {
-	struct action act;
-
 	if(msg==NULL || param==NULL || val==NULL)
 	{
 		LM_ERR("bad parameters\n");
@@ -2826,29 +2995,21 @@ int pv_set_dsturi_host(struct sip_msg* msg, pv_param_t *param,
 	if(!(val->flags&PV_VAL_STR))
 	{
 		LM_ERR("str value required to set DST-URI hostname\n");
-		goto error;
+		return -1;
 	}
 
-	memset(&act, 0, sizeof(act));
-	act.elem[0].type = STR_ST;
-	act.elem[0].u.s = val->rs;
-	act.type = SET_DSTHOST_T;
-
-	if (do_action(&act, msg)<0)
-	{
-		LM_ERR("do action failed\n");
-		goto error;
+	if (set_dst_host_port(msg, &val->rs, NULL) < 0) {
+		LM_ERR("Failed to set DST-URI host\n");
+		return -1;
 	}
 
 	return 0;
-error:
-	return -1;
 }
 
-int pv_set_dsturi_port(struct sip_msg* msg, pv_param_t *param,
+static int pv_set_dsturi_port(struct sip_msg* msg, pv_param_t *param,
 		int op, pv_value_t *val)
 {
-	struct action  act;
+	str sval;
 
 	if(msg==NULL || param==NULL)
 	{
@@ -2857,48 +3018,27 @@ int pv_set_dsturi_port(struct sip_msg* msg, pv_param_t *param,
 	}
 
 	if(val == NULL)
-	{
-		memset(&act, 0, sizeof(act));
-		act.type = SET_DSTPORT_T;
-		act.elem[0].type = STR_ST;
-		act.elem[0].u.s.s = "";
-		act.elem[0].u.s.len = 0;
-		if (do_action(&act, msg)<0)
-		{
-			LM_ERR("do action failed)\n");
-			goto error;
-		}
-		return 0;
-	}
+		sval = str_empty;
+	else if(!(val->flags&PV_VAL_STR))
+		sval.s = int2str(val->ri, &sval.len);
+	else
+		sval = val->rs;
 
-	if(!(val->flags&PV_VAL_STR))
-	{
-		val->rs.s = int2str(val->ri, &val->rs.len);
-		val->flags |= PV_VAL_STR;
-	}
-
-	memset(&act, 0, sizeof(act));
-	act.elem[0].type = STR_ST;
-	act.elem[0].u.s = val->rs;
-	act.type = SET_DSTPORT_T;
-	if (do_action(&act, msg)<0)
-	{
-		LM_ERR("do action failed\n");
-		goto error;
+	if (set_dst_host_port(msg, NULL, &sval) < 0) {
+		LM_ERR("Failed to set DST-URI port\n");
+		return -1;
 	}
 
 	return 0;
-error:
-	return -1;
 }
 
 
 
 
-int pv_set_ruri_port(struct sip_msg* msg, pv_param_t *param,
+static int pv_set_ruri_port(struct sip_msg* msg, pv_param_t *param,
 		int op, pv_value_t *val)
 {
-	struct action  act;
+	str sval;
 
 	if(msg==NULL || param==NULL)
 	{
@@ -2907,43 +3047,22 @@ int pv_set_ruri_port(struct sip_msg* msg, pv_param_t *param,
 	}
 
 	if(val == NULL)
-	{
-		memset(&act, 0, sizeof(act));
-		act.type = SET_PORT_T;
-		act.elem[0].type = STR_ST;
-		act.elem[0].u.s.s = "";
-		act.elem[0].u.s.len = 0;
-		if (do_action(&act, msg)<0)
-		{
-			LM_ERR("do action failed)\n");
-			goto error;
-		}
-		return 0;
-	}
+		sval = str_empty;
+	else if(!(val->flags&PV_VAL_STR))
+		sval.s = int2str(val->ri, &sval.len);
+	else
+		sval = val->rs;
 
-	if(!(val->flags&PV_VAL_STR))
-	{
-		val->rs.s = int2str(val->ri, &val->rs.len);
-		val->flags |= PV_VAL_STR;
-	}
-
-	memset(&act, 0, sizeof(act));
-	act.elem[0].type = STR_ST;
-	act.elem[0].u.s = val->rs;
-	act.type = SET_PORT_T;
-	if (do_action(&act, msg)<0)
-	{
-		LM_ERR("do action failed\n");
-		goto error;
+	if (rewrite_ruri(msg, &sval, 0, RW_RURI_PORT) < 0) {
+		LM_ERR("Failed to set R-URI hostname\n");
+		return -1;
 	}
 
 	return 0;
-error:
-	return -1;
 }
 
 
-int pv_set_branch(struct sip_msg* msg, pv_param_t *param,
+static int pv_set_branch(struct sip_msg* msg, pv_param_t *param,
 		int op, pv_value_t *val)
 {
 	if (msg==NULL || param==NULL) {
@@ -2966,7 +3085,7 @@ int pv_set_branch(struct sip_msg* msg, pv_param_t *param,
 }
 
 
-int pv_set_branch_fields(struct sip_msg* msg, pv_param_t *param,
+static int pv_set_branch_fields(struct sip_msg* msg, pv_param_t *param,
 		int op, pv_value_t *val)
 {
 	int idx;
@@ -3045,7 +3164,7 @@ int pv_set_branch_fields(struct sip_msg* msg, pv_param_t *param,
 				return -1;
 			}
 			flags = (!val||val->flags&PV_VAL_NULL)?
-				0 : flag_list_to_bitmask(&val->rs, FLAG_TYPE_BRANCH, FLAG_DELIM);
+				0 : flag_list_to_bitmask(str2const(&val->rs), FLAG_TYPE_BRANCH, FLAG_DELIM);
 			return update_branch( idx, NULL, NULL,
 				NULL, NULL, &flags, NULL);
 		case BR_SOCKET_ID: /* set SOCKET */
@@ -3077,7 +3196,7 @@ int pv_set_branch_fields(struct sip_msg* msg, pv_param_t *param,
 	}
 }
 
-int pv_set_force_sock(struct sip_msg* msg, pv_param_t *param,
+static int pv_set_force_sock(struct sip_msg* msg, pv_param_t *param,
 		int op, pv_value_t *val)
 {
 	struct socket_info *si;
@@ -3123,9 +3242,10 @@ error:
 	return -1;
 }
 
+
 /********* end PV set functions *********/
 
-int pv_parse_scriptvar_name(pv_spec_p sp, str *in)
+static int pv_parse_scriptvar_name(pv_spec_p sp, const str *in)
 {
 	if(in==NULL || in->s==NULL || sp==NULL)
 		return -1;
@@ -3140,7 +3260,7 @@ int pv_parse_scriptvar_name(pv_spec_p sp, str *in)
 	return 0;
 }
 
-int pv_parse_hdr_name(pv_spec_p sp, str *in)
+static int pv_parse_hdr_name(pv_spec_p sp, const str *in)
 {
 	char *p;
 	pv_spec_p nsp = 0;
@@ -3189,7 +3309,7 @@ int pv_parse_hdr_name(pv_spec_p sp, str *in)
 	return 0;
 }
 
-int pv_parse_avp_name(pv_spec_p sp, str *in)
+int pv_parse_avp_name(pv_spec_p sp, const str *in)
 {
 	char *p;
 	char *s;
@@ -3231,7 +3351,7 @@ int pv_parse_avp_name(pv_spec_p sp, str *in)
 	return 0;
 }
 
-int pv_parse_avp_index(pv_spec_p sp, str *in)
+static int pv_parse_avp_index(pv_spec_p sp, const str *in)
 {
 	#define AVP_APPEND_IDX "append"
 
@@ -3246,7 +3366,7 @@ int pv_parse_avp_index(pv_spec_p sp, str *in)
 	return pv_parse_index(sp,in);
 }
 
-int pv_parse_index(pv_spec_p sp, str *in)
+int pv_parse_index(pv_spec_p sp, const str *in)
 {
 	char *p;
 	char *s;
@@ -3313,7 +3433,7 @@ int pv_init_iname(pv_spec_p sp, int param)
 	return 0;
 }
 
-int pv_get_line_number(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res){
+static int pv_get_line_number(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res){
 	int l;
 	char *ch;
 
@@ -3337,7 +3457,7 @@ int pv_get_line_number(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
 	return 0;
 }
 
-int pv_get_cfg_file_name(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res){
+static int pv_get_cfg_file_name(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res){
 
 	if (param==NULL) {
 		LM_CRIT("BUG - bad parameters\n");
@@ -3357,7 +3477,7 @@ int pv_get_cfg_file_name(struct sip_msg *msg,  pv_param_t *param, pv_value_t *re
 }
 
 
-int pv_set_log_level(struct sip_msg* msg, pv_param_t *param, int op,
+static int pv_set_log_level(struct sip_msg* msg, pv_param_t *param, int op,
 															pv_value_t *val)
 {
 	if(param==NULL)
@@ -3380,7 +3500,7 @@ int pv_set_log_level(struct sip_msg* msg, pv_param_t *param, int op,
 	return 0;
 }
 
-int pv_get_log_level(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
+static int pv_get_log_level(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
 {
 	int l;
 
@@ -3402,7 +3522,7 @@ int pv_get_log_level(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
 	return 0;
 }
 
-int pv_set_xlog_level(struct sip_msg* msg, pv_param_t *param, int op,
+static int pv_set_xlog_level(struct sip_msg* msg, pv_param_t *param, int op,
 															pv_value_t *val)
 {
 	if(param==NULL)
@@ -3425,7 +3545,7 @@ int pv_set_xlog_level(struct sip_msg* msg, pv_param_t *param, int op,
 	return 0;
 }
 
-int pv_get_xlog_level(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
+static int pv_get_xlog_level(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
 {
 	int l;
 
@@ -3448,350 +3568,589 @@ int pv_get_xlog_level(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
 }
 
 
+/************** MSG FLAGS function *****************/
+
+static int msg_flag_parse_name(pv_spec_p sp, const str *in)
+{
+	unsigned int idx;
+	if (sp==NULL || in==NULL || in->s==NULL || in->len==0)
+		return -1;
+
+	if ( (idx=fixup_flag(FLAG_TYPE_MSG, in))==NAMED_FLAG_ERROR) {
+		LM_ERR("failed to fix the flag <%.*s>\n",in->len,in->s);
+		return -1;
+	}
+
+	sp->pvp.pvn.type = PV_NAME_INTSTR;
+	sp->pvp.pvn.u.isname.type = 0;
+
+	sp->pvp.pvn.u.isname.name.n = idx;
+
+	return 0;
+}
+
+
+static int msg_flag_set(struct sip_msg* msg, pv_param_t *param, int op,
+															pv_value_t *val)
+{
+	if(param==NULL) {
+		LM_ERR("bad parameters\n");
+		return -1;
+	}
+
+	if (val==NULL || (val->flags&(PV_VAL_NULL|PV_VAL_NONE))!=0 ||
+	(val->flags&PV_TYPE_INT)==0 ) {
+		LM_ERR("input for $msg.flag() found not to be an integer\n");
+		return -1;
+	}
+
+	if (val->ri==0)
+		resetflag (msg, (unsigned int)param->pvn.u.isname.name.n);
+	else
+		setflag( msg, (unsigned int)param->pvn.u.isname.name.n);
+
+	return 0;
+}
+
+
+static int msg_flag_get(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
+{
+	if (param==NULL||res==NULL) {
+		LM_CRIT("BUG - bad parameters\n");
+		return -1;
+	}
+
+	if ( isflagset( msg, (unsigned int)param->pvn.u.isname.name.n)==1 ) {
+		res->ri = 1;
+		res->rs.s = "true";
+		res->rs.len = 4;
+	} else {
+		res->ri = 0;
+		res->rs.s = "false";
+		res->rs.len = 5;
+	}
+
+	res->flags = PV_VAL_STR|PV_VAL_INT|PV_TYPE_INT;
+
+	return 0;
+}
+
+
+/************** MSG TYPE function *****************/
+
+static int msg_is_request_get(struct sip_msg *msg, pv_param_t *param, pv_value_t *res)
+{
+	if (param==NULL||res==NULL) {
+		LM_CRIT("BUG - bad parameters\n");
+		return -1;
+	}
+
+	if ( msg->first_line.type==SIP_REQUEST ) {
+		res->ri = 1;
+		res->rs.s = "true";
+		res->rs.len = 4;
+	} else {
+		res->ri = 0;
+		res->rs.s = "false";
+		res->rs.len = 5;
+	}
+
+	res->flags = PV_VAL_STR|PV_VAL_INT|PV_TYPE_INT;
+
+	return 0;
+}
+
+
+static int msg_type_get(struct sip_msg *msg, pv_param_t *param, pv_value_t *res)
+{
+	if (param==NULL||res==NULL) {
+		LM_CRIT("BUG - bad parameters\n");
+		return -1;
+	}
+
+	if ( msg->first_line.type==SIP_REQUEST ) {
+		res->rs.s = "request";
+		res->rs.len = 7;
+	} else {
+		res->rs.s = "reply";
+		res->rs.len = 5;
+	}
+
+	res->flags = PV_VAL_STR;
+
+	return 0;
+}
+
+
+
+/************** BRANCH FLAGS function *****************/
+
+static int branch_flag_parse_name(pv_spec_p sp, const str *in)
+{
+	unsigned int idx;
+	if (sp==NULL || in==NULL || in->s==NULL || in->len==0)
+		return -1;
+
+	if ( (idx=fixup_flag(FLAG_TYPE_BRANCH, in))==NAMED_FLAG_ERROR) {
+		LM_ERR("failed to fix the flag <%.*s>\n",in->len,in->s);
+		return -1;
+	}
+
+	sp->pvp.pvn.type = PV_NAME_INTSTR;
+	sp->pvp.pvn.u.isname.type = 0;
+
+	sp->pvp.pvn.u.isname.name.n = idx;
+
+	return 0;
+}
+
+
+static int branch_flag_set(struct sip_msg* msg, pv_param_t *param, int op,
+															pv_value_t *val)
+{
+	int idx;
+	int idxf;
+
+	if(param==NULL) {
+		LM_ERR("bad parameters\n");
+		return -1;
+	}
+
+	if (val==NULL || (val->flags&(PV_VAL_NULL|PV_VAL_NONE))!=0 ||
+	(val->flags&PV_TYPE_INT)==0 ) {
+		LM_ERR("input for $branch.flag() found not to be an integer\n");
+		return -1;
+	}
+
+	/* get the index */
+	if (pv_get_spec_index(msg, param, &idx, &idxf)!=0) {
+		LM_ERR("invalid index\n");
+		return -1;
+	}
+
+	if(idxf==PV_IDX_ALL) {
+		LM_ERR("SCRIPT BUG - * not allowed in branch flag assignment\n");
+		return -1;
+	}
+
+	if (idx<0) {
+		idx = get_nr_branches() + idx;
+	}
+
+	if (idx<0 || idx>=get_nr_branches()) {
+		LM_DBG("inexisting branch flag assignment [%d/%d]\n",
+			get_nr_branches(), idx);
+		return -1;
+	}
+
+	if (val->ri==0)
+		resetbflag (msg, idx, param->pvn.u.isname.name.n);
+	else
+		setbflag( msg, idx, param->pvn.u.isname.name.n);
+
+	return 0;
+}
+
+
+static int branch_flag_get(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
+{
+	int idx;
+	int idxf;
+
+	if (param==NULL||res==NULL) {
+		LM_CRIT("BUG - bad parameters\n");
+		return -1;
+	}
+
+	/* get the index */
+	if (pv_get_spec_index(msg, param, &idx, &idxf)!=0) {
+		LM_ERR("invalid index\n");
+		return -1;
+	}
+
+	if(idxf==PV_IDX_ALL) {
+		LM_ERR("SCRIPT BUG - * not allowed in branch flag reading\n");
+		return -1;
+	}
+
+	if (idx<0) {
+		idx = get_nr_branches() + idx;
+	}
+
+	if (idx<0 || idx>=get_nr_branches()) {
+		LM_DBG("inexisting branch flag reading [%d/%d]\n",
+			get_nr_branches(), idx);
+		return -1;
+	}
+
+	if ( isbflagset( msg, idx, param->pvn.u.isname.name.n)==1 ) {
+		res->ri = 1;
+		res->rs.s = "true";
+		res->rs.len = 4;
+	} else {
+		res->ri = 0;
+		res->rs.s = "false";
+		res->rs.len = 5;
+	}
+
+	res->flags = PV_VAL_STR|PV_VAL_INT|PV_TYPE_INT;
+
+	return 0;
+}
+
+
+/********** generic helper functions ***************/
 
 /**
  * the table with core pseudo-variables
  */
-static pv_export_t _pv_names_table[] = {
-	{{"avp", (sizeof("avp")-1)}, PVT_AVP, pv_get_avp, pv_set_avp,
+static const pv_export_t _pv_names_table[] = {
+	{str_init("avp"), PVT_AVP, pv_get_avp, pv_set_avp,
 		pv_parse_avp_name, pv_parse_avp_index, 0, 0},
-	{{"hdr", (sizeof("hdr")-1)}, PVT_HDR, pv_get_hdr, 0, pv_parse_hdr_name,
+	{str_init("hdr"), PVT_HDR, pv_get_hdr, 0, pv_parse_hdr_name,
 		pv_parse_index, 0, 0},
-	{{"hdr_name", (sizeof("hdr_name")-1)}, PVT_HDR_NAME, pv_get_hdr_name, 0, 0,
+	{str_init("hdr_name"), PVT_HDR_NAME, pv_get_hdr_name, 0, 0,
 		pv_parse_index, 0, 0},
-	{{"hdrcnt", (sizeof("hdrcnt")-1)}, PVT_HDRCNT, pv_get_hdrcnt, 0, pv_parse_hdr_name, 0, 0, 0},
-	{{"var", (sizeof("var")-1)}, PVT_SCRIPTVAR, pv_get_scriptvar,
+	{str_init("hdrcnt"), PVT_HDRCNT, pv_get_hdrcnt, 0, pv_parse_hdr_name, 0, 0, 0},
+	{str_init("var"), PVT_SCRIPTVAR, pv_get_scriptvar,
 		pv_set_scriptvar, pv_parse_scriptvar_name, 0, 0, 0},
-	{{"ai", (sizeof("ai")-1)}, /* */
+	{str_init("ai"), /* */
 		PVT_PAI_URI, pv_get_pai, 0,
 		0, 0, 0, 0},
-	{{"au", (sizeof("au")-1)}, /* */
+	{str_init("au"), /* */
 		PVT_AUTH_USERNAME, pv_get_authattr, 0,
 		0, 0, pv_init_iname, 1},
-	{{"ar", (sizeof("ar")-1)}, /* auth realm */
+	{str_init("ar"), /* auth realm */
 		PVT_AUTH_REALM, pv_get_authattr, 0,
 		0, 0, pv_init_iname, 2},
-	{{"adu", (sizeof("adu")-1)}, /* auth digest uri */
+	{str_init("adu"), /* auth digest uri */
 		PVT_AUTH_DURI, pv_get_authattr, 0,
 		0, 0, pv_init_iname, 3},
-	{{"ad", (sizeof("ad")-1)}, /* */
+	{str_init("ad"), /* */
 		PVT_AUTH_DOMAIN, pv_get_authattr, 0,
 		0, 0, pv_init_iname, 4},
-	{{"an", (sizeof("an")-1)}, /* */
+	{str_init("an"), /* */
 		PVT_AUTH_NONCE, pv_get_authattr, 0,
 		0, 0, pv_init_iname, 5},
-	{{"auth.nonce", (sizeof("auth.nonce")-1)}, /* */
+	{str_init("auth.nonce"), /* */
 		PVT_AUTH_NONCE, pv_get_authattr, 0,
 		0, 0, pv_init_iname, 5},
-	{{"auth.resp", (sizeof("auth.resp")-1)}, /* */
+	{str_init("auth.resp"), /* */
 		PVT_AUTH_RESPONSE, pv_get_authattr, 0,
 		0, 0, pv_init_iname, 6},
-	{{"auth.cnonce", (sizeof("auth.cnonce")-1)}, /* */
+	{str_init("auth.cnonce"), /* */
 		PVT_AUTH_CNONCE, pv_get_authattr, 0,
 		0, 0, pv_init_iname, 7},
-	{{"auth.opaque", (sizeof("auth.opaque")-1)}, /* */
+	{str_init("auth.opaque"), /* */
 		PVT_AUTH_OPAQUE, pv_get_authattr, 0,
 		0, 0, pv_init_iname, 8},
-	{{"auth.alg", (sizeof("auth.alg")-1)}, /* */
+	{str_init("auth.alg"), /* */
 		PVT_AUTH_ALGORITHM, pv_get_authattr, 0,
 		0, 0, pv_init_iname, 9},
-	{{"auth.qop", (sizeof("auth.qop")-1)}, /* */
+	{str_init("auth.qop"), /* */
 		PVT_AUTH_QOP, pv_get_authattr, 0,
 		0, 0, pv_init_iname, 10},
-	{{"auth.nc", (sizeof("auth.nc")-1)}, /* */
+	{str_init("auth.nc"), /* */
 		PVT_AUTH_NONCE_COUNT, pv_get_authattr, 0,
 		0, 0, pv_init_iname, 11},
-	{{"aU", (sizeof("aU")-1)}, /* */
+	{str_init("aU"), /* */
 		PVT_AUTH_USERNAME_WHOLE, pv_get_authattr, 0,
 		0, 0, pv_init_iname, 99},
-	{{"Au", (sizeof("Au")-1)}, /* */
+	{str_init("Au"), /* */
 		PVT_ACC_USERNAME, pv_get_acc_username, 0,
 		0, 0, pv_init_iname, 1},
-	{{"af", (sizeof("af") -1)},
-		PVT_AF, pv_get_af, 0, 0, 0, 0, 0},	/* */
-	{{"bf", (sizeof("bf")-1)}, /* */
+	{str_init("bf"), /* */
 		PVT_BFLAGS, pv_get_bflags, 0,
 		0, 0, 0, 0},
-	{{"branch", (sizeof("branch")-1)}, /* */
+	{str_init("branch"), /* */
 		PVT_BRANCH, pv_get_branch_fields, pv_set_branch,
 		0, 0, 0, 0},
-	{{"branch", (sizeof("branch")-1)}, /* */
+	{str_init("branch"), /* */
 		PVT_BRANCH, pv_get_branch_fields, pv_set_branch_fields,
 		pv_parse_branch_name, pv_parse_index, 0, 0},
-	{{"ci", (sizeof("ci")-1)}, /* */
+	{str_init("branch.flag"), /* */
+		PVT_BRANCH_FLAG, branch_flag_get, branch_flag_set,
+		branch_flag_parse_name, pv_parse_index, 0, 0},
+	{str_init("ci"), /* */
 		PVT_CALLID, pv_get_callid, 0,
 		0, 0, 0, 0},
-	{{"cl", (sizeof("cl")-1)}, /* */
+	{str_init("cl"), /* */
 		PVT_CONTENT_LENGTH, pv_get_content_length, 0,
 		0, 0, 0, 0},
-	{{"cs", (sizeof("cs")-1)}, /* */
+	{str_init("cs"), /* */
 		PVT_CSEQ, pv_get_cseq, 0,
 		0, 0, 0, 0},
-	{{"ct", (sizeof("ct")-1)}, /* */
+	{str_init("ct"), /* */
 		PVT_CONTACT, pv_get_contact_body, 0,
 		0, pv_parse_index, 0, 0},
-	{{"ct.fields", (sizeof("ct.fields")-1)}, /* */
+	{str_init("ct.fields"), /* */
 		PVT_CONTACT, pv_get_contact_body, 0,
 		pv_parse_ct_name, pv_parse_index, 0, 0},
-	{{"cT", (sizeof("cT")-1)}, /* */
+	{str_init("cT"), /* */
 		PVT_CONTENT_TYPE, pv_get_content_type, 0,
 		0, pv_parse_index, 0, 0},
-	{{"dd", (sizeof("dd")-1)}, /* */
+	{str_init("dd"), /* */
 		PVT_DSTURI_DOMAIN, pv_get_dsturi_attr, pv_set_dsturi_host,
 		0, 0, pv_init_iname, 1},
-	{{"di", (sizeof("di")-1)}, /* */
+	{str_init("di"), /* */
 		PVT_DIVERSION_URI, pv_get_diversion, 0,
 		0, 0, pv_init_iname, 1},
-	{{"dir", (sizeof("dir")-1)}, /* */
+	{str_init("dir"), /* */
 		PVT_DIV_REASON, pv_get_diversion, 0,
 		0, 0, pv_init_iname, 2},
-	{{"dip", (sizeof("dis")-1)}, /* */
+	{str_init("dip"), /* */
 		PVT_DIV_PRIVACY, pv_get_diversion, 0,
 		0, 0, pv_init_iname, 3},
-	{{"dp", (sizeof("dp")-1)}, /* */
+	{str_init("dp"), /* */
 		PVT_DSTURI_PORT, pv_get_dsturi_attr, pv_set_dsturi_port,
 		0, 0, pv_init_iname, 2},
-	{{"dP", (sizeof("dP")-1)}, /* */
+	{str_init("dP"), /* */
 		PVT_DSTURI_PROTOCOL, pv_get_dsturi_attr, 0,
 		0, 0, pv_init_iname, 3},
-	{{"ds", (sizeof("ds")-1)}, /* */
+	{str_init("ds"), /* */
 		PVT_DSET, pv_get_dset, 0,
 		0, 0, 0, 0},
-	{{"du", (sizeof("du")-1)}, /* */
+	{str_init("du"), /* */
 		PVT_DSTURI, pv_get_dsturi, pv_set_dsturi,
 		0, 0, 0, 0},
-	{{"duri", (sizeof("duri")-1)}, /* */
+	{str_init("duri"), /* */
 		PVT_DSTURI, pv_get_dsturi, pv_set_dsturi,
 		0, 0, 0, 0},
-	{{"err.class", (sizeof("err.class")-1)}, /* */
+	{str_init("err.class"), /* */
 		PVT_ERR_CLASS, pv_get_errinfo_attr, 0,
 		0, 0, 0, 0},
-	{{"err.level", (sizeof("err.level")-1)}, /* */
+	{str_init("err.level"), /* */
 		PVT_ERR_LEVEL, pv_get_errinfo_attr, 0,
 		0, 0, pv_init_iname, 1},
-	{{"err.info", (sizeof("err.info")-1)}, /* */
+	{str_init("err.info"), /* */
 		PVT_ERR_INFO, pv_get_errinfo_attr, 0,
 		0, 0, pv_init_iname, 2},
-	{{"err.rcode", (sizeof("err.rcode")-1)}, /* */
+	{str_init("err.rcode"), /* */
 		PVT_ERR_RCODE, pv_get_errinfo_attr, 0,
 		0, 0, pv_init_iname, 3},
-	{{"err.rreason", (sizeof("err.rreason")-1)}, /* */
+	{str_init("err.rreason"), /* */
 		PVT_ERR_RREASON, pv_get_errinfo_attr, 0,
 		0, 0, pv_init_iname, 4},
-	{{"fd", (sizeof("fd")-1)}, /* */
+	{str_init("fd"), /* */
 		PVT_FROM_DOMAIN, pv_get_from_attr, 0,
 		0, 0, pv_init_iname, 3},
-	{{"from.domain", (sizeof("from.domain")-1)}, /* */
+	{str_init("from.domain"), /* */
 		PVT_FROM_DOMAIN, pv_get_from_attr, 0,
 		0, 0, pv_init_iname, 3},
-	{{"fn", (sizeof("fn")-1)}, /* */
+	{str_init("fn"), /* */
 		PVT_FROM_DISPLAYNAME, pv_get_from_attr, 0,
 		0, 0, pv_init_iname, 5},
-	{{"fs", (sizeof("fs")-1)}, /* */
-		PVT_FORCE_SOCK, pv_get_force_sock, pv_set_force_sock,
-		0, 0, 0, 0},
-	{{"ft", (sizeof("ft")-1)}, /* */
+	{str_init("ft"), /* */
 		PVT_FROM_TAG, pv_get_from_attr, 0,
 		0, 0, pv_init_iname, 4},
-	{{"fu", (sizeof("fu")-1)}, /* */
+	{str_init("fu"), /* */
 		PVT_FROM, pv_get_from_attr, 0,
 		0, 0, pv_init_iname, 1},
-	{{"from", (sizeof("from")-1)}, /* */
+	{str_init("from"), /* */
 		PVT_FROM, pv_get_from_attr, 0,
 		0, 0, pv_init_iname, 1},
-	{{"fU", (sizeof("fU")-1)}, /* */
+	{str_init("fU"), /* */
 		PVT_FROM_USERNAME, pv_get_from_attr, 0,
 		0, 0, pv_init_iname, 2},
-	{{"from.user", (sizeof("from.user")-1)}, /* */
+	{str_init("from.user"), /* */
 		PVT_FROM_USERNAME, pv_get_from_attr, 0,
 		0, 0, pv_init_iname, 2},
-	{{"log_level", (sizeof("log_level")-1)}, /* per process log level*/
+	{str_init("log_level"), /* per process log level*/
 		PVT_LOG_LEVEL, pv_get_log_level, pv_set_log_level,
 		0, 0, 0, 0},
-	{{"mb", (sizeof("mb")-1)}, /* */
+	{str_init("mb"), /* */
 		PVT_MSG_BUF, pv_get_msg_buf, 0,
 		0, 0, 0, 0},
-	{{"mf", (sizeof("mf")-1)}, /* */
+	{str_init("mf"), /* */
 		PVT_FLAGS, pv_get_flags, 0,
 		0, 0, 0, 0},
-	{{"mi", (sizeof("mi")-1)}, /* */
+	{str_init("msg.flag"), /* */
+		PVT_MSG_FLAG, msg_flag_get, msg_flag_set,
+		msg_flag_parse_name, 0, 0, 0},
+	{str_init("msg.is_request"), /* */
+		PVT_MSG_FLAG, msg_is_request_get, 0,
+		0, 0, 0, 0},
+	{str_init("msg.type"), /* */
+		PVT_MSG_FLAG, msg_type_get, 0,
+		0, 0, 0, 0},
+	{str_init("mi"), /* */
 		PVT_MSGID, pv_get_msgid, 0,
 		0, 0, 0, 0},
-	{{"ml", (sizeof("ml")-1)}, /* */
+	{str_init("ml"), /* */
 		PVT_MSG_LEN, pv_get_msg_len, 0,
 		0, 0, 0, 0},
-	{{"od", (sizeof("od")-1)}, /* */
+	{str_init("od"), /* */
 		PVT_OURI_DOMAIN, pv_get_ouri_attr, 0,
 		0, 0, pv_init_iname, 2},
-	{{"op", (sizeof("op")-1)}, /* */
+	{str_init("op"), /* */
 		PVT_OURI_PORT, pv_get_ouri_attr, 0,
 		0, 0, pv_init_iname, 3},
-	{{"oP", (sizeof("oP")-1)}, /* */
+	{str_init("oP"), /* */
 		PVT_OURI_PROTOCOL, pv_get_ouri_attr, 0,
 		0, 0, pv_init_iname, 4},
-	{{"ou", (sizeof("ou")-1)}, /* */
+	{str_init("ou"), /* */
 		PVT_OURI, pv_get_ouri, 0,
 		0, 0, 0, 0},
-	{{"ouri", (sizeof("ouri")-1)}, /* */
+	{str_init("ouri"), /* */
 		PVT_OURI, pv_get_ouri, 0,
 		0, 0, 0, 0},
-	{{"oU", (sizeof("oU")-1)}, /* */
+	{str_init("oU"), /* */
 		PVT_OURI_USERNAME, pv_get_ouri_attr, 0,
 		0, 0, pv_init_iname, 1},
-	{{"path", (sizeof("path")-1)}, /* */
+	{str_init("path"), /* */
 		PVT_PATH, pv_get_path, 0,
 		0, 0, 0, 0},
-	{{"pd", (sizeof("pd")-1)}, /* */
+	{str_init("pd"), /* */
 		PVT_PPI_DOMAIN, pv_get_ppi_attr, 0,
 		0, 0, pv_init_iname, 3},
-	{{"pn", (sizeof("pn")-1)}, /* */
+	{str_init("pn"), /* */
 		PVT_PPI_DISPLAYNAME, pv_get_ppi_attr, 0,
 		0, 0, pv_init_iname, 4},
-	{{"pp", (sizeof("pp")-1)}, /* */
+	{str_init("pp"), /* */
 		PVT_PID, pv_get_pid, 0,
 		0, 0, 0, 0},
-	{{"pr", (sizeof("pr")-1)}, /* */
-		PVT_PROTO, pv_get_proto, 0,
-		0, 0, 0, 0},
-	{{"proto", (sizeof("proto")-1)}, /* */
-		PVT_PROTO, pv_get_proto, 0,
-		0, 0, 0, 0},
-	{{"pu", (sizeof("pu")-1)}, /* */
+	{str_init("pu"), /* */
 		PVT_PPI, pv_get_ppi_attr, 0,
 		0, 0, pv_init_iname, 1},
-	{{"pU", (sizeof("pU")-1)}, /* */
+	{str_init("pU"), /* */
 		PVT_PPI_USERNAME, pv_get_ppi_attr, 0,
 		0, 0, pv_init_iname, 2},
-	{{"rb", (sizeof("rb")-1)}, /* */
+	{str_init("rb"), /* */
 		PVT_MSG_BODY, pv_get_msg_body, 0,
 		0, pv_parse_index, 0, 0},
-	{{"rb", (sizeof("rb")-1)}, /* */
+	{str_init("rb"), /* */
 		PVT_MSG_BODY, pv_get_msg_body, 0,
 		pv_parse_rb_name, pv_parse_index, 0, 0},
-	{{"rc", (sizeof("rc")-1)}, /* */
+	{str_init("rc"), /* */
 		PVT_RETURN_CODE, pv_get_return_code, 0,
 		0, 0, 0, 0},
-	{{"retcode", (sizeof("retcode")-1)}, /* */
+	{str_init("retcode"), /* */
 		PVT_RETURN_CODE, pv_get_return_code, 0,
 		0, 0, 0, 0},
-	{{"rd", (sizeof("rd")-1)}, /* */
+	{str_init("rd"), /* */
 		PVT_RURI_DOMAIN, pv_get_ruri_attr, pv_set_ruri_host,
 		0, 0, pv_init_iname, 2},
-	{{"ruri.domain", (sizeof("ruri.domain")-1)}, /* */
+	{str_init("ruri.domain"), /* */
 		PVT_RURI_DOMAIN, pv_get_ruri_attr, pv_set_ruri_host,
 		0, 0, pv_init_iname, 2},
-	{{"re", (sizeof("re")-1)}, /* */
+	{str_init("re"), /* */
 		PVT_RPID_URI, pv_get_rpid, 0,
 		0, 0, 0, 0},
-	{{"rm", (sizeof("rm")-1)}, /* */
+	{str_init("rm"), /* */
 		PVT_METHOD, pv_get_method, 0,
 		0, 0, 0, 0},
-	{{"rp", (sizeof("rp")-1)}, /* */
+	{str_init("route"), /* */
+		PVT_ROUTE_NAME, pv_get_route_name, 0,
+		0, pv_parse_index, 0, 0},
+	{str_init("rp"), /* */
 		PVT_RURI_PORT, pv_get_ruri_attr, pv_set_ruri_port,
 		0, 0, pv_init_iname, 3},
-	{{"rP", (sizeof("rP")-1)}, /* */
+	{str_init("rP"), /* */
 		PVT_RURI_PROTOCOL, pv_get_ruri_attr, 0,
 		0, 0, pv_init_iname, 4},
-	{{"rr", (sizeof("rr")-1)}, /* */
+	{str_init("rr"), /* */
 		PVT_REASON, pv_get_reason, 0,
 		0, 0, 0, 0},
-	{{"rs", (sizeof("rs")-1)}, /* */
+	{str_init("rs"), /* */
 		PVT_STATUS, pv_get_status, 0,
 		0, 0, 0, 0},
-	{{"rt", (sizeof("rt")-1)}, /* */
+	{str_init("rt"), /* */
 		PVT_REFER_TO, pv_get_refer_to, 0,
 		0, 0, 0, 0},
-	{{"rT", (sizeof("rt")-1)}, /* */
-		PVT_ROUTE_TYPE, pv_get_route_type, 0,
-		0, 0, 0, 0},
-	{{"ru", (sizeof("ru")-1)}, /* */
+	{str_init("ru"), /* */
 		PVT_RURI, pv_get_ruri, pv_set_ruri,
 		0, 0, 0, 0},
-	{{"ruri", (sizeof("ruri")-1)}, /* */
+	{str_init("ruri"), /* */
 		PVT_RURI, pv_get_ruri, pv_set_ruri,
 		0, 0, 0, 0},
-	{{"ru_q", (sizeof("ru_q")-1)}, /* */
+	{str_init("ru_q"), /* */
 		PVT_RU_Q, pv_get_ru_q, pv_set_ru_q,
 		0, 0, 0, 0},
-	{{"rU", (sizeof("rU")-1)}, /* */
+	{str_init("rU"), /* */
 		PVT_RURI_USERNAME, pv_get_ruri_attr, pv_set_ruri_user,
 		0, 0, pv_init_iname, 1},
-	{{"ruri.user", (sizeof("ruri.user")-1)}, /* */
+	{str_init("ruri.user"), /* */
 		PVT_RURI_USERNAME, pv_get_ruri_attr, pv_set_ruri_user,
 		0, 0, pv_init_iname, 1},
-	{{"Ri", (sizeof("Ri")-1)}, /* */
-		PVT_RCVIP, pv_get_rcvip, 0,
-		0, 0, 0, 0},
-	{{"Rp", (sizeof("Rp")-1)}, /* */
-		PVT_RCVPORT, pv_get_rcvport, 0,
-		0, 0, 0, 0},
-	{{"src_ip", (sizeof("src_ip")-1)}, /* */
+	{str_init("src_ip"), /* */
 		PVT_SRCIP, pv_get_srcip, 0,
 		0, 0, 0, 0},
-	{{"si", (sizeof("si")-1)}, /* */
+	{str_init("socket_in"), /* */
+		PVT_SOCKET_IN, pv_get_socket_in_fields, NULL,
+		0, 0, 0, 0},
+	{str_init("socket_in"), /* */
+		PVT_SOCKET_IN, pv_get_socket_in_fields, NULL,
+		pv_parse_socket_name, 0, 0, 0},
+	{str_init("socket_out"), /* */
+		PVT_SOCKET_OUT, pv_get_socket_out_fields, pv_set_force_sock,
+		0, 0, 0, 0},
+	{str_init("socket_out"), /* */
+		PVT_SOCKET_OUT, pv_get_socket_out_fields, NULL,
+		pv_parse_socket_name, 0, 0, 0},
+	{str_init("si"), /* */
 		PVT_SRCIP, pv_get_srcip, 0,
 		0, 0, 0, 0},
-	{{"sp", (sizeof("sp")-1)}, /* */
+	{str_init("sp"), /* */
 		PVT_SRCPORT, pv_get_srcport, 0,
 		0, 0, 0, 0},
-	{{"td", (sizeof("td")-1)}, /* */
+	{str_init("td"), /* */
 		PVT_TO_DOMAIN, pv_get_to_attr, 0,
 		0, 0, pv_init_iname, 3},
-	{{"to.domain", (sizeof("to.domain")-1)}, /* */
+	{str_init("to.domain"), /* */
 		PVT_TO_DOMAIN, pv_get_to_attr, 0,
 		0, 0, pv_init_iname, 3},
-	{{"time", (sizeof("time")-1)}, /* */
+	{str_init("time"), /* */
 		PVT_TIME, pv_get_formated_time, 0,
 		pv_parse_time_name, 0, 0, 0},
-	{{"tn", (sizeof("tn")-1)}, /* */
+	{str_init("tn"), /* */
 		PVT_TO_DISPLAYNAME, pv_get_to_attr, 0,
 		0, 0, pv_init_iname, 5},
-	{{"tt", (sizeof("tt")-1)}, /* */
+	{str_init("tt"), /* */
 		PVT_TO_TAG, pv_get_to_attr, 0,
 		0, 0, pv_init_iname, 4},
-	{{"tu", (sizeof("tu")-1)}, /* */
+	{str_init("tu"), /* */
 		PVT_TO, pv_get_to_attr, 0,
 		0, 0, pv_init_iname, 1},
-	{{"to", (sizeof("to")-1)}, /* */
+	{str_init("to"), /* */
 		PVT_TO, pv_get_to_attr, 0,
 		0, 0, pv_init_iname, 1},
-	{{"tU", (sizeof("tU")-1)}, /* */
+	{str_init("tU"), /* */
 		PVT_TO_USERNAME, pv_get_to_attr, 0,
 		0, 0, pv_init_iname, 2},
-	{{"to.user", (sizeof("to.user")-1)}, /* */
+	{str_init("to.user"), /* */
 		PVT_TO_USERNAME, pv_get_to_attr, 0,
 		0, 0, pv_init_iname, 2},
-	{{"Tf", (sizeof("Tf")-1)}, /* */
+	{str_init("Tf"), /* */
 		PVT_TIMEF, pv_get_timef, 0,
 		0, 0, 0, 0},
-	{{"Ts", (sizeof("Ts")-1)}, /* */
+	{str_init("Ts"), /* */
 		PVT_TIMES, pv_get_times, 0,
 		0, 0, 0, 0},
-	{{"Tsm", (sizeof("Tsm")-1)}, /* */
+	{str_init("Tsm"), /* */
 		PVT_TIMES, pv_get_timem, 0,
 		0, 0, 0, 0},
-	{{"TS", (sizeof("TS")-1)}, /* */
+	{str_init("TS"), /* */
 		PVT_TIMES, pv_get_start_times, 0,
 		0, 0, 0, 0},
-	{{"ua", (sizeof("ua")-1)}, /* */
+	{str_init("ua"), /* */
 		PVT_USERAGENT, pv_get_useragent, 0,
 		0, 0, 0, 0},
-	{{"C", sizeof("C")-1}, PVT_COLOR, pv_get_color, 0,
+	{str_init("C"), PVT_COLOR, pv_get_color, 0,
 		pv_parse_color_name, 0, 0, 0 },
-	{{"argv", sizeof("argv")-1}, PVT_ARGV, pv_get_argv, 0,
+	{str_init("argv"), PVT_ARGV, pv_get_argv, 0,
 		pv_parse_argv_name, 0, 0, 0 },
-	{{"param", sizeof("param")-1}, PVT_ROUTE_PARAM, pv_get_param, 0,
+	{str_init("param"), PVT_ROUTE_PARAM, pv_get_param, 0,
 		pv_parse_param_name, 0, 0, 0 },
-	{{"cfg_line", sizeof("cfg_line")-1}, PVT_LINE_NUMBER, pv_get_line_number, 0,
+	{str_init("cfg_line"), PVT_LINE_NUMBER, pv_get_line_number, 0,
 		0, 0, 0, 0 },
-	{{"cfg_file", sizeof("cfg_file")-1}, PVT_CFG_FILE_NAME, pv_get_cfg_file_name, 0,
+	{str_init("cfg_file"), PVT_CFG_FILE_NAME, pv_get_cfg_file_name, 0,
 	0, 0, 0, 0 },
-	{{"xlog_level", sizeof("xlog_level")-1}, PVT_XLOG_LEVEL, pv_get_xlog_level,
+	{str_init("xlog_level"), PVT_XLOG_LEVEL, pv_get_xlog_level,
 		pv_set_xlog_level, 0, 0, 0, 0 },
 	{{0,0}, 0, 0, 0, 0, 0, 0, 0}
 };
 
-pv_export_t* pv_lookup_spec_name(str *pvname, pv_spec_p e, int has_name)
+static const pv_export_t* pv_lookup_spec_name(str *pvname, pv_spec_p e, int has_name)
 {
 	int i;
 	pv_extra_p pvi;
@@ -3858,7 +4217,7 @@ static int is_pv_valid_char(char c)
 	return 0;
 }
 
-char* pv_parse_spec(str *in, pv_spec_p e)
+char* pv_parse_spec(const str *in, const pv_spec_p e)
 {
 	char *p;
 	str s;
@@ -3867,7 +4226,7 @@ char* pv_parse_spec(str *in, pv_spec_p e)
 	int pvstate;
 	int has_inner_name;
 	trans_t *tr = NULL;
-	pv_export_t *pte = NULL;
+	const pv_export_t *pte = NULL;
 	int n=0;
 
 	if(in==NULL || in->s==NULL || e==NULL || *in->s!=PV_MARKER)
@@ -4171,7 +4530,7 @@ error:
 /**
  *
  */
-int pv_parse_format(str *in, pv_elem_p *el)
+int pv_parse_format(const str *in, pv_elem_p *el)
 {
 	char *p, *p0;
 	int n = 0;
@@ -4265,7 +4624,7 @@ int pv_get_spec_name(struct sip_msg* msg, pv_param_p ip, pv_value_t *name)
 		return 0;
 	}
 	/* pvar */
-	if(pv_get_spec_value(msg, (pv_spec_p)(ip->pvn.u.dname), name)!=0)
+	if(pv_get_spec_value(msg, (const pv_spec_p)(ip->pvn.u.dname), name)!=0)
 	{
 		LM_ERR("cannot get name value\n");
 		return -1;
@@ -4295,7 +4654,7 @@ int pv_get_avp_name(struct sip_msg* msg, pv_param_p ip, int *avp_name,
 		return 0;
 	}
 	/* pvar */
-	if(pv_get_spec_value(msg, (pv_spec_p)(ip->pvn.u.dname), &tv)!=0)
+	if(pv_get_spec_value(msg, (const pv_spec_p)(ip->pvn.u.dname), &tv)!=0)
 	{
 		LM_ERR("cannot get avp value\n");
 		return -1;
@@ -4342,7 +4701,7 @@ int pv_get_spec_index(struct sip_msg* msg, pv_param_p ip, int *idx, int *flags)
 	}
 
 	/* pvar */
-	if(pv_get_spec_value(msg, (pv_spec_p)ip->pvi.u.dval, &tv)!=0)
+	if(pv_get_spec_value(msg, (const pv_spec_p)ip->pvi.u.dval, &tv)!=0)
 	{
 		LM_ERR("cannot get index value\n");
 		return -1;
@@ -4383,7 +4742,7 @@ int pv_set_value(struct sip_msg* msg, pv_spec_p sp,
 	return (*sp->setf)(pv_msg, &(sp->pvp), op, value);
 }
 
-int pv_get_spec_value(struct sip_msg* msg, pv_spec_p sp, pv_value_t *value)
+int pv_get_spec_value(struct sip_msg* msg, const pv_spec_p sp, pv_value_t *value)
 {
 	struct sip_msg* pv_msg;
 
@@ -4416,7 +4775,7 @@ int pv_get_spec_value(struct sip_msg* msg, pv_spec_p sp, pv_value_t *value)
 	return 0;
 }
 
-int pv_print_spec(struct sip_msg* msg, pv_spec_p sp, char *buf, int *len)
+int pv_print_spec(struct sip_msg* msg, const pv_spec_p sp, char *buf, int *len)
 {
 	pv_value_t tok;
 	if(msg==NULL || sp==NULL || buf==NULL || len==NULL)
@@ -4501,7 +4860,12 @@ int pv_printf(struct sip_msg* msg, pv_elem_p list, char *buf, int *len)
 	goto done;
 
 overflow:
-	LM_ERR("buffer overflow -- increase the buffer size from [%d]...\n",*len);
+	if (is_pv_print_buf(buf))
+		LM_ERR("buffer too small -- increase 'pv_print_buf_size' from [%d]\n",
+				*len);
+	else
+		LM_ERR("buffer too small -- increase the buffer size "
+				"from [%d]...\n", *len);
 	return -1;
 
 done:
@@ -4592,7 +4956,7 @@ int pv_elem_free_all(pv_elem_p log)
 	return 0;
 }
 
-str pv_value_print(pv_value_t *val)
+static str pv_value_print(const pv_value_t *val)
 {
 	str printed = str_init(NULL);
 
@@ -4619,25 +4983,21 @@ void pv_value_destroy(pv_value_t *val)
 	memset(val, 0, sizeof(pv_value_t));
 }
 
-#define PV_PRINT_BUF_SIZE  1024
-#define PV_PRINT_BUF_NO    7
-/*IMPORTANT NOTE - even if the function prints and returns a static buffer, it
- * has built-in support for 3 levels of nesting (or concurrent usage).
- * If you think it's not enough for you, either use pv_printf() directly,
- * either increase PV_PRINT_BUF_NO   --bogdan */
+/* IMPORTANT NOTE - even if the function prints and returns a static buffer, it
+ * has built-in support for PV_PRINTF_BUF_NO levels of nesting
+ * (or concurrent usage).  If you think it's not enough for you, either use
+ * pv_printf() directly, either increase PV_PRINT_BUF_NO   --bogdan */
 int pv_printf_s(struct sip_msg* msg, pv_elem_p list, str *s)
 {
 	static int buf_itr = 0;
-	static char buf[PV_PRINT_BUF_NO][PV_PRINT_BUF_SIZE];
 
 	if (list->next==0 && list->spec.getf==0) {
 		*s = list->text;
 		return 0;
 	} else {
-		s->s = buf[buf_itr];
-		s->len = PV_PRINT_BUF_SIZE;
-		buf_itr = (buf_itr+1)%PV_PRINT_BUF_NO;
-		return pv_printf( msg, list, s->s, &s->len);
+		*s = pv_print_buf[buf_itr];
+		buf_itr = (buf_itr + 1) % PV_PRINT_BUF_NO;
+		return pv_printf(msg, list, s->s, &s->len);
 	}
 }
 
@@ -4650,7 +5010,7 @@ void pv_spec_free(pv_spec_t *spec)
 	pkg_free(spec);
 }
 
-int pv_spec_dbg(pv_spec_p sp)
+int pv_spec_dbg(const pv_spec_p sp)
 {
 	if(sp==NULL)
 	{
@@ -4706,7 +5066,7 @@ int pv_spec_dbg(pv_spec_p sp)
 /**
  *
  */
-int pv_init_extra_list(void)
+static int pv_init_extra_list(void)
 {
 	_pv_extra_list = (pv_extra_p*)pkg_malloc(sizeof(pv_extra_p));
 	if(_pv_extra_list==0)
@@ -4718,10 +5078,10 @@ int pv_init_extra_list(void)
 	return 0;
 }
 
-int pv_add_extra(pv_export_t *e)
+static int pv_add_extra(pv_export_t *e)
 {
 	char *p;
-	str  *in;
+	const str *in;
 	pv_extra_t *pvi = NULL;
 	pv_extra_t *pvj = NULL;
 	pv_extra_t *pvn = NULL;
@@ -4835,7 +5195,7 @@ int pv_free_extra_list(void)
 	return 0;
 }
 
-pv_context_t* new_pv_context(str* name, pv_contextf_t get_context)
+static pv_context_t* new_pv_context(const str* name, pv_contextf_t get_context)
 {
 	pv_context_t* pvc_new = NULL;
 	int size;
@@ -4907,7 +5267,7 @@ int register_pv_context(char* cname, pv_contextf_t get_context)
 
 
 /* function to register a pv context getter */
-pv_context_t* add_pv_context(str* name, pv_contextf_t get_context)
+static pv_context_t* add_pv_context(const str* name, pv_contextf_t get_context)
 {
 	pv_context_t* pvc = pv_context_lst;
 	pv_context_t* pvc_new, *pvc_prev;
@@ -4949,7 +5309,7 @@ pv_context_t* add_pv_context(str* name, pv_contextf_t get_context)
 	return pvc_new;
 }
 
-pv_context_t* pv_get_context(str* name)
+static pv_context_t* pv_get_context(const str* name)
 {
 	pv_context_t* pvc = pv_context_lst;
 
@@ -4965,7 +5325,7 @@ pv_context_t* pv_get_context(str* name)
 	return 0;
 }
 
-int pv_contextlist_check(void)
+static int pv_contextlist_check(void)
 {
 	pv_context_t* pvc = pv_context_lst;
 
@@ -4983,7 +5343,7 @@ int pv_contextlist_check(void)
 /* argument options '-o' */
 argv_p argv_vars = NULL;
 
-argv_p search_argv(str *name)
+static argv_p search_argv(const str *name)
 {
 	argv_p it;
 
@@ -5050,7 +5410,7 @@ int add_arg_var(char *opt)
 
 }
 
-int pv_parse_argv_name(pv_spec_p sp, str *in)
+static int pv_parse_argv_name(pv_spec_p sp, const str *in)
 {
 	argv_p v_arg;
 
@@ -5072,7 +5432,7 @@ int pv_parse_argv_name(pv_spec_p sp, str *in)
 	return 0;
 }
 
-int pv_get_argv(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
+static int pv_get_argv(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
 {
 	if (!param) {
 		LM_ERR("null parameter received\n");
@@ -5085,7 +5445,7 @@ int pv_get_argv(struct sip_msg *msg,  pv_param_t *param, pv_value_t *res)
 	return pv_get_strval(msg, param, res, &param->pvv);
 }
 
-static int pv_parse_param_name(pv_spec_p sp, str *in)
+static int pv_parse_param_name(pv_spec_p sp, const str *in)
 {
 	char *p;
 	char *s;
@@ -5117,10 +5477,12 @@ static int pv_parse_param_name(pv_spec_p sp, str *in)
 	/* always an int type from now */
 	sp->pvp.pvn.u.isname.type = 0;
 	sp->pvp.pvn.type = PV_NAME_INTSTR;
+	/* do our best to convert it to an index */
 	if (str2int(in, (unsigned int *)&sp->pvp.pvn.u.isname.name.n) < 0)
 	{
-		LM_ERR("bad param index [%.*s]\n", in->len, in->s);
-		return -1;
+		/* remember it was a string, so we can retrieve it later */
+		sp->pvp.pvn.u.isname.name.s = *in;
+		sp->pvp.pvn.u.isname.type = AVP_NAME_STR;
 	}
 	return 0;
 
@@ -5128,94 +5490,12 @@ static int pv_parse_param_name(pv_spec_p sp, str *in)
 
 static int pv_get_param(struct sip_msg *msg,  pv_param_t *ip, pv_value_t *res)
 {
-	int index;
-	pv_value_t tv;
-
 	if (!ip)
 	{
 		LM_ERR("null parameter received\n");
 		return -1;
 	}
-
-	if (route_rec_level == -1 || !route_params[route_rec_level] || route_params_number[route_rec_level] == 0)
-	{
-		LM_DBG("no parameter specified for this route\n");
-		return pv_get_null(msg, ip, res);
-	}
-
-	if(ip->pvn.type==PV_NAME_INTSTR)
-	{
-		index = ip->pvn.u.isname.name.n;
-	} else
-	{
-		/* pvar -> it might be another $param variable! */
-		route_rec_level--;
-		if(pv_get_spec_value(msg, (pv_spec_p)(ip->pvn.u.dname), &tv)!=0)
-		{
-			LM_ERR("cannot get spec value\n");
-			route_rec_level++;
-			return -1;
-		}
-		route_rec_level++;
-
-		if(tv.flags&PV_VAL_NULL || tv.flags&PV_VAL_EMPTY)
-		{
-			LM_ERR("null or empty name\n");
-			return -1;
-		}
-		if (!(tv.flags&PV_VAL_INT) || str2int(&tv.rs,(unsigned int*)&index) < 0)
-		{
-			LM_ERR("invalid index <%.*s>\n", tv.rs.len, tv.rs.s);
-			return -1;
-		}
-	}
-
-	if (index < 1 || index > route_params_number[route_rec_level])
-	{
-		LM_DBG("no such parameter index %d\n", index);
-		return pv_get_null(msg, ip, res);
-	}
-
-	/* the parameters start at 0, whereas the index starts from 1 */
-	index--;
-	switch (route_params[route_rec_level][index].type)
-	{
-	case NULLV_ST:
-		res->rs.s = NULL;
-		res->rs.len = res->ri = 0;
-		res->flags = PV_VAL_NULL;
-		break;
-
-	case STRING_ST:
-		res->rs.s = route_params[route_rec_level][index].u.string;
-		res->rs.len = strlen(res->rs.s);
-		res->flags = PV_VAL_STR;
-		break;
-
-	case NUMBER_ST:
-		res->rs.s = int2str(route_params[route_rec_level][index].u.number, &res->rs.len);
-		res->ri = route_params[route_rec_level][index].u.number;
-		res->flags = PV_VAL_STR|PV_VAL_INT|PV_TYPE_INT;
-		break;
-
-	case SCRIPTVAR_ST:
-		route_rec_level--;
-		if(pv_get_spec_value(msg, (pv_spec_p)route_params[route_rec_level + 1][index].u.data, res)!=0)
-		{
-			LM_ERR("cannot get spec value\n");
-			route_rec_level++;
-			return -1;
-		}
-		route_rec_level++;
-		break;
-
-	default:
-		LM_ALERT("BUG: invalid parameter type %d\n",
-				 route_params[route_rec_level][index].type);
-		return -1;
-	}
-
-	return 0;
+	return route_params_run(msg, ip, res);
 }
 
 void destroy_argv_list(void)

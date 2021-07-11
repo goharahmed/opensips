@@ -82,6 +82,7 @@
 #define F_CONN_REMOVED_WRITE	(1<<4) /*!< no longer in "main" reactor for write */
 /*!< no longer in "main" reactor for read or write */
 #define F_CONN_REMOVED			(F_CONN_REMOVED_READ|F_CONN_REMOVED_WRITE)
+#define F_CONN_INIT				(1<<5) /*!< the connection was initialized */
 
 enum tcp_conn_states { S_CONN_ERROR=-2, S_CONN_BAD=-1, S_CONN_OK=0,
 		S_CONN_CONNECTING, S_CONN_EOF };
@@ -98,13 +99,33 @@ struct tcp_conn_alias{
 };
 
 
+struct tcp_async_chunk {
+	char *buf; /* buffer that needs to be sent out */
+	int len;   /* length of the buffer */
+	int ticks; /* time at which this chunk was initially
+				  attempted to be written */
+};
+
+struct tcp_async_data {
+	/* the number of chunks pending to be written */
+	int pending;
+	/* the number of chunks allocated */
+	int allocated;
+	/* the oldest chunk in our write list */
+	int oldest;
+	/* the chunks that need to be written on this
+	 * connection when it will become writable */
+	struct tcp_async_chunk *chunks[0];
+};
+
+
 /*! \brief TCP connection structure */
 struct tcp_connection{
 	int s;					/*!< socket, used by "tcp main" */
 	int fd;					/*!< used only by "children", don't modify it! private data! */
 	int proc_id;				/*!< used only by "children", contains the pt table ID of the TCP worker currently holding the connection, or -1 if in TCP main */
 	gen_lock_t write_lock;
-	int id;					/*!< id (unique!) used to retrieve a specific connection when reply-ing*/
+	unsigned int id;				/*!< id (unique!) used to retrieve a specific connection when reply-ing*/
 	unsigned long long cid;					/*!< connection id (unique!) used to uniquely identify connections across space and time */
 	struct receive_info rcv;		/*!< src & dst ip, ports, proto a.s.o*/
 	volatile int refcnt;
@@ -131,6 +152,7 @@ struct tcp_connection{
 	/*!< protocol related & reserved flags */
 	unsigned short proto_flags;
 	struct struct_hist *hist;
+	struct tcp_async_data *async;
 	/* protocol specific data attached to this connection */
 	void *proto_data;
 };
@@ -138,7 +160,7 @@ struct tcp_connection{
 
 /*! \brief add port as an alias for the "id" connection
  * \return 0 on success,-1 on failure */
-int tcpconn_add_alias(int id, int port, int proto);
+int tcpconn_add_alias(unsigned int id, int port, int proto);
 
 
 #define tcp_conn_set_lifetime( _c, _lt) \

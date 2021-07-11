@@ -77,7 +77,7 @@ static void mod_destroy(void);
 /* PV functions */
 static int pv_set_xml(struct sip_msg*,  pv_param_t*, int, pv_value_t*);
 static int pv_get_xml(struct sip_msg*,  pv_param_t*, pv_value_t*);
-static int pv_parse_xml_name(pv_spec_p , str *);
+static int pv_parse_xml_name(pv_spec_p , const str *);
 
 
 static pv_export_t mod_items[] = {
@@ -91,6 +91,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	NULL,            /* OpenSIPS module dependencies */
 	NULL,            /* exported functions */
 	0,               /* exported async functions */
@@ -100,10 +101,12 @@ struct module_exports exports= {
 	mod_items,       /* exported pseudo-variables */
 	0,				 /* exported transformations */
 	0,               /* extra processes */
+	0,               /* module pre-initialization function */
 	mod_init,        /* module initialization function */
 	0,               /* reply processing function */
 	mod_destroy,
-	child_init       /* per-child init function */
+	child_init,      /* per-child init function */
+	0                /* reload confirm function */
 };
 
 
@@ -170,7 +173,7 @@ enum {
 	ST_ACCESS = 3,
 };
 
-int pv_parse_xml_name(pv_spec_p sp, str *in)
+int pv_parse_xml_name(pv_spec_p sp, const str *in)
 {
 	xml_path_t *path = NULL;
 	char *cur, *start;
@@ -387,6 +390,7 @@ static xmlNode *get_node_by_path(xmlNode *root, xml_element_t *path_el)
 	xmlNode *cur;
 	str n_name;
 	int i;
+	char *p;
 
 	cur = root;
 	while (path_el) {
@@ -394,6 +398,15 @@ static xmlNode *get_node_by_path(xmlNode *root, xml_element_t *path_el)
 		while (cur) {
 			n_name.s = (char *)cur->name;
 			n_name.len = strlen(n_name.s);
+
+			/* skip an undefined namespace prefix that may appear
+			 * in the element name */
+			p = q_memchr(n_name.s, ':', n_name.len);
+			if (p) {
+				n_name.len = n_name.len - (p - n_name.s + 1);
+				n_name.s = p + 1;
+			}
+
 			if (!str_strcmp(&path_el->tag, &n_name)) {
 				if (i == path_el->idx)
 					break;
@@ -532,6 +545,7 @@ int pv_get_xml(struct sip_msg* msg,  pv_param_t* pvp, pv_value_t* res)
 				xmlBufferFree(xml_buf);
 			else
 				xmlFree(xml_buf_s);
+			return pv_get_null( msg, pvp, res);
 		}
 
 		memcpy(res_buf.s, xml_buf_s, xml_buf_len);

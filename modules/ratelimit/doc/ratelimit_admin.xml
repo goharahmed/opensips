@@ -28,6 +28,13 @@
 		To do that, define the <emphasis>pipe_replication_cluster</emphasis> parameter
 		in your configuration script.
 	</para>
+	<para>
+		Starting with &osips; 3.2, choosing whether to replicate a pipe over
+		CacheDB backends or bin replication is triggered by the flags specified
+		when the pipe is created: adding the <emphasis>/s<emphasis> suffix to the
+		pipe's name will replicate through CacheDB, and adding <emphasis>/b</emphasis>
+		will replicate through bin/clusterer.
+	</para>
 	</section>
 	<section>
 	<title>Use Cases</title>
@@ -50,8 +57,8 @@
 	</para>
 	<programlisting format="linespecific">
 ...
-	if (!rl_check("$rU", "50", "TAILDROP")) {
-		sl_send_reply("503", "Server Unavailable");
+	if (!rl_check($rU, 50, "TAILDROP")) {
+		sl_send_reply(503, "Server Unavailable");
 		exit;
 	};
 ...
@@ -170,6 +177,12 @@
 		<para>
 		Generally though, as real life request rates drift by less, adapting should
 		happen much faster.
+		</para>
+		<para>
+		IMPORTANT NOTE: as this algorithm is diven by the load factor, the values
+		for the limits must be between 0 and 100 (as percentages) and the limits
+		for all the checks and pipes must be the same (only one value). Again, this
+		limitation are specific to this algorithm and not to the implementation.
 		</para>
 	</section>
 	</section>
@@ -359,14 +372,13 @@ modparam("ratelimit", "db_prefix", "ratelimit_")
 		<title><varname>repl_buffer_threshold</varname> (string)</title>
 		<para>
 		Used to specify the length of the buffer used by the binary
-		replication, in bytes. Usually this should be big enough to hold
-		as much data as possible, but small enough to avoid UDP
-		fragmentation. The recommended value is the smallest MTU between
-		all the replication instances.
+		replication, in bytes, when a flush should be performed - the pipes
+		gathered until then should be sent on the network. This is used
+		to avoid using large amount of memory for pipes replication.
 		</para>
 		<para>
 		<emphasis>
-			Default value is 1400 bytes.
+			Default value is 32767 bytes.
 		</emphasis>
 		</para>
 		<example>
@@ -506,7 +518,7 @@ modparam("ratelimit", "slot_period", 100)
 		specified when the pipe was created will be considered.
 		</para>
 		<para>
-		NOTE: This function increments the pipe's couter every time it is
+		NOTE: This function increments the pipe's counter every time it is
 		called, even if the call should be declined. Therefore If you are using
 		ratelimit to limit only successful traffic, you need to explicitely
 		decrease the counter for the declined calls using the
@@ -520,26 +532,26 @@ modparam("ratelimit", "slot_period", 100)
 		<itemizedlist>
 			<listitem>
 				<para>
-				<emphasis>name</emphasis> - this is the name that identifies
-				the pipe which should be checked. This parameter accepts both
-				strings and pseudovariables.
+				<emphasis>name</emphasis> (string) - this is the name that identifies
+				the pipe which should be checked. One can also specify the
+				<emphasis>/s</emphasis> suffix to indicate the pipe
+				should be replicated over cached, or <emphasis>/b</emphasis>
+				to replicate over bin/clusterer interface.
 				</para>
 			</listitem>
 			<listitem>
 				<para>
-				<emphasis>limit</emphasis> - this specifies the threshold
+				<emphasis>limit</emphasis> (int) - this specifies the threshold
 				limit of the pipe. It is strongly related to the algorithm
-				used. This parameter accepts an integer or a pseudovariable.
-				Note that the limit should be specified as per-second, not
+				used. Note that the limit should be specified as per-second, not
 				per-timer_interval.
 				</para>
 			</listitem>
 			<listitem>
 				<para>
-				<emphasis>algorithm</emphasis> - this is parameter is optional
-				and reffers to the algorithm used to check the pipe. If it is
-				not set, the default value is used. It accepts a string or a
-				pseudovariable.
+				<emphasis>algorithm</emphasis> (string, optional) - this parameter
+				reffers to the algorithm used to check the pipe. If it is
+				not set, the default value is used.
 				</para>
 			</listitem>
 
@@ -554,23 +566,23 @@ modparam("ratelimit", "slot_period", 100)
 ...
 	# perform a pipe match for all INVITE methods using RED algorithm
 	if (is_method("INVITE")) {
-		if (!rl_check("pipe_INVITE", "100", "RED")) {
-			sl_send_reply("503", "Server Unavailable");
+		if (!rl_check("pipe_INVITE", 100, "RED")) {
+			sl_send_reply(503, "Server Unavailable");
 			exit;
 		};
 	};
 ...
 	# use default algorithm for each different gateway
 	$var(limit) = 10;
-	if (!rl_check("gw_$ru", "$var(limit)")) {
-		sl_send_reply("503", "Server Unavailable");
+	if (!rl_check("gw_$ru", $var(limit))) {
+		sl_send_reply(503, "Server Unavailable");
 		exit;
 	};
 ...
 	# count only successful calls
-	if (!rl_check("gw_$ru", "100")) {
+	if (!rl_check("gw_$ru", 100)) {
 		rl_dec_count("gw_$ru");
-		sl_send_reply("503", "Server Unavailable");
+		sl_send_reply(503, "Server Unavailable");
 		exit;
 	};
 ...
@@ -588,7 +600,7 @@ modparam("ratelimit", "slot_period", 100)
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 			<listitem><para>
-			<emphasis>name</emphasis> - identifies the name of the pipe.
+			<emphasis>name</emphasis> (string) - identifies the name of the pipe.
 			</para>
 			</listitem>
 		</itemizedlist>
@@ -600,7 +612,7 @@ modparam("ratelimit", "slot_period", 100)
 		<title><function>rl_dec_count</function> usage</title>
 		<programlisting format="linespecific">
 ...
-	if (!rl_check("gw_$ru", "100", "TAILDROP")) {
+	if (!rl_check("gw_$ru", 100, "TAILDROP")) {
 		exit;
 	} else {
 		rl_dec_count("gw_$ru");
@@ -632,7 +644,7 @@ modparam("ratelimit", "slot_period", 100)
 		<title><function>rl_reset_count</function> usage</title>
 		<programlisting format="linespecific">
 ...
-	if (!rl_check("gw_$ru", "100", "TAILDROP")) {
+	if (!rl_check("gw_$ru", 100, "TAILDROP")) {
 		exit;
 	} else {
 		rl_reset_count("gw_$ru");
@@ -671,6 +683,30 @@ modparam("ratelimit", "slot_period", 100)
 		opensips-cli -x mi rl_list gw_10.0.0.1
 		</programlisting>
 	</section>
+	<section id="mi_rl_dump_pipe" xreflabel="rl_dump_pipe">
+		<title>
+		<function moreinfo="none">rl_dump_pipe</function>
+		</title>
+		<para>
+		Exposes all the details about the current runtime data (specific to the
+		pipe's algorithm) of a pipe. Currently make sense for SBT.
+		</para>
+		<para>
+		Name: <emphasis>rl_dump_pipe</emphasis>
+		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+			<emphasis>pipe</emphasis> - indicates the name of the pipe.
+			</para></listitem>
+		</itemizedlist>
+ 		<para>
+		MI FIFO Command Format:
+		</para>
+		<programlisting  format="linespecific">
+		opensips-cli -x mi rl_dump_pipe gw_10.0.0.1
+		</programlisting>
+	</section>
 	<section id="mi_rl_reset_pipe" xreflabel="rl_reset_pipe">
 		<title>
 		<function moreinfo="none">rl_reset_pipe</function>
@@ -685,7 +721,7 @@ modparam("ratelimit", "slot_period", 100)
 		<itemizedlist>
 			<listitem><para>
 			<emphasis>pipe</emphasis> - indicates the name of the pipe whose
-			couter should be reset.
+			counter should be reset.
 			</para></listitem>
 		</itemizedlist>
 		<para>

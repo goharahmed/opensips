@@ -20,8 +20,8 @@
   THE SOFTWARE.
 */
 
-#ifndef cJSON__h
-#define cJSON__h
+#ifndef OS_cJSON__h
+#define OS_cJSON__h
 
 #include "../str.h"
 
@@ -50,8 +50,8 @@ extern const char* cJSON_Version(void);
 #define cJSON_Object (1 << 6)
 #define cJSON_Raw    (1 << 7) /* raw json */
 
-#define cJSON_IsReference 256
-#define cJSON_StringIsConst 512
+#define cJSON_IsReference   (1 << 8)
+#define cJSON_StringIsConst (1 << 9)
 
 /* The cJSON structure: */
 typedef struct cJSON
@@ -178,6 +178,7 @@ extern void cJSON_Minify(char *json);
 #define cJSON_AddNumberToObject(object,name,n) cJSON_AddItemToObject(object, name, cJSON_CreateNumber(n))
 #define cJSON_AddStringToObject(object,name,s) cJSON_AddItemToObject(object, name, cJSON_CreateString(s))
 #define cJSON_AddStrToObject(object,name,s,len) cJSON_AddItemToObject(object, name, cJSON_CreateStr(s,len))
+#define _cJSON_AddStrToObject(object,name,s,len) _cJSON_AddItemToObject(object, name, cJSON_CreateStr(s,len))
 #define cJSON_AddRawToObject(object,name,s) cJSON_AddItemToObject(object, name, cJSON_CreateRaw(s))
 
 /* When assigning an integer value, it needs to be propagated to valuedouble too. */
@@ -195,4 +196,4 @@ int cJSON_NumberIsInt(cJSON *item);
 }
 #endif
 
-#endif
+#endif /* OS_cJSON__h */

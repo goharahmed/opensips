@@ -42,9 +42,11 @@ int_str_t *kv_put(map_t _store, const str* _key, const int_str_t* _val)
 {
 	int_str_t **cur, *new_val;
 
-	LM_DBG("putting %.*s: [ %.*s  / %d ]\n", _key->len, _key->s,
+#ifdef EXTRA_DEBUG
+	LM_DBG("putting '%.*s': [ '%.*s' / %d ]\n", _key->len, _key->s,
 	        _val->is_str ? _val->s.len : 0, _val->is_str ? _val->s.s : NULL,
 	        !_val->is_str ? _val->i : -1);
+#endif
 
 	cur = (int_str_t **)map_get(_store, *_key);
 	if (!cur) {
@@ -58,8 +60,8 @@ int_str_t *kv_put(map_t _store, const str* _key, const int_str_t* _val)
 			LM_ERR("oom\n");
 			return NULL;
 		}
-		memset(*cur, 0, sizeof **cur);
 
+		memset(*cur, 0, sizeof **cur);
 	}
 
 	new_val = *cur;
@@ -225,7 +227,7 @@ static void destroy_kv_store_val(void* _val)
 {
 	int_str_t *val = (int_str_t *)_val;
 
-	if (val->is_str && !ZSTR(val->s))
+	if (val->is_str && val->s.s)
 		shm_free(val->s.s);
 
 	shm_free(val);

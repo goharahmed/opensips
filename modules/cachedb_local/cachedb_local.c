@@ -37,6 +37,7 @@
 #include "../../mem/shm_mem.h"
 #include "../../mod_fix.h"
 #include "../../mi/item.h"
+#include "../../lib/csv.h"
 #include "../clusterer/api.h"
 
 #include "cachedb_local.h"
@@ -62,9 +63,7 @@ int cluster_id = 0;
 enum cachedb_rr_persist rr_persist = RRP_SYNC_FROM_CLUSTER;
 char *cluster_persist;
 
-static int w_remove_chunk_1(struct sip_msg* msg, char* glob);
-static int w_remove_chunk_2(struct sip_msg* msg, char* collection, char* glob);
-static int remove_chunk_f(struct sip_msg* msg, char* collection, char* glob);
+static int remove_chunk_f(struct sip_msg* msg, str* collection, str* glob);
 mi_response_t *mi_cache_remove_chunk_1(const mi_params_t *params,
 								struct mi_handler *async_hdl);
 mi_response_t *mi_cache_remove_chunk_2(const mi_params_t *params,
@@ -84,13 +83,11 @@ static param_export_t params[]={
 };
 
 static cmd_export_t cmds[]= {
-	{"cache_remove_chunk",        (cmd_function)w_remove_chunk_1,  1,
-	fixup_str_str, 0,
-	REQUEST_ROUTE|ONREPLY_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE|STARTUP_ROUTE},
-	{"cache_remove_chunk",        (cmd_function)w_remove_chunk_2,  1,
-	fixup_str_str, 0,
-	REQUEST_ROUTE|ONREPLY_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE|STARTUP_ROUTE},
-	{0,0,0,0,0,0}
+	{"cache_remove_chunk",        (cmd_function)remove_chunk_f, {
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_STR,0,0}, {0,0,0}},
+		REQUEST_ROUTE|ONREPLY_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE|STARTUP_ROUTE},
+	{0,0,{{0,0,0}},0}
 };
 
 static mi_export_t mi_cmds[] = {
@@ -108,6 +105,7 @@ static dep_export_t deps = {
 	},
 	{ /* modparam dependencies */
 		{"cluster_id", get_deps_clusterer},
+		{ NULL, NULL },
 	},
 };
 
@@ -117,6 +115,7 @@ struct module_exports exports= {
 	MOD_TYPE_CACHEDB,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,            /* dlopen flags */
+	0,                          /* load functionpen flags */
 	&deps,            /* OpenSIPS module dependencies */
 	cmds,                       /* exported functions */
 	0,                          /* exported async functions */
@@ -126,10 +125,12 @@ struct module_exports exports= {
 	0,                          /* exported pseudo-variables */
 	0,							/* exported transformations */
 	0,                          /* extra processes */
+	0,                          /* module pre-initialization function */
 	mod_init,                   /* module initialization function */
 	(response_function) 0,      /* response handling function */
 	(destroy_function) destroy, /* destroy function */
-	child_init                  /* per-child init function */
+	child_init,                 /* per-child init function */
+	0                           /* reload confirm function */
 };
 
 static char *key_buff = NULL;
@@ -137,29 +138,17 @@ static int key_buff_size = 0;
 static char *pat_buff = NULL;
 static int pat_buff_size = 0;
 
-static int w_remove_chunk_1(struct sip_msg* msg, char* glob)
-{
-	return remove_chunk_f(msg, NULL, glob);
-}
 
-static int w_remove_chunk_2(struct sip_msg* msg, char* collection, char* glob)
-{
-	return remove_chunk_f(msg, collection, glob);
-}
-
-
-static int remove_chunk_f(struct sip_msg* msg, char* collection, char* glob)
+static int remove_chunk_f(struct sip_msg* msg, str* col_s, str* pat)
 {
 	int i;
-	str *pat = (str *)glob;
-	str *col_s = (str *)collection;
 	lcache_entry_t* me1, *me2;
 	struct timeval start;
 
 	lcache_col_t* col;
 	lcache_t* cache_htable;
 
-	if ( !collection ) {
+	if ( !col_s ) {
 		/* use default collection; default collection is always first in list */
 		col = lcache_collection;
 	} else {
@@ -205,8 +194,9 @@ static int remove_chunk_f(struct sip_msg* msg, char* collection, char* glob)
 					LM_ERR("No more pkg mem\n");
 					key_buff_size = 0;
 					lock_release(&cache_htable[i].lock);
-					stop_expire_timer(start,local_exec_threshold,
-					"cachedb_local remove_chunk",pat->s,pat->len,0);
+					_stop_expire_timer(start,local_exec_threshold,
+						"cachedb_local remove_chunk",pat->s,pat->len,0,
+						cdb_slow_queries, cdb_total_queries);
 					return -1;
 				}
 
@@ -237,8 +227,9 @@ static int remove_chunk_f(struct sip_msg* msg, char* collection, char* glob)
 		lock_release(&cache_htable[i].lock);
 	}
 
-	stop_expire_timer(start,local_exec_threshold,
-	"cachedb_local remove_chunk",pat->s,pat->len,0);
+	_stop_expire_timer(start,local_exec_threshold,
+		"cachedb_local remove_chunk",pat->s,pat->len,0,
+		cdb_slow_queries, cdb_total_queries);
 	return 1;
 }
 
@@ -249,7 +240,7 @@ mi_response_t *mi_cache_remove_chunk(const mi_params_t *params, str *collection)
 	if (get_mi_string_param(params, "glob", &glob.s, &glob.len) < 0)
 		return init_mi_param_error();
 
-	if (remove_chunk_f(NULL,(collection ? collection->s : NULL),glob.s) < 1)
+	if (remove_chunk_f(NULL,collection, &glob) < 1)
 		return init_mi_error(500, MI_SSTR("Internal error"));
 	else
 		return init_mi_result_ok();
@@ -443,6 +434,12 @@ static int mod_init(void)
 			LM_WARN("collection <%.*s> is not assigned to any url!\n",
 					col_it->col_name.len, col_it->col_name.s);
 		}
+
+		if (!cluster_id && col_it->replicated) {
+			LM_WARN("collection <%.*s> is replicated but no "
+				"'cluster_id' defined!\n",
+					col_it->col_name.len, col_it->col_name.s);
+		}
 	}
 
 	/* register timer to delete the expired entries */
@@ -475,7 +472,7 @@ static int mod_init(void)
 		}
 
 		if (rr_persist == RRP_SYNC_FROM_CLUSTER &&
-		    clusterer_api.request_sync(&cache_repl_cap, cluster_id, 0) < 0)
+		    clusterer_api.request_sync(&cache_repl_cap, cluster_id) < 0)
 			LM_ERR("cachedb sync request failed\n");
 
 	}
@@ -552,95 +549,53 @@ void localcache_clean(unsigned int ticks,void *param)
 	}
 }
 
-/* !!!WARNNG!!! unsafe function
- * input and output strings must be allocated
- * input string will be modified
- * returns 0 if no element in list,*/
-static inline int get_next_collection(str* lst, str* cname, unsigned int* csize)
-{
-	char* tok_end;
-
-	str token;
-	str csize_s;
-
-	static const char lst_delim=';', size_delim = '=';
-
-	/* no more elements in list */
-	if ( lst->len == 0 || lst->s == NULL)
-		return 0;
-
-	tok_end = q_memchr(lst->s, lst_delim, lst->len);
-
-	if ( tok_end == NULL ) {
-		token.s = lst->s;
-		token.len = lst->len;
-
-		lst->s = NULL;
-		lst->len = 0;
-	} else if ( tok_end - lst->s  == (lst->len - 1) )  {
-		token.s = lst->s;
-		token.len = lst->len - 1;
-
-		lst->s = NULL;
-		lst->len = 0;
-	} else {
-		token.s = lst->s;
-		token.len = tok_end - lst->s;
-
-		lst->len -= (tok_end - lst->s + 1);
-		lst->s = tok_end + 1;
-	}
-
-	tok_end = q_memchr(token.s, size_delim, token.len);
-	if ( tok_end ) {
-		cname->s = token.s;
-		cname->len = tok_end - cname->s;
-
-		csize_s.s = tok_end + 1;
-		csize_s.len = token.len - (cname->len + 1);
-
-		if ( csize_s.len == 0 ) {
-			LM_ERR("no collection size after '=' given!\n");
-			return -1;
-		}
-
-		if ( str2int( &csize_s, csize ) < 0 ) {
-			LM_ERR("invalid hash size <%.*s>!\n", csize_s.len, csize_s.s);
-			return -1;
-		}
-	} else {
-		cname->s = token.s;
-		cname->len = token.len;
-
-		*csize = HASH_SIZE_DEFAULT;
-	}
-
-	return 1;
-}
-
 static int parse_collections(unsigned int type, void* val)
 {
-	int rc;
 	unsigned coll_size;
 	str collection_list, coll;
-
 	lcache_col_t *new_col, *it;
+	csv_record *cols, *col, *kv;
+	int replicated;
 
-	if ( !val ) {
+	if (!val) {
 		LM_ERR("null collection list!\n");
 		return -1;
 	}
 
-	collection_list.s = (char *) val;
-	collection_list.len = strlen( collection_list.s );
+	init_str(&collection_list, (char *)val);
+	cols = __parse_csv_record(&collection_list, 0, ';');
+	if (!cols)
+		goto bad_input;
 
-	str_trim_spaces_lr(collection_list);
+	for (col = cols; col; col = col->next) {
+		kv = __parse_csv_record(&col->s, 0, '=');
+		if (!kv)
+			goto bad_input;
+		coll = kv->s;
 
-	while ((rc=get_next_collection(&collection_list, &coll, &coll_size)) != 0) {
-		if ( rc < 0 ) {
-			LM_ERR("error occurred!\n");
-			return -1;
+		if (kv->next) {
+			if (str2int(&kv->next->s, &coll_size) < 0) {
+				LM_ERR("invalid hash size <%.*s>!\n", kv->next->s.len, kv->next->s.s);
+				goto bad_input;
+			}
+		} else {
+			coll_size = HASH_SIZE_DEFAULT;
 		}
+
+		if (ZSTR(coll)) {
+			LM_DBG("skipping empty-string collection: ''!\n");
+			continue;
+		}
+
+		if (coll.s[coll.len-2] == '/' && coll.s[coll.len-1] == 'r') {
+			coll.len -= 2;
+			replicated = 1;
+		} else {
+			replicated = 0;
+		}
+
+		LM_DBG("creating collection '%.*s' with hash_size %d\n",
+		       coll.len, coll.s, coll_size);
 
 		/* check if the collection was already defined */
 		for ( it=lcache_collection; it; it = it->next ) {
@@ -659,7 +614,11 @@ static int parse_collections(unsigned int type, void* val)
 		}
 		memset(new_col, 0, sizeof(lcache_col_t));
 
-		new_col->col_name = coll;
+		if (pkg_str_dup(&new_col->col_name, &coll) < 0) {
+			LM_ERR("oom\n");
+			return -1;
+		}
+
 		new_col->size = (1 << coll_size);
 		if (lcache_htable_init(&new_col->col_htable, new_col->size) < 0) {
 			LM_ERR("failed to initialize htable for collection <%.*s>!\n",
@@ -667,17 +626,18 @@ static int parse_collections(unsigned int type, void* val)
 			return -1;
 		}
 
-		/* add the newly created collection to the list */
-		if (!lcache_collection) {
-			lcache_collection = new_col;
-		} else {
-			for ( it=lcache_collection; it->next; it = it->next);
-			it->next = new_col;
-		}
+		new_col->replicated = replicated;
 
+		add_last(new_col, lcache_collection);
+		free_csv_record(kv);
 	}
 
+	free_csv_record(cols);
 	return 0;
+
+bad_input:
+	LM_ERR("failed to parse 'cache_collections'!\n");
+	return -1;
 }
 
 

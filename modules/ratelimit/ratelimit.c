@@ -55,7 +55,7 @@ gen_lock_t * rl_lock;
 static double * rl_load_value;     /* actual load, used by PIPE_ALGO_FEEDBACK */
 static double * pid_kp, * pid_ki, * pid_kd, * pid_setpoint; /* PID tuning params */
 static int * drop_rate;         /* updated by PIPE_ALGO_FEEDBACK */
-static int *rl_feedback_limit;
+int *rl_feedback_limit;
 
 int * rl_network_load;	/* network load */
 int * rl_network_count;	/* flag for counting network algo users */
@@ -101,9 +101,6 @@ static unsigned int rl_repl_timer_interval = RL_TIMER_INTERVAL;
 static int mod_init(void);
 static int mod_child(int);
 
-/* fixup prototype */
-static int fixup_rl_check(void **param, int param_no);
-
 mi_response_t *mi_stats(const mi_params_t *params,
 								struct mi_handler *async_hdl);
 mi_response_t *mi_stats_1(const mi_params_t *params,
@@ -114,25 +111,29 @@ mi_response_t *mi_set_pid(const mi_params_t *params,
 								struct mi_handler *async_hdl);
 mi_response_t *mi_get_pid(const mi_params_t *params,
 								struct mi_handler *async_hdl);
-
+mi_response_t *mi_dump_pipe(const mi_params_t *params,
+								struct mi_handler *async_hdl);
+								
 static int pv_get_rl_count(struct sip_msg *msg, pv_param_t *param,
 		pv_value_t *res);
-static int pv_parse_rl_count(pv_spec_p sp, str *in);
+static int pv_parse_rl_count(pv_spec_p sp, const str *in);
 
 static cmd_export_t cmds[] = {
-	{"rl_check", (cmd_function)w_rl_check_2, 2,
-		fixup_rl_check, 0, REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|
-			BRANCH_ROUTE|ERROR_ROUTE|LOCAL_ROUTE|TIMER_ROUTE|EVENT_ROUTE},
-	{"rl_check", (cmd_function)w_rl_check_3, 3,
-		fixup_rl_check, 0, REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|
-			BRANCH_ROUTE|ERROR_ROUTE|LOCAL_ROUTE|TIMER_ROUTE|EVENT_ROUTE},
-	{"rl_dec_count", (cmd_function)w_rl_dec, 1,
-		fixup_spve_null, 0, REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|
-			BRANCH_ROUTE|ERROR_ROUTE|LOCAL_ROUTE|TIMER_ROUTE|EVENT_ROUTE},
-	{"rl_reset_count", (cmd_function)w_rl_reset, 1,
-		fixup_spve_null, 0, REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|
-			BRANCH_ROUTE|ERROR_ROUTE|LOCAL_ROUTE|TIMER_ROUTE|EVENT_ROUTE},
-	{0,0,0,0,0,0}
+	{"rl_check", (cmd_function)w_rl_check, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_INT,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|
+		BRANCH_ROUTE|ERROR_ROUTE|LOCAL_ROUTE|TIMER_ROUTE|EVENT_ROUTE},
+	{"rl_dec_count", (cmd_function)w_rl_dec, {
+		{CMD_PARAM_STR,0,0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|
+		BRANCH_ROUTE|ERROR_ROUTE|LOCAL_ROUTE|TIMER_ROUTE|EVENT_ROUTE},
+	{"rl_reset_count", (cmd_function)w_rl_reset, {
+		{CMD_PARAM_STR,0,0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|
+		BRANCH_ROUTE|ERROR_ROUTE|LOCAL_ROUTE|TIMER_ROUTE|EVENT_ROUTE},
+	{0,0,{{0,0,0}},0}
 };
 
 static param_export_t params[] = {
@@ -159,6 +160,7 @@ static param_export_t params[] = {
 	"Feedback Algorithm."
 #define RLH4 "Params: none ; Gets the list of in use PID Controller parameters."
 #define RLH5 "Params: none ; Shows the status of the other SIP instances."
+#define RLH6 "Params: pipe ; Dumps the details of a (SBT) pipe. "
 
 static mi_export_t mi_cmds [] = {
 	{"rl_list", RLH1, 0, 0, {
@@ -176,6 +178,10 @@ static mi_export_t mi_cmds [] = {
 	},
 	{"rl_get_pid", RLH4, 0, 0, {
 		{mi_get_pid, {0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{"rl_dump_pipe", RLH6, 0, 0, {
+		{mi_dump_pipe, {"pipe", 0}},
 		{EMPTY_MI_RECIPE}}
 	},
 	{EMPTY_MI_EXPORT}
@@ -202,7 +208,8 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,	/* dlopen flags */
-	&deps,            /* OpenSIPS module dependencies */
+	0,					/* load function */
+	&deps,				/* OpenSIPS module dependencies */
 	cmds,
 	NULL,
 	params,
@@ -211,13 +218,36 @@ struct module_exports exports= {
 	mod_items,			/* exported pseudo-variables */
 	0,					/* exported transformations */
 	0,					/* extra processes */
+	0,					/* module pre-initialization function */
 	mod_init,			/* module initialization function */
 	0,
 	mod_destroy,		/* module exit function */
-	mod_child			/* per-child init function */
+	mod_child,			/* per-child init function */
+	0					/* reload confirm function */
 };
 
-
+struct {
+	str name;
+	rl_algo_t algo;
+} rl_algo_names_local[] = {
+	{ str_init("NOP"), PIPE_ALGO_NOP},
+	{ str_init("RED"), PIPE_ALGO_RED},
+	{ str_init("TAILDROP"), PIPE_ALGO_TAILDROP},
+	{ str_init("FEEDBACK"), PIPE_ALGO_FEEDBACK},
+	{ str_init("NETWORK"), PIPE_ALGO_NETWORK},
+	{ str_init("SBT"), PIPE_ALGO_HISTORY},
+	{
+		{ 0, 0}, 0
+	},
+};
+static str * get_rl_algo_name_local(rl_algo_t algo)
+{
+	int i;
+	for (i = 0; rl_algo_names_local[i].name.s; i++)
+		if (rl_algo_names_local[i].algo == algo)
+			return &rl_algo_names_local[i].name;
+	return NULL;
+}
 /* not using /proc/loadavg because it only works when our_timer_interval == theirs */
 int get_cpuload(void)
 {
@@ -465,9 +495,6 @@ void mod_destroy(void)
 	RL_SHM_FREE(pid_setpoint);
 	RL_SHM_FREE(drop_rate);
 	RL_SHM_FREE(rl_feedback_limit);
-
-	if (db_url.s && db_url.len)
-		destroy_cachedb();
 }
 
 
@@ -488,7 +515,7 @@ int hash[100] = {18, 50, 51, 39, 49, 68, 8, 78, 61, 75, 53, 32, 45, 77, 31,
  * @param update whether or not to inc call number
  * @return number of calls in the window
  */
-static inline int hist_check(rl_pipe_t *pipe, int update)
+static inline unsigned hist_update(rl_pipe_t *pipe, int update)
 {
 	#define U2MILI(__usec__) (__usec__/1000)
 	#define S2MILI(__sec__)  (__sec__ *1000)
@@ -496,11 +523,9 @@ static inline int hist_check(rl_pipe_t *pipe, int update)
 	int now_index;
 	int rl_win_ms = rl_window_size * 1000;
 	unsigned long long now_time, start_time;
+	int all_counters;
 
 	struct timeval tv;
-
-	pipe->counter = 0;
-	pipe->counter = rl_get_all_counters(pipe);
 
 	gettimeofday(&tv, NULL);
 	now_time = S2MILI(tv.tv_sec) + U2MILI(tv.tv_usec);
@@ -548,11 +573,16 @@ static inline int hist_check(rl_pipe_t *pipe, int update)
 		pipe->rwin.window[pipe->rwin.start_index] += update;
 	}
 
+	pipe->counter = 0;
 	/* count the total number of calls in the window */
 	for (i=0; i < pipe->rwin.window_size; i++)
 		pipe->counter += pipe->rwin.window[i];
 
-	return pipe->counter > pipe->limit ? -1 : 1;
+	all_counters = rl_get_all_counters(pipe);
+	RL_DBG(pipe, "update=%d local_counter=%d all_counters=%d",
+			update, pipe->counter, all_counters);
+
+	return all_counters;
 
 	#undef U2MILI
 	#undef S2MILI
@@ -561,9 +591,7 @@ static inline int hist_check(rl_pipe_t *pipe, int update)
 int hist_get_count(rl_pipe_t *pipe)
 {
 	/* do a NOP to validate the interval, then return the unchanged counter */
-	hist_check(pipe, 0);
-
-	return pipe->counter;
+	return hist_update(pipe, 0);
 }
 
 void hist_set_count(rl_pipe_t *pipe, long int value)
@@ -574,7 +602,7 @@ void hist_set_count(rl_pipe_t *pipe, long int value)
 				pipe->rwin.window_size * sizeof(long int));
 		pipe->rwin.start_time.tv_sec = 0; /* force init */
 	} else
-		hist_check(pipe, value);
+		hist_update(pipe, value);
 }
 
 
@@ -585,7 +613,12 @@ void hist_set_count(rl_pipe_t *pipe, long int value)
  */
 int rl_pipe_check(rl_pipe_t *pipe)
 {
-	unsigned counter = rl_get_all_counters(pipe);
+	unsigned counter;
+
+	if (pipe->algo == PIPE_ALGO_HISTORY)
+		return (hist_update(pipe, 1) > pipe->limit ? -1 : 1);
+
+	counter = rl_get_all_counters(pipe);
 
 	switch (pipe->algo) {
 		case PIPE_ALGO_NOP:
@@ -597,13 +630,11 @@ int rl_pipe_check(rl_pipe_t *pipe)
 		case PIPE_ALGO_RED:
 			if (!pipe->load)
 				return 1;
-			return counter % pipe->load ? -1 : 1;
+			return (counter % pipe->load ? -1 : 1);
 		case PIPE_ALGO_NETWORK:
-			return pipe->load;
+			return (pipe->load ? pipe->load : 1);
 		case PIPE_ALGO_FEEDBACK:
 			return (hash[counter % 100] < *drop_rate) ? -1 : 1;
-		case PIPE_ALGO_HISTORY:
-			return hist_check(pipe, 1);
 		default:
 			LM_ERR("ratelimit algorithm %d not implemented\n", pipe->algo);
 	}
@@ -627,7 +658,7 @@ mi_response_t *mi_stats(const mi_params_t *params,
 	if (!resp)
 		return 0;
 
-	if (rl_stats(resp_obj, NULL)) {
+	if (rl_stats(resp_obj, NULL) < 0) {
 		LM_ERR("cannot mi print values\n");
 		goto free;
 	}
@@ -652,6 +683,7 @@ mi_response_t *mi_stats_1(const mi_params_t *params,
 	mi_response_t *resp;
 	mi_item_t *resp_obj;
 	str pipe_name;
+	int rc;
 
 	resp = init_mi_result_object(&resp_obj);
 	if (!resp)
@@ -660,9 +692,12 @@ mi_response_t *mi_stats_1(const mi_params_t *params,
 	if (get_mi_string_param(params, "pipe", &pipe_name.s, &pipe_name.len) < 0)
 		return init_mi_param_error();
 
-	if (rl_stats(resp_obj, &pipe_name)) {
+	rc = rl_stats(resp_obj, &pipe_name);
+	if (rc < 0) {
 		LM_ERR("cannot mi print values\n");
 		goto free;
+	} else if (rc == 1) {
+		return init_mi_error(404, MI_SSTR("Pipe Not Found"));
 	}
 
 	LOCK_GET(rl_lock);
@@ -755,6 +790,193 @@ error:
 	return 0;
 }
 
+/***************************************************\
+|  mi_dump_pipe : Displays detailed pipe data.		|
+|													|
+|  Usage: mi rl_dump_pipe PIPE_NAME					|
+|													|
+|  Notes: Currently only SBT has special handling.	|
+|  Should probably add a bailout for FEEDBACK algo, |
+|  and anything else, like cachedb. 		ez.vc	|
+\***************************************************/
+mi_response_t *mi_dump_pipe(const mi_params_t *params,
+								struct mi_handler *async_hdl)
+{
+	mi_response_t *resp;  	//mi response 
+	mi_item_t *resp_obj;	//mi response part[s]?
+	mi_item_t *window_item, *bucket_item, *machine_item; 
+							//objects for buckets + replication vars.
+	mi_item_t *bucket_arr, *nodes_arr; 
+							//objects to hold the mi resp arrays.
+	str pipe_name; 			//var for mi arg
+	
+	unsigned int hash_idx;  //var to hold hash index 
+	rl_pipe_t **pipe;		//pipe object we're looking at.
+	int pipe_total = 0; 	//hold total of all buckets + nodes.
+	
+	str *alg; 				//var to hold alg name
+	
+	rl_repl_counter_t *nodes;
+							//replication node pointer
+	rl_repl_counter_t *d;	//nodes iterator 
+	/***** Bucket Vars ***/
+	#define U2MILI(__usec__) (__usec__/1000)
+	#define S2MILI(__sec__)  (__sec__ *1000)
+	int i;  //bucket iterator
+	int first_good_index;
+	int rl_win_ms = rl_window_size * 1000;
+
+	unsigned long long now_total, start_total;
+
+	struct timeval tv;
+	/**** End Bucket Vars ***/
+	//Get pipe name into variable 
+	if (get_mi_string_param(params, "pipe", &pipe_name.s, &pipe_name.len) < 0)
+		return init_mi_param_error();
+	
+	hash_idx = core_hash(&(pipe_name), NULL, rl_htable.size);
+	//hash_idx = RL_GET_INDEX(pipe_name);
+	lock_set_get(rl_htable.locks, ((hash_idx) % rl_htable.locks_no));
+	//RL_GET_LOCK(hash_idx);
+	pipe = (rl_pipe_t **)map_find(rl_htable.maps[(hash_idx)], pipe_name);
+	//pipe = RL_FIND_PIPE(hash_idx, pipe_name);
+	if (!pipe || !*pipe) {
+		LM_DBG("pipe %.*s not found\n", pipe_name.len, pipe_name.s);
+		lock_set_release(rl_htable.locks, ((hash_idx) % rl_htable.locks_no));
+		//RL_RELEASE_LOCK(hash_idx);
+		return init_mi_error(404, MI_SSTR("Pipe not found"));
+	}
+	
+	
+	//Start building response:
+	resp = init_mi_result_object(&resp_obj); //create response object 
+	if (!resp)
+		goto error;
+	//Start building response:
+	
+	//We know how to handle SBT 
+	if ((*pipe)->algo == PIPE_ALGO_HISTORY) {
+		window_item = add_mi_object(resp_obj, MI_SSTR("Window"));
+		if(!window_item) 
+			goto error;
+		/******** This is where the bucket dump should be ****/
+		gettimeofday(&tv, NULL);
+		//Not sure what this checks, but don't want it to break otherwise.
+		bucket_arr = add_mi_array(window_item, MI_SSTR("Buckets"));
+		if(!bucket_arr)
+			goto error;
+		if ((*pipe)->rwin.start_time.tv_sec == 0) {
+			{
+				if(add_mi_string(window_item, MI_SSTR("Status"), MI_SSTR("Unitialized (?)")) < 0)
+					goto error;
+			}
+		} else {
+			if(add_mi_number(window_item, MI_SSTR("Window Size"), (*pipe)->rwin.window_size) < 0)
+				goto error;
+			//TODO: Add these timer variables to output.
+			start_total = S2MILI((*pipe)->rwin.start_time.tv_sec) + U2MILI((*pipe)->rwin.start_time.tv_usec);
+			now_total = S2MILI(tv.tv_sec) + U2MILI(tv.tv_usec);
+			if (now_total - start_total >= 2*rl_win_ms) {
+				/* nothing here; window is expired */
+				if(add_mi_string(window_item, MI_SSTR("Status"), MI_SSTR("Expired")) < 0)
+					goto error;
+			} else if (now_total - start_total >= rl_win_ms) {
+				first_good_index = ((((now_total - rl_win_ms) - start_total)/rl_slot_period + 1) 
+					+ (*pipe)->rwin.start_index) % (*pipe)->rwin.window_size;
+
+				for (i=first_good_index; i != (*pipe)->rwin.start_index; i=(i+1)%(*pipe)->rwin.window_size)
+				{
+					bucket_item = add_mi_object(bucket_arr, 0, 0);
+					if(!bucket_item) 
+						goto error;
+					if(add_mi_number(bucket_item, MI_SSTR("Index"), i) < 0)
+						goto error;
+					if(add_mi_number(bucket_item, MI_SSTR("Count"), (*pipe)->rwin.window[i]) < 0)
+						goto error;
+					pipe_total += (*pipe)->rwin.window[i];
+					
+				}
+				if(add_mi_string(window_item, MI_SSTR("Status"), MI_SSTR("OK")) < 0)
+					goto error;
+			} else {
+				/* count all of them; valid window */
+				for (i=0; i < (*pipe)->rwin.window_size; i++)
+				{
+					bucket_item = add_mi_object(bucket_arr, 0, 0);
+					if(!bucket_item)
+						goto error;
+					if(add_mi_number(bucket_item, MI_SSTR("Index"), i) < 0)
+						goto error;
+					if(add_mi_number(bucket_item, MI_SSTR("Count"), (*pipe)->rwin.window[i]) < 0)
+						goto error;
+					pipe_total += (*pipe)->rwin.window[i];
+				}
+				if(add_mi_string(window_item, MI_SSTR("Status"), MI_SSTR("OK")) < 0)
+					goto error;
+			}
+			//XXX: If this code block moves, you might have to use a separate bucket_total variable.
+			//Yes pipe_total SHOULD be equal to (*pipe)->counter at this point,
+			//	but this is for debugging, so we verify.
+			if(add_mi_number(window_item, MI_SSTR("Bucket Total"), pipe_total) < 0)
+				goto error;
+		}
+		
+	} else {
+		//For non-SBT pipes, we just add the counter.
+		pipe_total += (*pipe)->counter;
+	}
+	/************* End Bucket Loop ***************/
+	
+	if (add_mi_string(resp_obj, MI_SSTR("Pipe"), pipe_name.s, pipe_name.len) < 0)
+		goto error;
+	
+	if (!(alg = get_rl_algo_name_local((*pipe)->algo))) {
+		LM_ERR("[BUG] unknown algorithm %d\n", (*pipe)->algo);
+		if(add_mi_string(resp, MI_SSTR("Algorithm"), MI_SSTR("UNKNOWN")) < 0)
+			goto error;
+	
+	} 
+	else if (add_mi_string(resp_obj, MI_SSTR("Algorithm"), alg->s, alg->len) < 0) 
+		goto error;	
+	
+	if (add_mi_number(resp_obj, MI_SSTR("Counter"), (*pipe)->counter) < 0)
+		goto error;
+	
+	nodes_arr = add_mi_array(resp_obj, MI_SSTR("Replication Nodes"));
+	if(!nodes_arr)
+		goto error;
+	//Get node (replication) data:
+	nodes = (*pipe)->dsts;
+
+	//TODO: Add last_update value to Node results.
+	for (d = nodes; d; d = d->next) {
+		machine_item = add_mi_object(nodes_arr, 0, 0);
+		if(!machine_item)
+			goto error;
+		pipe_total += d->counter;
+		
+		if(add_mi_number(machine_item,MI_SSTR("MachineID"), d->machine_id) < 0)
+			goto error;
+		if(add_mi_number(machine_item,MI_SSTR("NodeCounter"), d->counter) < 0)
+			goto error;
+	}
+	lock_set_release(rl_htable.locks, ((hash_idx) % rl_htable.locks_no));
+	if(add_mi_number(resp_obj, MI_SSTR("Total"), pipe_total) < 0)
+		goto error;
+	//RL_RELEASE_LOCK(hash_idx);
+	
+	return resp;
+	
+
+error:
+	if(hash_idx) lock_set_release(rl_htable.locks, ((hash_idx) % rl_htable.locks_no));
+	free_mi_response(resp);
+	return init_mi_error(500, MI_SSTR("Failed to create Response"));
+
+	#undef U2MILI
+	#undef S2MILI
+}									
+								
 mi_response_t *mi_reset_pipe(const mi_params_t *params,
 								struct mi_handler *async_hdl)
 {
@@ -767,26 +989,6 @@ mi_response_t *mi_reset_pipe(const mi_params_t *params,
 		return init_mi_error(500, MI_SSTR("Internal error"));
 
 	return init_mi_result_ok();
-}
-
-/* fixup functions */
-static int fixup_rl_check(void **param, int param_no)
-{
-	switch (param_no) {
-		/* pipe name */
-		case 1:
-			return fixup_spve(param);
-			/* limit */
-		case 2:
-			return fixup_igp(param);
-			/* algorithm */
-		case 3:
-			return fixup_sgp(param);
-			/* error */
-		default:
-			LM_ERR("[BUG] too many params (%d)\n", param_no);
-	}
-	return E_UNSPEC;
 }
 
 /* pseudo-variable functions */
@@ -811,7 +1013,7 @@ static int pv_get_rl_count(struct sip_msg *msg, pv_param_t *param,
 	return pv_get_uintval(msg, param, res, counter);
 }
 
-static int pv_parse_rl_count(pv_spec_p sp, str *in)
+static int pv_parse_rl_count(pv_spec_p sp, const str *in)
 {
 	char *p;
 	char *s;

@@ -60,12 +60,14 @@ static int child_init(int rank);
 static int smpp_init(struct proto_info *pi);
 static int smpp_init_listener(struct socket_info *si);
 static int smpp_send(struct socket_info* send_sock,
-		char* buf, unsigned int len, union sockaddr_union* to, int id);
+		char* buf, unsigned int len, union sockaddr_union* to,
+		unsigned int id);
 static int smpp_read_req(struct tcp_connection* conn, int* bytes_read);
 static int smpp_write_async_req(struct tcp_connection* con,int fd);
 static int smpp_conn_init(struct tcp_connection* c);
 static void smpp_conn_clean(struct tcp_connection* c);
-static int send_smpp_msg(struct sip_msg* msg, char *_name);
+static int send_smpp_msg(struct sip_msg* msg, str *name, str *from,
+		str *to, str *body, int *utf16, int *delivery_confirmation);
 
 static unsigned smpp_port = 2775;
 static int smpp_max_msg_chunks = 8;
@@ -74,10 +76,17 @@ extern int smpp_send_timeout;
 str db_url = {NULL, 0};
 
 static cmd_export_t cmds[] = {
-	{"proto_init", (cmd_function)smpp_init, 0, 0, 0, 0},
-	{"send_smpp_message", (cmd_function)send_smpp_msg, 1, fixup_spve_null, 0,
+	{"proto_init", (cmd_function)smpp_init, {{0,0,0}},
+		REQUEST_ROUTE},
+	{"send_smpp_message", (cmd_function)send_smpp_msg, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_STR | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_INT | CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_INT | CMD_PARAM_OPT, 0, 0},{0,0,0}},
 		REQUEST_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE},
-	{0,0,0,0,0,0}
+	{0,0,{{0,0,0}},0}
 };
 
 static param_export_t params[] = {
@@ -106,6 +115,7 @@ struct module_exports exports = {
 	MOD_TYPE_DEFAULT,	/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,	/* dlopen flags */
+	0,					/* load function */
 	NULL,			/* OpenSIPS module dependencies */
 	cmds,			/* exported functions */
 	0,			/* exported async functions */
@@ -115,10 +125,12 @@ struct module_exports exports = {
 	0,			/* exported pseudo-variables */
 	0,			/* exported transformations */
 	0,			/* extra processes */
-	mod_init,		/* module initialization function */
+	0,			/* module pre-initialization function */
+	mod_init,	/* module initialization function */
 	0,			/* response function */
 	0,			/* destroy function */
 	child_init,		/* per-child init function */
+	0			/* reload confirm function */
 };
 
 static int smpp_init(struct proto_info *pi)
@@ -145,8 +157,21 @@ static int mod_init(void)
 {
 	LM_INFO("initializing SMPP protocol\n");
 
-	db_url.len = strlen(db_url.s);
+	init_db_url(db_url, 0 /* cannot be null */);
+
+	if (!smpp_outbound_uri.s) {
+		LM_ERR("missing modparam: 'smpp_outbound_uri'\n");
+		return -1;
+	}
+
 	smpp_outbound_uri.len = strlen(smpp_outbound_uri.s);
+
+	/* if we don't have a listener, we won't be able to connect, or send
+	 * enquiries, therefore it's mandatory to have at least one */
+	if (!proto_has_listeners(PROTO_SMPP)) {
+		LM_ERR("at least one listener is mandatory for using the SMPP module!\n");
+		return -1;
+	}
 
 	if (smpp_db_init(&db_url) < 0)
 		return -1;
@@ -170,49 +195,6 @@ static int mod_init(void)
 	return 0;
 }
 
-
-struct tcp_connection* smpp_sync_connect(struct socket_info* send_sock,
-		union sockaddr_union* server, int *fd)
-{
-	int s;
-	union sockaddr_union my_name;
-	socklen_t my_name_len;
-	struct tcp_connection* con;
-
-	s=socket(AF2PF(server->s.sa_family), SOCK_STREAM, 0);
-	if (s==-1){
-		LM_ERR("socket: (%d) %s\n", errno, strerror(errno));
-		goto error;
-	}
-	if (tcp_init_sock_opt(s)<0){
-		LM_ERR("tcp_init_sock_opt failed\n");
-		goto error;
-	}
-	my_name_len = sockaddru_len(send_sock->su);
-	memcpy( &my_name, &send_sock->su, my_name_len);
-	su_setport( &my_name, 0);
-	if (bind(s, &my_name.s, my_name_len )!=0) {
-		LM_ERR("bind failed (%d) %s\n", errno,strerror(errno));
-		goto error;
-	}
-
-	if (tcp_connect_blocking(s, &server->s, sockaddru_len(*server))<0){
-		LM_ERR("tcp_blocking_connect failed\n");
-		goto error;
-	}
-	con = tcp_conn_create(s, server, send_sock, S_CONN_OK);
-	if (con==NULL){
-		LM_ERR("tcp_conn_create failed, closing the socket\n");
-		goto error;
-	}
-	*fd = s;
-	return con;
-	/*FIXME: set sock idx! */
-error:
-	/* close the opened socket */
-	if (s!=-1) close(s);
-	return 0;
-}
 
 static int child_init(int rank)
 {
@@ -248,7 +230,8 @@ static int smpp_init_listener(struct socket_info *si)
 }
 
 static int smpp_send(struct socket_info* send_sock,
-		char* buf, unsigned int len, union sockaddr_union* to, int id)
+		char* buf, unsigned int len, union sockaddr_union* to,
+		unsigned int id)
 {
 	LM_INFO("smpp_send called\n");
 
@@ -453,28 +436,82 @@ static int smpp_write_async_req(struct tcp_connection* con,int fd)
 	return 0;
 }
 
-static int send_smpp_msg(struct sip_msg *msg, char *_name)
+static int send_smpp_msg(struct sip_msg* msg, str *name, str *from,
+		str *to, str *body, int *utf16, int *delivery_confirmation)
 {
-	 str body;
-	 str name;
+	str sbody;
+	struct sip_uri *uri;
+	content_t *msg_content_type;
+	int body_type;
+	param_t *p;
 	smpp_session_t *session = NULL;
 
-	if (!_name || fixup_get_svalue(msg, (gparam_p)_name, &name) < 0) {
-		LM_ERR("cannot get the SMSc name\n");
-		return -1;
-	}
-	session = smpp_session_get(&name);
+	session = smpp_session_get(name);
 	if (!session) {
-		LM_INFO("SMSc %.*s not found!\n", name.len, name.s);
+		LM_INFO("SMSc %.*s not found!\n", name->len, name->s);
 		return -2;
 	}
 
-	if(msg->parsed_uri_ok==0)
-	    parse_sip_msg_uri(msg);
+	if (!from) {
+		uri = parse_from_uri(msg);
+		if (!uri) {
+			LM_ERR("could not parse from uri!\n");
+			return -1;
+		}
+		from = &uri->user;
+	}
 
-	get_body(msg, &body);
-	send_submit_or_deliver_request(&body, &parse_from_uri(msg)->user,
-			&msg->parsed_uri.user, session);
-	return 0;
+	if (!to) {
+		if(msg->parsed_uri_ok==0 && (parse_sip_msg_uri(msg)) < 0) {
+			LM_ERR("Failed to parse URI \n");
+			return -1;
+		}
+		to = &msg->parsed_uri.user;
+	}
+
+	if (!body) {
+		if (get_body(msg, &sbody) < 0) {
+			LM_ERR("Failed to fetch SIP body \n");
+			return -1;
+		}
+	} else
+		sbody = *body;
+
+	if (!utf16) {
+		if (!body) {
+			body_type = parse_content_type_hdr(msg);
+			if (body_type < 0) {
+				LM_ERR("Failed to parse content type header \n");
+				return -1;
+			} else if (body_type > 0) {
+
+				if (body_type != (TYPE_TEXT << 16 | SUBTYPE_PLAIN))
+					LM_WARN("Don't know how to parse body type %d(%s). "
+							"Treating as text/plain\n", body_type,
+							convert_mime2string_CT(body_type));
+				body_type = SMPP_CODING_DEFAULT;
+				/* Expecting Content-Type:text/plain; charset=UTF-16 */
+
+				/* check the charset */
+				msg_content_type = msg->content_type->parsed;
+
+				for (p = msg_content_type->params; p; p=p->next) {
+					if (p->name.len == 7 && memcmp(p->name.s,"charset",7) == 0) {
+						if (p->body.len == 6 &&
+						memcmp(p->body.s,"UTF-16",6) == 0) {
+							body_type = SMPP_CODING_UCS2;
+							break;
+						}
+					}
+				}
+			}
+		} else
+			body_type = SMPP_CODING_DEFAULT;
+	} else if (*utf16)
+		body_type = SMPP_CODING_UCS2;
+	else
+		body_type = SMPP_CODING_DEFAULT;
+
+	return send_submit_or_deliver_request(&sbody, body_type,
+			from, to, session, delivery_confirmation);
 }
-

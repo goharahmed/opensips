@@ -32,6 +32,9 @@ extern int ipc_shared_fd_read;
 #define IPC_FD_WRITE(_proc_no)  pt[_proc_no].ipc_pipe[1]
 #define IPC_FD_READ_SELF        IPC_FD_READ(process_no)
 #define IPC_FD_READ_SHARED      ipc_shared_fd_read
+#define IPC_FD_SYNC_READ(_proc_no)   pt[_proc_no].ipc_sync_pipe[0]
+#define IPC_FD_SYNC_WRITE(_proc_no)  pt[_proc_no].ipc_sync_pipe[1]
+#define IPC_FD_SYNC_READ_SELF        IPC_FD_SYNC_READ(process_no)
 
 /* prototype of IPC handler - function called by the IPC engine
  * when the a job with the correspoding type was received */
@@ -69,6 +72,25 @@ int ipc_send_rpc(int dst_proc, ipc_rpc_f *rpc, void *param);
 
 
 /*
+ * Send a synchronous message to a specific "dst_proc" process
+ * Use this command when you are sure that the "dst_proc" is waiting only for
+ * this specific "response", and cannot overlap with a different task
+ *
+ * Return: 0 on success, -1 on failure
+ */
+int ipc_send_sync_reply(int dst_proc, void *param);
+
+
+/*
+ * Wait for a message sent by a different process synchronously using the
+ * ipc_send_sync_reply() function.
+ *
+ * Return: 0 on success, -1 on failure
+ */
+int ipc_recv_sync_reply(void **param);
+
+
+/*
  * Push a job for the next available OpenSIPS worker and quickly return
  *
  * Return: 0 on success, -1 on failure
@@ -82,8 +104,8 @@ int ipc_dispatch_job(ipc_handler_type type, void *payload);
  *
  * Return: 0 on success, -1 on failure
  */
-
 int ipc_dispatch_rpc( ipc_rpc_f *rpc, void *param);
+
 
 /*
  * default handler for F_IPC reactor jobs. Copy-paste its code and improve
@@ -101,7 +123,9 @@ void ipc_handle_all_pending_jobs(int fd);
 /* internal functions */
 int init_ipc(void);
 
+
 int create_ipc_pipes(int proc_no);
+
 
 /* required by the IPC PIPE macros */
 #include "pt.h"

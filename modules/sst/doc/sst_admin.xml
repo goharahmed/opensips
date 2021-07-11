@@ -242,7 +242,7 @@ modparam("sst", "reject_to_small", 0)
 		</example>
 	</section>
 <section id="param_sst_flag" xreflabel="sst_flag">
-		<title><varname>sst_flag</varname> (string/integer)</title>
+		<title><varname>sst_flag</varname> (string)</title>
 		
 		<para>Keeping with OpenSIPS, the module will not do
 		anything to any message unless instructed to do so via
@@ -259,9 +259,6 @@ modparam("sst", "reject_to_small", 0)
 
 		<para>This parameter must be set of the module will
 		not load.</para>
-
-		<para><emphasis>WARNING: </emphasis>Setting INT flags is deprecated!
-		Use quoted strings instead!</para>
 
 		<para>
 		<emphasis>
@@ -310,7 +307,7 @@ route {
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>min_allowed</emphasis> - The value
+			<para><emphasis>min_allowed</emphasis> (int, optional) - The value
 			to compare the MIN_SE header value to.</para>
 		</listitem>
 		</itemizedlist>
@@ -325,7 +322,7 @@ modparam("sst", "min_se", 2400) # Must be >= 90
 
 route {
   if ($rm=="INVITE") {
-	if (sstCheckMin("1")) {
+	if (sstCheckMin(1)) {
 		xlog("L_ERR", "422 Session Timer Too Small reply sent.\n");
 		exit;
 	}
@@ -339,7 +336,7 @@ route {
 
 route {
   if ($rm=="INVITE") {
-	if (sstCheckMin("0")) {
+	if (sstCheckMin(0)) {
 		xlog("L_ERR", "Session Timer Too Small, dropping request\n");
 		exit;
 	}

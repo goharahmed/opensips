@@ -76,6 +76,7 @@ int pass_provisional_replies = 0;
 /* T holder for the last local transaction */
 struct cell** last_localT;
 
+
 /*
  * Initialize UAC
  */
@@ -148,6 +149,7 @@ static inline int check_params(str* method, str* to, str* from, dlg_t** dialog)
 	return 0;
 }
 
+
 static inline unsigned int dlg2hash( dlg_t* dlg )
 {
 	str cseq_nr;
@@ -155,8 +157,224 @@ static inline unsigned int dlg2hash( dlg_t* dlg )
 
 	cseq_nr.s=int2str(dlg->loc_seq.value, &cseq_nr.len);
 	hashid = tm_hash(dlg->id.call_id, cseq_nr);
-	LM_DBG("%d\n", hashid);
 	return hashid;
+}
+
+
+static int run_local_route( struct cell *new_cell, char **buf, int *buf_len,
+				dlg_t *dialog, struct sip_msg **ret_req, char **ret_req_buf)
+{
+	struct sip_msg *req = NULL;
+	struct cell *backup_cell;
+	int backup_route_type;
+	struct retr_buf *request;
+	struct proxy_l *new_proxy = NULL;
+	union sockaddr_union new_to_su;
+	struct socket_info *new_send_sock;
+	unsigned short dst_changed;
+	char *buf1=NULL, *sipmsg_buf;
+	int buf_len1, sip_msg_len;
+	str h_to, h_from, h_cseq, h_callid;
+
+	LM_DBG("building sip_msg from buffer\n");
+	sipmsg_buf = *buf; /* remember the buffer used to get the sip_msg */
+	req = buf_to_sip_msg( *buf, *buf_len, dialog);
+	if (req==NULL) {
+		LM_ERR("failed to build sip_msg from buffer\n");
+		return -1;
+	}
+
+	/* set this transaction as active one */
+	backup_cell = get_t();
+	set_t( new_cell );
+	/* disable parallel forking */
+	set_dset_state( 0 /*disable*/);
+
+	/* run the route */
+	swap_route_type( backup_route_type, LOCAL_ROUTE);
+	run_top_route( sroutes->local, req);
+	set_route_type( backup_route_type );
+
+	/* transfer current message context back to t */
+	new_cell->uac[0].br_flags = getb0flags(req);
+	/* restore the prevoius active transaction */
+	set_t( backup_cell );
+
+	set_dset_state( 1 /*enable*/);
+
+	/* check for changes - if none, do not regenerate the buffer */
+	dst_changed = 1;
+	if (req->new_uri.s || req->force_send_socket!=dialog->send_sock ||
+	req->dst_uri.len != dialog->hooks.next_hop->len ||
+	memcmp(req->dst_uri.s,dialog->hooks.next_hop->s,req->dst_uri.len) ||
+	(dst_changed=0)!=0 || req->add_rm || should_update_sip_body(req)) {
+
+		/* stuff changed in the request, we may need to rebuild, so let's
+		 * evaluate the changes first, mainly if the destination changed */
+		request = &new_cell->uac[0].request;
+		new_send_sock = NULL;
+		/* do we also need to change the destination? */
+		if (dst_changed) {
+			/* calculate the socket corresponding to next hop */
+			new_proxy = uri2proxy(
+				req->dst_uri.s ? &(req->dst_uri) : &req->new_uri,
+				PROTO_NONE );
+			if (new_proxy==0)
+				goto skip_update;
+			/* use the first address */
+			hostent2su( &new_to_su,
+				&new_proxy->host, new_proxy->addr_idx,
+				new_proxy->port ? new_proxy->port:SIP_PORT);
+			/* get the send socket */
+			new_send_sock = get_send_socket( req, &new_to_su,
+				new_proxy->proto);
+			if (new_send_sock==NULL) {
+				free_proxy( new_proxy );
+				pkg_free( new_proxy );
+				LM_ERR("no socket found for the new destination\n");
+					goto skip_update;
+			}
+		}
+
+		/* if interface change, we need to re-build the via */
+		if (new_send_sock && new_send_sock != dialog->send_sock) {
+
+			LM_DBG("Interface change in local route -> "
+				"rebuilding via\n");
+			if (!del_lump( req, req->h_via1->name.s - req->buf,
+			req->h_via1->len,0)) {
+				LM_ERR("Failed to remove initial via \n");
+				goto skip_update;
+			}
+
+			memcpy(req->add_to_branch_s,req->via1->branch->value.s,
+				req->via1->branch->value.len);
+			req->add_to_branch_len = req->via1->branch->value.len;
+
+			/* build the shm buffer now */
+			set_init_lump_flags(LUMPFLAG_BRANCH);
+			buf1 = build_req_buf_from_sip_req( req, (unsigned int*)&buf_len1,
+				new_send_sock, new_send_sock->proto, NULL, MSG_TRANS_SHM_FLAG);
+			reset_init_lump_flags();
+			del_flaged_lumps( &req->add_rm, LUMPFLAG_BRANCH);
+
+		} else {
+
+			LM_DBG("Change in local route -> rebuilding buffer\n");
+			/* build the shm buffer now */
+			buf1 = build_req_buf_from_sip_req( req, (unsigned int*)&buf_len1,
+				dialog->send_sock, dialog->send_sock->proto,
+				NULL, MSG_TRANS_SHM_FLAG|MSG_TRANS_NOVIA_FLAG);
+			/* now as it used, hide the original VIA header */
+			del_lump( req, req->h_via1->name.s-req->buf, req->h_via1->len, 0);
+			new_send_sock = NULL;
+
+		}
+
+		/* from this point further, the only updated send_sock is the one
+		 * from transaction, request->dst.send_sock */
+
+		if (!buf1) {
+			LM_ERR("no more shm mem\n");
+			/* keep original buffer */
+			goto skip_update;
+		}
+		/* update shortcuts */
+		if(!req->add_rm && !req->new_uri.s) {
+			/* headers are not affected, simply tranlate */
+			new_cell->from.s = new_cell->from.s - *buf + buf1;
+			new_cell->to.s = new_cell->to.s - *buf + buf1;
+			new_cell->callid.s = new_cell->callid.s - *buf + buf1;
+			new_cell->cseq_n.s = new_cell->cseq_n.s - *buf + buf1;
+		} else {
+			/* use heavy artilery :D */
+			if (extract_ftc_hdrs( buf1, buf_len1, &h_from, &h_to,
+			&h_cseq, &h_callid)!=0 ) {
+				LM_ERR("failed to update shortcut pointers\n");
+				shm_free(buf1);
+				goto skip_update;
+			}
+			new_cell->from = h_from;
+			new_cell->to = h_to;
+			new_cell->callid = h_callid;
+			new_cell->cseq_n = h_cseq;
+		}
+
+		/* here we rely on how build_uac_req() builds the first line */
+		new_cell->uac[0].uri.s = buf1 + req->first_line.u.request.method.len+1;
+		new_cell->uac[0].uri.len = GET_RURI(req)->len;
+
+		/* update also info about new destination and send sock */
+		if (new_send_sock) {
+			request->dst.send_sock = new_send_sock;
+			request->dst.proto = new_send_sock->proto;
+			request->dst.proto_reserved1 = 0;
+		}
+		if (new_proxy) {
+			request->dst.to = new_to_su;
+			/* for DNS based failover, copy the DNS proxy into transaction */
+			if (!disable_dns_failover) {
+				new_cell->uac[0].proxy = shm_clone_proxy( new_proxy,
+					1/*do_free*/);
+				if (new_cell->uac[0].proxy==NULL)
+					LM_ERR("failed to store DNS info -> no DNS "
+						"based failover\n");
+			}
+		}
+
+		/* the `buf` buffer is the same as `sipmsg_buf`, so we
+		 * do not loose the original msg buffer; later, if we 
+		 * see a non zero `buf1` (as a marker that we visited this
+		 * part of the code), we know that we have to release the
+		 * `sipmsg_buf` also; if we did not visit this part of the
+		 * code, the `buf` == `sipmsg_buf` and  `buf1` is NULL, so
+		 * nothing to free later */
+		*buf = buf1;
+		*buf_len = buf_len1;
+		/* use new buffer */
+
+	} else {
+
+		/* no changes over the message, buffer is already generated,
+		   just hide the original VIA for potential further branches */
+		del_lump(req,req->h_via1->name.s-req->buf,req->h_via1->len,0);
+	}
+
+
+skip_update:
+
+	/* save the SIP message into transaction */
+	new_cell->uas.request = sip_msg_cloner( req, &sip_msg_len, 1);
+	if (new_cell->uas.request==NULL) {
+		/* reset any T triggering */
+		new_cell->on_negative = 0;
+		new_cell->on_reply = 0;
+	} else {
+		new_cell->uas.end_request=
+			((char*)new_cell->uas.request)+sip_msg_len;
+	}
+	/* no parallel support in UAC transactions */
+	new_cell->on_branch = 0;
+
+	/* cleanup */
+	if (new_proxy) {
+		free_proxy( new_proxy );
+		pkg_free( new_proxy );
+	}
+
+	if (ret_req) {
+		*ret_req = req;
+		/* if the buffer was rebuilt, return also the original buffer */
+		*ret_req_buf = buf1 ? sipmsg_buf : NULL;
+	} else {
+		free_sip_msg(req);
+		pkg_free(req);
+		/* if the buffer was rebuilt, free the original one */
+		if (buf1)
+			shm_free(sipmsg_buf);
+	}
+
+	return 0;
 }
 
 
@@ -166,22 +384,17 @@ static inline unsigned int dlg2hash( dlg_t* dlg )
 int t_uac(str* method, str* headers, str* body, dlg_t* dialog,
 				transaction_cb cb, void* cbp,release_tmcb_param release_func)
 {
-	union sockaddr_union to_su, new_to_su;
+	union sockaddr_union to_su;
 	struct cell *new_cell;
-	struct cell *backup_cell;
 	struct retr_buf *request;
-	struct sip_msg *req;
+	struct sip_msg *req = NULL;
+	char *buf_req = NULL;
 	struct usr_avp **backup;
-	char *buf, *buf1;
-	int buf_len, buf_len1;
+	char *buf;
+	int buf_len;
 	int ret, flags;
-	int backup_route_type;
-	int sip_msg_len;
 	unsigned int hi;
-	struct socket_info *new_send_sock;
-	str h_to, h_from, h_cseq, h_callid;
-	struct proxy_l *proxy, *new_proxy;
-	unsigned short dst_changed;
+	struct proxy_l *proxy;
 
 	ret=-1;
 
@@ -189,7 +402,7 @@ int t_uac(str* method, str* headers, str* body, dlg_t* dialog,
 	 * - needed by external ua to send a request within a dlg
 	 */
 	if(!dialog->hooks.next_hop && w_calculate_hooks(dialog)<0)
-		goto error3;
+		goto error_out;
 
 	if(dialog->obp.s)
 		dialog->hooks.next_hop = &dialog->obp;
@@ -202,7 +415,7 @@ int t_uac(str* method, str* headers, str* body, dlg_t* dialog,
 		dialog->send_sock ? dialog->send_sock->proto : PROTO_NONE );
 	if (proxy==0)  {
 		ret=E_BAD_ADDRESS;
-		goto error3;
+		goto error_out;
 	}
 	/* use the first address */
 	hostent2su( &to_su,
@@ -217,23 +430,22 @@ int t_uac(str* method, str* headers, str* body, dlg_t* dialog,
 	}
 	if (dialog->send_sock==NULL) {
 		/* get the send socket */
-		dialog->send_sock = get_send_socket( NULL/*msg*/, &to_su, proxy->proto);
+		dialog->send_sock = get_send_socket(NULL/*msg*/, &to_su, proxy->proto);
 		if (!dialog->send_sock) {
 			LM_ERR("no corresponding socket for af %d\n", to_su.s.sa_family);
 			ser_error = E_NO_SOCKET;
-			goto error2;
+			goto error3;
 		}
 	}
 	LM_DBG("sending socket is %.*s \n",
 		dialog->send_sock->name.len,dialog->send_sock->name.s);
-
 
 	/* ***** Create TRANSACTION and all related  ***** */
 	new_cell = build_cell( NULL/*msg*/, 1/*full UAS clone*/);
 	if (!new_cell) {
 		ret=E_OUT_OF_MEM;
 		LM_ERR("short of cell shmem\n");
-		goto error2;
+		goto error3;
 	}
 
 	/* if we have a dialog ctx, link it to the newly created transaction
@@ -277,6 +489,12 @@ int t_uac(str* method, str* headers, str* body, dlg_t* dialog,
 	new_cell->user_avps = dialog->avps;
 	dialog->avps = NULL;
 
+	/* set transaction AVP list */
+	backup = set_avp_list( &new_cell->user_avps );
+
+	/* run the "transaction created" callback if set */
+	if (dialog->t_created_cb)
+		dialog->t_created_cb( new_cell, dialog->t_created_cb_param);
 
 	/* ***** Create the message buffer ***** */
 	buf = build_uac_req(method, headers, body, dialog, 0, new_cell, &buf_len);
@@ -286,184 +504,32 @@ int t_uac(str* method, str* headers, str* body, dlg_t* dialog,
 		goto error1;
 	}
 
-	/* set transaction AVP list */
-	backup = set_avp_list( &new_cell->user_avps );
-
-	if (local_rlist.a) {
-		LM_DBG("building sip_msg from buffer\n");
-		req = buf_to_sip_msg(buf, buf_len, dialog);
-		if (req==NULL) {
-			LM_ERR("failed to build sip_msg from buffer\n");
-		} else {
-			/* set this transaction as active one */
-			backup_cell = get_t();
-			set_t( new_cell );
-			/* disable parallel forking */
-			set_dset_state( 0 /*disable*/);
-
-			/* run the route */
-			swap_route_type( backup_route_type, LOCAL_ROUTE);
-			run_top_route( local_rlist.a, req);
-			set_route_type( backup_route_type );
-
-			/* transfer current message context back to t */
-			new_cell->uac[0].br_flags = getb0flags(req);
-			/* restore the prevoius active transaction */
-			set_t( backup_cell );
-
-			set_dset_state( 1 /*enable*/);
-
-			/* check for changes - if none, do not regenerate the buffer */
-			dst_changed = 1;
-			if (req->new_uri.s || req->force_send_socket!=dialog->send_sock ||
-			req->dst_uri.len != dialog->hooks.next_hop->len ||
-			memcmp(req->dst_uri.s,dialog->hooks.next_hop->s,req->dst_uri.len) ||
-			(dst_changed=0)!=0 || req->add_rm || should_update_sip_body(req)){
-
-				new_send_sock = NULL;
-				/* do we also need to change the destination? */
-				if (dst_changed) {
-					/* calculate the socket corresponding to next hop */
-					new_proxy = uri2proxy(
-						req->dst_uri.s ? &(req->dst_uri) : &req->new_uri,
-						PROTO_NONE );
-					if (new_proxy==0)
-						goto abort_update;
-					/* use the first address */
-					hostent2su( &new_to_su,
-						&new_proxy->host, new_proxy->addr_idx,
-						new_proxy->port ? new_proxy->port:SIP_PORT);
-					/* get the send socket */
-					new_send_sock = get_send_socket( req, &new_to_su,
-						new_proxy->proto);
-					if (!new_send_sock) {
-						free_proxy( new_proxy );
-						pkg_free( new_proxy );
-						LM_ERR("no socket found for the new destination\n");
-						goto abort_update;
-					}
-				}
-
-				/* if interface change, we need to re-build the via */
-				if (new_send_sock && new_send_sock != dialog->send_sock) {
-					LM_DBG("Interface change in local route -> "
-						"rebuilding via\n");
-					if (!del_lump(req,req->h_via1->name.s - req->buf,
-					req->h_via1->len,0)) {
-						LM_ERR("Failed to remove initial via \n");
-						goto abort_update;
-					}
-
-					memcpy(req->add_to_branch_s,req->via1->branch->value.s,
-						req->via1->branch->value.len);
-					req->add_to_branch_len = req->via1->branch->value.len;
-
-					/* update also info about new destination and send sock */
-					dialog->send_sock = new_send_sock;
-					free_proxy( proxy );
-					pkg_free( proxy );
-					proxy = new_proxy;
-					request->dst.send_sock = new_send_sock;
-					request->dst.proto = new_send_sock->proto;
-					request->dst.proto_reserved1 = 0;
-
-					/* build the shm buffer now */
-					set_init_lump_flags(LUMPFLAG_BRANCH);
-					buf1 = build_req_buf_from_sip_req(req,
-						(unsigned int*)&buf_len1,
-						new_send_sock, new_send_sock->proto,
-						NULL, MSG_TRANS_SHM_FLAG);
-					reset_init_lump_flags();
-					del_flaged_lumps( &req->add_rm, LUMPFLAG_BRANCH);
-
-				} else {
-
-					LM_DBG("Change in local route -> rebuilding buffer\n");
-					/* build the shm buffer now */
-					buf1 = build_req_buf_from_sip_req(req,
-						(unsigned int*)&buf_len1,
-						dialog->send_sock, dialog->send_sock->proto,
-						NULL, MSG_TRANS_SHM_FLAG|MSG_TRANS_NOVIA_FLAG);
-					/* now as it used, hide the original VIA header */
-					del_lump(req,req->h_via1->name.s - req->buf,
-						req->h_via1->len, 0);
-
-				}
-
-				if (!buf1) {
-					LM_ERR("no more shm mem\n");
-					/* keep original buffer */
-					goto abort_update;
-				}
-				/* update shortcuts */
-				if(!req->add_rm && !req->new_uri.s) {
-					/* headers are not affected, simply tranlate */
-					new_cell->from.s = new_cell->from.s - buf + buf1;
-					new_cell->to.s = new_cell->to.s - buf + buf1;
-					new_cell->callid.s = new_cell->callid.s - buf + buf1;
-					new_cell->cseq_n.s = new_cell->cseq_n.s - buf + buf1;
-				} else {
-					/* use heavy artilery :D */
-					if (extract_ftc_hdrs( buf1, buf_len1, &h_from, &h_to,
-					&h_cseq, &h_callid)!=0 ) {
-						LM_ERR("failed to update shortcut pointers\n");
-						shm_free(buf1);
-						goto abort_update;
-					}
-					new_cell->from = h_from;
-					new_cell->to = h_to;
-					new_cell->callid = h_callid;
-					new_cell->cseq_n = h_cseq;
-				}
-				/* here we rely on how build_uac_req()
-				   builds the first line */
-				new_cell->uac[0].uri.s = buf1 +
-					req->first_line.u.request.method.len + 1;
-				new_cell->uac[0].uri.len = GET_RURI(req)->len;
-
-				/* update also info about new destination and send sock */
-				if (new_send_sock)
-					request->dst.to = new_to_su;
-
-				shm_free(buf);
-				buf = buf1;
-				buf_len = buf_len1;
-				/* use new buffer */
-			} else {
-				/* no changes over the message, buffer is already generated,
-				   just hide the original VIA for potential further branches */
-				del_lump(req,req->h_via1->name.s-req->buf,req->h_via1->len,0);
-			}
-abort_update:
-			/* save the SIP message into transaction */
-			new_cell->uas.request = sip_msg_cloner( req, &sip_msg_len, 1);
-			if (new_cell->uas.request==NULL) {
-				/* reset any T triggering */
-				new_cell->on_negative = 0;
-				new_cell->on_reply = 0;
-			} else {
-				new_cell->uas.end_request=
-					((char*)new_cell->uas.request)+sip_msg_len;
-			}
-			/* no parallel support in UAC transactions */
-			new_cell->on_branch = 0;
-			free_sip_msg(req);
-			pkg_free(req);
-		}
+	/* run the local route */
+	if (sroutes==NULL) {
+		LM_BUG("running local route/t_uac, but no routes in the process\n");
+	} else if (sroutes->local.a) {
+		run_local_route( new_cell, &buf, &buf_len, dialog, &req, &buf_req);
 	}
 
-	/* for DNS based failover, copy the DNS proxy into transaction */
-	if (!disable_dns_failover) {
+	if (request->buffer.s==NULL) {
+		request->buffer.s = buf;
+		request->buffer.len = buf_len;
+	}
+
+	/* for DNS based failover, copy the DNS proxy into transaction
+	 * NOTE: while running the local route, the DNS proxy may be set
+	 *   if a different one is needed (due destination change), so 
+	 *   we clone it here ONLY if not set */
+	if (!disable_dns_failover && new_cell->uac[0].proxy==NULL) {
 		new_cell->uac[0].proxy = shm_clone_proxy( proxy, 1/*do_free*/);
 		if (new_cell->uac[0].proxy==NULL)
 			LM_ERR("failed to store DNS info -> no DNS based failover\n");
 	}
 
-	new_cell->method.s = buf;
+	/* the method is the the very beginning of the buffer */
+	new_cell->method.s = request->buffer.s;
 	new_cell->method.len = method->len;
 
-	request->buffer.s = buf;
-	request->buffer.len = buf_len;
 	new_cell->nr_of_outgoings++;
 
 	if(last_localT) {
@@ -488,6 +554,23 @@ abort_update:
 		start_retr(request);
 	}
 
+	/* successfully sent out */
+
+	if ( req ) {
+		/* run callbacks 
+		 * NOTE: this callback will be executed ONLY if the local route
+		 * was executed (so we have the msg) */
+		if ( has_tran_tmcbs( new_cell, TMCB_MSG_SENT_OUT) ) {
+			set_extra_tmcb_params( &request->buffer,
+				&request->dst);
+			run_trans_callbacks( TMCB_MSG_SENT_OUT, new_cell,
+				req, 0, 0);
+		}
+		free_sip_msg(req);
+		pkg_free(req);
+		if (buf_req) shm_free(buf_req);
+	}
+
 	set_avp_list( backup );
 	free_proxy( proxy );
 	pkg_free( proxy );
@@ -498,11 +581,12 @@ error1:
 	LOCK_HASH(hi);
 	remove_from_hash_table_unsafe(new_cell);
 	UNLOCK_HASH(hi);
-	free_cell(new_cell);
 error2:
+	free_cell(new_cell);
+error3:
 	free_proxy( proxy );
 	pkg_free( proxy );
-error3:
+error_out:
 	return ret;
 }
 

@@ -218,7 +218,7 @@ static const str MI_HTTP_Response_Head_1 = str_init("<html><head><title>"\
 
 
 static const str MI_HTTP_Response_Head_2 = str_init(\
-"<link rel=\"icon\" type=\"image/png\" href=\"http://opensips.org/favicon.png\">"\
+"<link rel=\"icon\" type=\"image/png\" href=\"https://opensips.org/favicon.png\">"\
 "</head>\n"\
 "<body alink=\"#000000\" bgcolor=\"#ffffff\" link=\"#000000\" text=\"#000000\" vlink=\"#000000\">");
 
@@ -270,7 +270,7 @@ static const str MI_HTTP_Post_2 = str_init("\">\n"\
 static const str MI_HTTP_Response_Foot = str_init(\
 "\n</center>\n<div align=\"center\" class=\"foot\" style=\"margin:20px auto\">"\
 	"<span style='margin-left:5px;'></span>"\
-	"<a href=\"http://opensips.org\">OpenSIPS web site</a><br/>"\
+	"<a href=\"https://opensips.org\">OpenSIPS web site</a><br/>"\
 	"Copyright &copy; 2011-2015 <a href=\"http://www.voipembedded.com/\">VoIP Embedded, Inc.</a>"\
 								". All rights reserved."\
 "</div></body></html>");
@@ -472,6 +472,9 @@ mi_response_t *mi_http_run_mi_cmd(int mod, int cmd, const str* arg,
 	mi_request_t req_item;
 	mi_response_t *resp = NULL;
 
+	/* initialize field to make sure it is not released in case of errors */
+	req_item.req_obj = NULL;
+
 	if (mod<0 && cmd<0) {
 		LM_ERR("Incorect params: mod=[%d], cmd=[%d]\n", mod, cmd);
 		goto error;
@@ -487,12 +490,7 @@ mi_response_t *mi_http_run_mi_cmd(int mod, int cmd, const str* arg,
 		LM_ERR("bad output is_traced param!\n");
 		return 0;
 	} else {
-		if ( f ) {
-			*is_traced = is_mi_cmd_traced( mi_trace_mod_id, f);
-		} else {
-			/* trace all errors */
-			*is_traced = 1;
-		}
+		*is_traced = is_mi_cmd_traced( mi_trace_mod_id, f);
 	}
 
 	if (f->flags&MI_ASYNC_RPL_FLAG) {
@@ -568,17 +566,14 @@ error:
 
 int init_upSinceCTime(void)
 {
-	char* p;
-
 	/* Build a cache value of initial startup time */
-	p = ctime(&startup_time);
-	upSinceCTime.len = strlen(p)-1;
-	upSinceCTime.s = (char*)pkg_malloc(upSinceCTime.len);
+	upSinceCTime.s = (char*)pkg_malloc(26);
 	if (upSinceCTime.s==NULL) {
 		LM_ERR("oom\n");
 		return -1;
 	}
-	memcpy(upSinceCTime.s, p, upSinceCTime.len);
+	ctime_r(&startup_time, upSinceCTime.s);
+	upSinceCTime.len = strlen(upSinceCTime.s)-1;
 	return 0;
 }
 
@@ -681,7 +676,7 @@ int mi_http_build_content(str *page, int max_page_len,
 			MI_HTTP_Response_Title_Table_1);
 	if ((int)((p)-buf)+SERVER_HDR_LEN-8>max_page_len)
 		goto error;
-	memcpy(p, SERVER_HDR+8, SERVER_HDR_LEN-8);
+	memcpy(p, ((const char *)SERVER_HDR)+8, SERVER_HDR_LEN-8);
 	p += SERVER_HDR_LEN-8;
 	MI_HTTP_COPY_3(p,MI_HTTP_Response_Title_Table_2,
 			upSinceCTime,

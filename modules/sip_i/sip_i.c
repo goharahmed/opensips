@@ -45,14 +45,14 @@ static void mod_destroy(void);
 /* $isup_msg_type */
 int pv_get_isup_msg_type(struct sip_msg *msg, pv_param_t *param, pv_value_t *res);
 /* $isup_param */
-int pv_parse_isup_param_name(pv_spec_p sp, str *in);
-int pv_parse_isup_param_index(pv_spec_p sp, str* in);
+int pv_parse_isup_param_name(pv_spec_p sp, const str *in);
+int pv_parse_isup_param_index(pv_spec_p sp, const str *in);
 int pv_get_isup_param(struct sip_msg *msg, pv_param_t *param, pv_value_t *res);
 int pv_get_isup_param_str(struct sip_msg *msg, pv_param_t *param, pv_value_t *res);
 int pv_set_isup_param(struct sip_msg* msg, pv_param_t *param, int op, pv_value_t *val);
 
 /* script functions */
-static int add_isup_part_cmd(struct sip_msg *msg, char *param, char *hdrs);
+static int add_isup_part_cmd(struct sip_msg *msg, str *msg_type, str *hdrs);
 
 /* script transformations */
 int tr_isup_parse(str* in, trans_t *t);
@@ -75,16 +75,11 @@ static pv_export_t mod_items[] = {
 };
 
 static cmd_export_t cmds[] = {
-	{"add_isup_part", (cmd_function)add_isup_part_cmd, 0,
-		NULL, 0, REQUEST_ROUTE | FAILURE_ROUTE |
-		ONREPLY_ROUTE | LOCAL_ROUTE | BRANCH_ROUTE},
-	{"add_isup_part", (cmd_function)add_isup_part_cmd, 1,
-		fixup_spve_spve, 0, REQUEST_ROUTE | FAILURE_ROUTE |
-		ONREPLY_ROUTE | LOCAL_ROUTE | BRANCH_ROUTE},
-	{"add_isup_part", (cmd_function)add_isup_part_cmd, 2,
-		fixup_spve_spve, 0, REQUEST_ROUTE | FAILURE_ROUTE |
-		ONREPLY_ROUTE | LOCAL_ROUTE | BRANCH_ROUTE},
-	{0,0,0,0,0,0}
+	{"add_isup_part", (cmd_function)add_isup_part_cmd, {
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|LOCAL_ROUTE|BRANCH_ROUTE},
+	{0,0,{{0,0,0}},0}
 };
 
 static str param_subf_sep = str_init(DEFAULT_PARAM_SUBF_SEP);
@@ -105,6 +100,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,	/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, 	/* dlopen flags */
+	0,				 	/* load function */
 	0,           		/* OpenSIPS module dependencies */
 	cmds,            	/* exported functions */
 	0,               	/* exported async functions */
@@ -114,10 +110,12 @@ struct module_exports exports= {
 	mod_items,       	/* exported pseudo-variables */
 	trans,					/* exported transformations */
 	0,               	/* extra processes */
+	0,               	/* module pre-initialization function */
 	mod_init,        	/* module initialization function */
 	0,               	/* reply processing function */
 	mod_destroy,
-	child_init       	/* per-child init function */
+	child_init,       	/* per-child init function */
+	0					/* reload confirm function */
 };
 
 static int mod_init(void)
@@ -167,7 +165,7 @@ static inline int get_msg_idx_by_type(int msg_type)
 	return -1;
 }
 
-int pv_parse_isup_param_name(pv_spec_p sp, str *in)
+int pv_parse_isup_param_name(pv_spec_p sp, const str *in)
 {
 	str param_s = {0, 0}, subfield_s = {0, 0};
 	int i, j;
@@ -258,7 +256,7 @@ int pv_parse_isup_param_name(pv_spec_p sp, str *in)
 	return 0;
 }
 
-int pv_parse_isup_param_index(pv_spec_p sp, str* in)
+int pv_parse_isup_param_index(pv_spec_p sp, const str* in)
 {
 	int idx;
 
@@ -296,7 +294,7 @@ int pv_parse_isup_param_index(pv_spec_p sp, str* in)
 	return 0;
 }
 
-void free_isup_parsed(void *parsed, pb_free free_f)
+void free_isup_parsed(void *parsed, osips_free_f free_f)
 {
 	struct opt_param *it, *tmp;
 
@@ -304,14 +302,14 @@ void free_isup_parsed(void *parsed, pb_free free_f)
 	while (it) {
 		tmp = it;
 		it = it->next;
-		free_f(tmp);
+		func_free(free_f, tmp);
 	}
 
-	free_f(parsed);
+	func_free(free_f, parsed);
 }
 
 void *clone_isup_parsed(struct body_part *old_part, struct body_part *new_part,
-			struct sip_msg *src_msg, struct sip_msg *dst_msg, pb_malloc malloc_f)
+			struct sip_msg *src_msg, struct sip_msg *dst_msg, osips_malloc_f malloc_f)
 {
 	struct isup_parsed_struct *new_ps, *old_ps;
 	struct opt_param *optp_it, *optp_new = NULL, *optp_prev = NULL;
@@ -327,7 +325,7 @@ void *clone_isup_parsed(struct body_part *old_part, struct body_part *new_part,
 		return NULL;
 	}
 
-	new_ps = malloc_f(sizeof(struct isup_parsed_struct));
+	new_ps = func_malloc(malloc_f, sizeof(struct isup_parsed_struct));
 	if (!new_ps) {
 		LM_ERR("No more pkg mem for cloned data\n");
 		return NULL;
@@ -338,7 +336,7 @@ void *clone_isup_parsed(struct body_part *old_part, struct body_part *new_part,
 
 	/* clone list of optional params */
 	for (optp_it = old_ps->opt_params_list; optp_it; optp_it = optp_it->next) {
-		optp_new = malloc_f(sizeof(struct opt_param));
+		optp_new = func_malloc(malloc_f, sizeof(struct opt_param));
 		if (!optp_new) {
 			LM_ERR("No more pkg mem\n");
 			return NULL;
@@ -1630,19 +1628,18 @@ static int init_anm_default(struct sip_msg *sip_msg, struct isup_parsed_struct *
 }
 
 
-static int add_isup_part_cmd(struct sip_msg *msg, char *param, char *hdrs)
+static int add_isup_part_cmd(struct sip_msg *msg, str *msg_type, str *hdrs)
 {
 	struct isup_parsed_struct *isup_struct;
 	struct body_part *isup_part;
 	int isup_msg_idx = -1;
-	str param_msg_type;
 	str sip_hdrs;
 	int i;
 	int rc;
 
 	/* if isup message type not provided as param, try to map sip msg to
 	 * isup msg type by default */
-	if (!param) {
+	if (!msg_type) {
 		if (msg->first_line.type == SIP_REQUEST) {
 			if (msg->REQ_METHOD == METHOD_INVITE) {
 				/* INVITE -> IAM */
@@ -1682,24 +1679,19 @@ static int add_isup_part_cmd(struct sip_msg *msg, char *param, char *hdrs)
 		}
 
 	} else {
-
-		if(fixup_get_svalue(msg, (gparam_p)param, &param_msg_type)!=0) {
-			LM_ERR("cannot print the param format\n");
-			return -1;
-		}
-		if(param_msg_type.s==NULL || param_msg_type.len==0) {
+		if(msg_type->s==NULL || msg_type->len==0) {
 			LM_ERR("null/empty param found\n");
 			return -1;
 		}
 
 		for (i = 0; i < NO_ISUP_MESSAGES; i++)
-			if (param_msg_type.len == 3) {
-				if (!memcmp(&isup_messages[i].short_name, param_msg_type.s, 3)) {
+			if (msg_type->len == 3) {
+				if (!memcmp(&isup_messages[i].short_name, msg_type->s, 3)) {
 					isup_msg_idx = get_msg_idx_by_type(isup_messages[i].message_type);
 					break;
 				}
 			} else {
-				if (str_strcasecmp(&isup_messages[i].name, &param_msg_type) == 0) {
+				if (str_strcasecmp(&isup_messages[i].name, msg_type) == 0) {
 					isup_msg_idx = get_msg_idx_by_type(isup_messages[i].message_type);
 					break;
 				}
@@ -1720,15 +1712,7 @@ static int add_isup_part_cmd(struct sip_msg *msg, char *param, char *hdrs)
 
 	/* handle the extra SIP headers */
 	if (hdrs!=NULL) {
-		if(fixup_get_svalue(msg, (gparam_p)hdrs, &sip_hdrs)!=0) {
-			LM_ERR("cannot print the param format, ignoring SIP headers\n");
-			sip_hdrs.len = 0;
-			sip_hdrs.s = NULL;
-		} else if(sip_hdrs.s==NULL || sip_hdrs.len==0) {
-			LM_DBG("null/empty SIP headers found\n");
-			sip_hdrs.len = 0;
-			sip_hdrs.s = NULL;
-		}
+		sip_hdrs = *hdrs;
 	} else if (default_part_headers.len) {
 		sip_hdrs = default_part_headers;
 	} else {

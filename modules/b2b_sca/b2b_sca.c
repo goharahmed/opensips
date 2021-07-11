@@ -48,8 +48,8 @@ extern str app_state[];
 static int mod_init(void);
 static void mod_destroy(void);
 static int child_init(int rank);
-int sca_init_request(struct sip_msg* msg);
-int sca_bridge_request(struct sip_msg* msg, str* arg1, str* arg2);
+int sca_init_request(struct sip_msg* msg, int *shared_entity);
+int sca_bridge_request(struct sip_msg* msg, str* arg1);
 mi_response_t *mi_sca_list(const mi_params_t *params,
 								struct mi_handler *async_hdl);
 
@@ -86,9 +86,13 @@ str presence_server = {NULL, 0};
 /** Exported functions */
 static cmd_export_t cmds[]=
 {
-	{"sca_init_request"  ,(cmd_function)sca_init_request  ,1,fixup_pvar_pvar,0,REQUEST_ROUTE},
-	{"sca_bridge_request",(cmd_function)sca_bridge_request,1,fixup_pvar_pvar,0,REQUEST_ROUTE},
-	{ 0,                 0,                              0 , 0 , 0,  0}
+	{"sca_init_request"  ,(cmd_function)sca_init_request, {
+		{CMD_PARAM_INT,0,0}, {0,0,0}},
+		REQUEST_ROUTE},
+	{"sca_bridge_request",(cmd_function)sca_bridge_request, {
+		{CMD_PARAM_STR,0,0}, {0,0,0}},
+		REQUEST_ROUTE},
+	{0,0,{{0,0,0}},0}
 };
 
 /** Exported parameters */
@@ -184,6 +188,7 @@ struct module_exports exports= {
         MOD_TYPE_DEFAULT,               /* class of this module */
         MODULE_VERSION,                 /* module version */
         DEFAULT_DLFLAGS,                /* dlopen flags */
+        0,				                /* load function */
         &deps,                          /* OpenSIPS module dependencies */
         cmds,                           /* exported functions */
         0,                              /* exported async functions */
@@ -193,10 +198,12 @@ struct module_exports exports= {
         0,                              /* exported pseudo-variables */
 		0,								/* exported transformations */
         0,                              /* extra processes */
+        0,                              /* module pre-initialization function */
         mod_init,                       /* module initialization function */
         (response_function) 0,          /* response handling function */
         (destroy_function) mod_destroy, /* destroy function */
-        child_init                      /* per-child init function */
+        child_init,                     /* per-child init function */
+		0                               /* reload confirm function */
 };
 
 /** Module init function */
@@ -348,7 +355,7 @@ static int mod_init(void)
 
 static int child_init(int rank)
 {
-	if (sca_db_mode==DB_MODE_REALTIME &&  (rank>PROC_MAIN || rank==PROC_MODULE)) {
+	if (sca_db_mode==DB_MODE_REALTIME &&  (rank>=1 || rank==PROC_MODULE)) {
 		if (connect_sca_db(&db_url)) {
 			LM_ERR("failed to connect to database (rank=%d)\n",rank);
 			return -1;
@@ -361,9 +368,6 @@ static int child_init(int rank)
 
 static void mod_destroy(void)
 {
-	//if (sca_db_mode != DB_MODE_NONE) {
-	//	sca_update_db();
-	//}
 	destroy_b2b_sca_handlers();
 	destroy_b2b_sca_htable();
 

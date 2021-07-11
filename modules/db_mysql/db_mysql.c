@@ -28,6 +28,8 @@
  *  2003-03-16  flags export parameter added (janakj)
  */
 
+#define _GNU_SOURCE
+
 #include "../../sr_module.h"
 #include "../../db/db.h"
 #include "../../db/db_cap.h"
@@ -45,6 +47,10 @@ unsigned int db_mysql_exec_query_threshold = 0;   /* Warning in case DB query
 int max_db_retries = 3;
 int max_db_queries = 2;
 
+/* the max column (e.g. CHAR) data size, fetched using prepared statements.
+ * If a column's data exceeeds this size, it will be truncated (no errors) */
+int ps_max_col_size = 1024;
+
 static int mysql_mod_init(void);
 
 int db_mysql_bind_api(const str* mod, db_func_t *dbb);
@@ -53,8 +59,8 @@ int db_mysql_bind_api(const str* mod, db_func_t *dbb);
  * MySQL database module interface
  */
 static cmd_export_t cmds[] = {
-	{"db_bind_api",         (cmd_function)db_mysql_bind_api,      0, 0, 0, 0},
-	{0, 0, 0, 0, 0, 0}
+	{"db_bind_api",         (cmd_function)db_mysql_bind_api,      {{0, 0, 0}}, 0},
+	{0, 0, {{0, 0, 0}}, 0}
 };
 
 struct tls_mgm_binds tls_api;
@@ -69,6 +75,7 @@ static param_export_t params[] = {
 	{"exec_query_threshold", INT_PARAM, &db_mysql_exec_query_threshold},
 	{"max_db_retries", INT_PARAM, &max_db_retries},
 	{"max_db_queries", INT_PARAM, &max_db_queries},
+	{"ps_max_col_size", INT_PARAM, &ps_max_col_size},
 	{"use_tls", INT_PARAM, &use_tls},
 	{0, 0, 0}
 };
@@ -96,7 +103,8 @@ struct module_exports exports = {
 	MOD_TYPE_SQLDB,  /* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
-	&deps,            /* OpenSIPS module dependencies */
+	0,               /* load function */
+	&deps,           /* OpenSIPS module dependencies */
 	cmds,
 	0,               /* exported async functions */
 	params,          /* module parameters */
@@ -105,10 +113,12 @@ struct module_exports exports = {
 	0,               /* exported pseudo-variables */
 	0,				 /* exported transformations */
 	0,               /* extra processes */
+	0,               /* module pre-initialization function */
 	mysql_mod_init,  /* module initialization function */
 	0,               /* response function*/
 	0,               /* destroy function */
-	0                /* per-child init function */
+	0,               /* per-child init function */
+	0                /* reload confirm function */
 };
 
 
@@ -120,15 +130,20 @@ static int mysql_mod_init(void)
 		LM_ERR("Cannot register mysql event\n");
 		return -1;
 	}
-	
-	if(max_db_queries < 1){
-		LM_WARN("Invalid number for max_db_queries\n");
+
+	if (max_db_queries < 1) {
+		LM_WARN("Invalid number for 'max_db_queries'\n");
 		max_db_queries = 2;
 	}
-	
-	if(max_db_retries < 0){
-		LM_WARN("Invalid number for max_db_retries\n");
+
+	if (max_db_retries < 0) {
+		LM_WARN("Invalid value for 'max_db_retries'\n");
 		max_db_retries = 3;
+	}
+
+	if (ps_max_col_size < 256) {
+		LM_WARN("value too small for 'ps_max_col_size', using default\n");
+		ps_max_col_size = 1024;
 	}
 
 	if (use_tls && load_tls_mgm_api(&tls_api) != 0) {

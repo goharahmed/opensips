@@ -222,7 +222,7 @@ void msg_presentity_clean(unsigned int ticks,void *interval)
 	result_cols[etag_col=n_result_cols++] = &str_etag_col;
 	result_cols[event_col=n_result_cols++] = &str_event_col;
 
-	//CON_PS_REFERENCE(pa_db) = &my_ps_select;
+	//CON_SET_CURR_PS(pa_db, &my_ps_select);
 	if(pa_dbf.query(pa_db, db_keys, db_ops, db_vals, result_cols,
 						2, n_result_cols, &query_str, &result )< 0)
 	{
@@ -346,7 +346,8 @@ void msg_presentity_clean(unsigned int ticks,void *interval)
 		}
 		rules_doc= NULL;
 		/* delete from hash table */
-		if(delete_phtable_query(&p[i].uri, ev.parsed, &p[i].p->new_etag)< 0)
+		if(delete_phtable_query(&p[i].uri, p[i].p->event->evp->parsed,
+		&p[i].p->new_etag)< 0)
 		{
 			LM_ERR("deleting from pres hash table\n");
 		}
@@ -365,7 +366,7 @@ void msg_presentity_clean(unsigned int ticks,void *interval)
 	{
 		LM_ERR("in use_table\n");
 	} else {
-		CON_PS_REFERENCE(pa_db) = &my_ps_delete;
+		CON_SET_CURR_PS(pa_db, &my_ps_delete);
 		if (pa_dbf.delete(pa_db, db_keys+1, db_ops+1, db_vals+1, 1) < 0)
 			LM_ERR("cleaning expired messages\n");
 	}
@@ -400,7 +401,7 @@ void msg_presentity_clean(unsigned int ticks,void *interval)
  *		- sends a reply in all cases (success or error).
  **/
 
-int handle_publish(struct sip_msg* msg, char* sender_uri, char* str2)
+int handle_publish(struct sip_msg* msg, str* sender_uri)
 {
 	struct sip_uri puri;
 	str body;
@@ -411,8 +412,6 @@ int handle_publish(struct sip_msg* msg, char* sender_uri, char* str2)
 	str etag={NULL, 0};
 	str extra_hdrs={NULL, 0};
 	str* sender= NULL;
-	static char buf[256];
-	int buf_len= 255;
 	pres_ev_t* event= NULL;
 	str pres_user;
 	str pres_domain;
@@ -558,24 +557,16 @@ int handle_publish(struct sip_msg* msg, char* sender_uri, char* str2)
 		{
 			ERR_MEM(PKG_MEM_STR);
 		}
-		if(pv_printf(msg, (pv_elem_t*)sender_uri, buf, &buf_len)<0)
-		{
-			LM_ERR("cannot print the format\n");
-			reply_code= 500;
-			reply_str= pu_500_rpl;
-			goto error;
-		}
-		if(parse_uri(buf, buf_len, &puri)!=0)
+		if(parse_uri(sender_uri->s, sender_uri->len, &puri)!=0)
 		{
 			LM_ERR("bad sender SIP address!\n");
 			goto error;
 		}
 		else
 		{
-			LM_DBG("using user id [%.*s]\n",buf_len,buf);
+			LM_DBG("using user id [%.*s]\n",sender_uri->len,sender_uri->s);
 		}
-		sender->s= buf;
-		sender->len= buf_len;
+		*sender = *sender_uri;
 	}
 	/* call event specific handling function*/
 	if(event->evs_publ_handl)

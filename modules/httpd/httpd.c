@@ -59,12 +59,16 @@ static mi_response_t *mi_list_root_path(const mi_params_t *params,
 int port = 8888;
 str ip = {NULL, 0};
 str buffer = {NULL, 0};
+str tls_cert_file = {NULL, 0};
+str tls_key_file = {NULL, 0};
+str tls_ciphers = {"SECURE256:+SECURE192:-VERS-ALL:+VERS-TLS1.2", 45};
 int post_buf_size = DEFAULT_POST_BUF_SIZE;
 struct httpd_cb *httpd_cb_list = NULL;
 
 
 static proc_export_t mi_procs[] = {
-	{"HTTPD",  0,  0, httpd_proc, 1, PROC_FLAG_INITCHILD },
+	{"HTTPD",  0,  0, httpd_proc, 1,
+		PROC_FLAG_INITCHILD|PROC_FLAG_HAS_IPC|PROC_FLAG_NEEDS_SCRIPT },
 	{NULL, 0, 0, NULL, 0, 0}
 };
 
@@ -75,14 +79,16 @@ static param_export_t params[] = {
 	{"ip",            STR_PARAM, &ip.s},
 	{"buf_size",      INT_PARAM, &buffer.len},
 	{"post_buf_size", INT_PARAM, &post_buf_size},
+	{"tls_cert_file", STR_PARAM, &tls_cert_file.s},
+	{"tls_key_file", STR_PARAM,  &tls_key_file.s},
+	{"tls_ciphers", STR_PARAM, &tls_ciphers.s},
 	{NULL, 0, NULL}
 };
 
 /** Exported functions */
-static cmd_export_t cmds[]=
-{
-	{"httpd_bind",	(cmd_function)httpd_bind,	1, 0, 0, 0},
-	{NULL, NULL, 0, 0, 0, 0}
+static cmd_export_t cmds[] = {
+	{"httpd_bind",	(cmd_function)httpd_bind, {{0,0,0}}, 0},
+	{0,0,{{0,0,0}},0}
 };
 
 /** MI commands */
@@ -100,6 +106,7 @@ struct module_exports exports = {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,            /* dlopen flags */
+	0,				            /* load function */
 	NULL,            /* OpenSIPS module dependencies */
 	cmds,                       /* exported functions */
 	0,                          /* exported async functions */
@@ -109,10 +116,12 @@ struct module_exports exports = {
 	NULL,                       /* exported PV */
 	NULL,						/* exported transformations */
 	mi_procs,                   /* extra processes */
+	0,                          /* module pre-initialization function */
 	mod_init,                   /* module initialization function */
 	(response_function) NULL,   /* response handling function */
 	(destroy_function) destroy, /* destroy function */
-	NULL                        /* per-child init function */
+	NULL,                       /* per-child init function */
+	NULL                        /* reload confirm function */
 };
 
 
@@ -259,5 +268,3 @@ error:
 	free_mi_response(resp);
 	return 0;
 }
-
-

@@ -1,7 +1,7 @@
 /*
  * call center module - call queuing and distribution
  *
- * Copyright (C) 2014 OpenSIPS Solutions
+ * Copyright (C) 2014-2020 OpenSIPS Solutions
  *
  * This file is part of opensips, a free SIP server.
  *
@@ -17,11 +17,7 @@
  *
  * You should have received a copy of the GNU General Public License 
  * along with this program; if not, write to the Free Software 
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
- *
- * History:
- * --------
- *  2014-03-17 initial version (bogdan)
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include "../../sr_module.h"
@@ -30,7 +26,6 @@
 #include "../../error.h"
 #include "../../timer.h"
 #include "../../ut.h"
-#include "../../mod_fix.h"
 #include "../../locking.h"
 #include "../../flags.h"
 #include "../../parser/parse_from.h"
@@ -44,13 +39,17 @@
 /* db stuff */
 static str db_url = {NULL, 0};
 static str acc_db_url = {NULL, 0};;
+static str rt_db_url = {NULL, 0};;
 
 /* internal data (agents, flows) */
 static struct cc_data *data=NULL;
-static str b2b_scenario = {"call center", 0};
+static str b2b_scenario = str_init("call center");
+static str b2b_scenario_agent = str_init("call center agent");
 
 /* b2b logic API */
 b2bl_api_t b2b_api;
+
+static call_state cc_call_state = CC_CALL_NONE;
 
 
 static int mod_init(void);
@@ -73,10 +72,14 @@ static mi_response_t *mi_cc_list_calls(const mi_params_t *params,
 static mi_response_t *mi_reset_stats(const mi_params_t *params,
 								struct mi_handler *async_hdl);
 
-static int w_handle_call(struct sip_msg *req, char *id);
-static int w_agent_login(struct sip_msg *req, char *agent, char *state);
+static int w_handle_call(struct sip_msg *msg, str *flow_name, str *param);
+static int w_agent_login(struct sip_msg *req, str *agent_s, int *state);
+
+static int pv_get_cc_state( struct sip_msg *msg, pv_param_t *param,
+		pv_value_t *res);
 
 static void cc_timer_agents(unsigned int ticks, void* param);
+static void cc_timer_calls(unsigned int ticks, void* param);
 static void cc_timer_cleanup(unsigned int ticks, void* param);
 
 unsigned long stg_awt(unsigned short foo);
@@ -94,38 +97,58 @@ unsigned int wrapup_time = 30;
 
 /* the name of the URI param to report the queue position */
 str queue_pos_param = {NULL,0};
-
-
+/* by default reject new calls if there are no agents logged */
+static int reject_on_no_agents = 1;
 
 static cmd_export_t cmds[]={
-	{"cc_handle_call",           (cmd_function)w_handle_call,         1,
-		fixup_sgp_null, 0, REQUEST_ROUTE},
-	{"cc_agent_login",           (cmd_function)w_agent_login,         2,
-		fixup_sgp_sgp, 0, REQUEST_ROUTE},
-	{0,0,0,0,0,0}
-	};
-
+	{"cc_handle_call", (cmd_function)w_handle_call,
+		{{CMD_PARAM_STR, 0,0},
+		 {CMD_PARAM_STR|CMD_PARAM_OPT, 0,0},
+		 {0,0,0}},
+		REQUEST_ROUTE},
+	{"cc_agent_login", (cmd_function)w_agent_login,
+		{{CMD_PARAM_STR, 0,0},
+		 {CMD_PARAM_INT, 0,0},
+		 {0,0,0}},
+		REQUEST_ROUTE},
+	{0,0,{{0,0,0}},0}
+};
 
 static param_export_t mod_params[]={
 	{ "db_url",               STR_PARAM, &db_url.s             },
 	{ "acc_db_url",           STR_PARAM, &acc_db_url.s         },
-	{ "b2b_scenario",         STR_PARAM, &b2b_scenario.s       },
+	{ "rt_db_url",            STR_PARAM, &rt_db_url.s          },
 	{ "wrapup_time",          INT_PARAM, &wrapup_time          },
+	{ "reject_on_no_agents",  INT_PARAM, &reject_on_no_agents  },
 	{ "queue_pos_param",      STR_PARAM, &queue_pos_param.s    },
+	{ "cc_agents_table",      STR_PARAM, &cc_agent_table_name.s  },
+	{ "cca_agentid_column",   STR_PARAM, &cca_agentid_column.s   },
+	{ "cca_location_column",  STR_PARAM, &cca_location_column.s  },
+	{ "cca_skills_column",    STR_PARAM, &cca_skills_column.s    },
+	{ "cca_logstate_column",  STR_PARAM, &cca_logstate_column.s  },
+	{ "cca_wrapupend_column", STR_PARAM, &cca_wrapupend_column.s },
+	{ "cca_wrapuptime_column",STR_PARAM, &cca_wrapuptime_column.s},
+	{ "cc_flows_table",       STR_PARAM, &cc_flow_table_name.s             },
+	{ "ccf_flowid_column",    STR_PARAM, &ccf_flowid_column.s              },
+	{ "ccf_priority_column",  STR_PARAM, &ccf_priority_column.s            },
+	{ "ccf_skill_column",     STR_PARAM, &ccf_skill_column.s               },
+	{ "ccf_cid_column",       STR_PARAM, &ccf_cid_column.s                 },
+	{ "ccf_max_wrapup_column",STR_PARAM, &ccf_max_wrapup_column.s          },
+	{ "ccf_dissuading_hangup_column",
+							  STR_PARAM, &ccf_dissuading_hangup_column.s   },
+	{ "ccf_dissuading_onhold_th_column",
+							  STR_PARAM, &ccf_dissuading_onhold_th_column.s},
+	{ "ccf_dissuading_ewt_th_column",
+							  STR_PARAM, &ccf_dissuading_ewt_th_column.s   },
+	{ "ccf_dissuading_qsize_th_column",
+							  STR_PARAM, &ccf_dissuading_qsize_th_column.s },
+	{ "ccf_m_welcome_column", STR_PARAM, &ccf_m_welcome_column.s           },
+	{ "ccf_m_queue_column",   STR_PARAM, &ccf_m_queue_column.s             },
+	{ "ccf_m_dissuading_column",
+							  STR_PARAM, &ccf_m_dissuading_column.s        },
+	{ "ccf_m_flow_id_column", STR_PARAM, &ccf_m_flow_id_column.s           },
 	{ 0,0,0 }
 };
-
-
-// static mi_export_t mi_cmds[] = {
-// 	{ "cc_reload",      "", mi_cc_reload,    MI_NO_INPUT_FLAG,0,mi_child_init},
-// 	{ "cc_agent_login", "", mi_agent_login,                  0, 0, 0},
-// 	{ "cc_list_queue",  "", mi_cc_list_queue, MI_NO_INPUT_FLAG, 0, 0},
-// 	{ "cc_list_flows",  "", mi_cc_list_flows, MI_NO_INPUT_FLAG, 0, 0},
-// 	{ "cc_list_agents", "", mi_cc_list_agents,MI_NO_INPUT_FLAG, 0, 0},
-// 	{ "cc_list_calls",  "", mi_cc_list_calls, MI_NO_INPUT_FLAG, 0, 0},
-// 	{ "cc_reset_stats", "", mi_reset_stats,   MI_NO_INPUT_FLAG, 0, 0},
-// 	{ 0, 0, 0, 0, 0, 0}
-// };
 
 static mi_export_t mi_cmds[] = {
 	{"cc_reload", 0, 0, mi_child_init, {
@@ -182,24 +205,33 @@ static dep_export_t deps = {
 	},
 };
 
+static pv_export_t mod_pvars[] = {
+	{ {"cc_state",  sizeof("cc_state")-1},     1000, pv_get_cc_state,
+		0,                 0, 0, 0, 0 },
+	{ {0, 0}, 0, 0, 0, 0, 0, 0, 0 }
+};
+
 struct module_exports exports= {
 	"call_center",   /* module's name */
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	&deps,           /* OpenSIPS module dependencies */
 	cmds,            /* exported functions */
 	0,               /* exported async functions */
 	mod_params,      /* param exports */
 	mod_stats,       /* exported statistics */
 	mi_cmds,         /* exported MI functions */
-	0,               /* exported pseudo-variables */
+	mod_pvars,       /* exported pseudo-variables */
 	0,				 /* exported transformations */
 	0,               /* extra processes */
+	0,               /* module pre-initialization function */
 	mod_init,        /* module initialization function */
 	0,               /* reply processing function */
 	mod_destroy,
-	child_init       /* per-child init function */
+	child_init,      /* per-child init function */
+	0                /* reload confirm function */
 };
 
 
@@ -282,7 +314,35 @@ static int mod_init(void)
 
 	init_db_url( db_url , 0 /*cannot be null*/);
 	init_db_url( acc_db_url , 0 /*cannot be null*/);
-	b2b_scenario.len = strlen(b2b_scenario.s);
+	if (rt_db_url.s==NULL)
+		rt_db_url = db_url;
+	init_db_url( rt_db_url , 0 /*cannot be null*/);
+
+	cc_agent_table_name.len = strlen(cc_agent_table_name.s);
+	cca_agentid_column.len = strlen(cca_agentid_column.s);
+	cca_location_column.len = strlen(cca_location_column.s);
+	cca_skills_column.len = strlen(cca_skills_column.s);
+	cca_logstate_column.len = strlen(cca_logstate_column.s);
+	cca_wrapupend_column.len = strlen(cca_wrapupend_column.s);
+	cca_wrapuptime_column.len = strlen(cca_wrapuptime_column.s);
+
+	cc_flow_table_name.len = strlen(cc_flow_table_name.s);
+	ccf_flowid_column.len = strlen(ccf_flowid_column.s);
+	ccf_priority_column.len = strlen(ccf_priority_column.s);
+	ccf_skill_column.len = strlen(ccf_skill_column.s);
+	ccf_cid_column.len = strlen(ccf_cid_column.s);
+	ccf_max_wrapup_column.len = strlen(ccf_max_wrapup_column.s);
+	ccf_dissuading_hangup_column.len = strlen(ccf_dissuading_hangup_column.s);
+	ccf_dissuading_onhold_th_column.len =
+		strlen(ccf_dissuading_onhold_th_column.s);
+	ccf_dissuading_ewt_th_column.len = strlen(ccf_dissuading_ewt_th_column.s);
+	ccf_dissuading_qsize_th_column.len =
+		strlen(ccf_dissuading_qsize_th_column.s);
+	ccf_m_welcome_column.len = strlen(ccf_m_welcome_column.s);
+	ccf_m_queue_column.len = strlen(ccf_m_queue_column.s);
+	ccf_m_dissuading_column.len = strlen(ccf_m_dissuading_column.s);
+	ccf_m_flow_id_column.len = strlen(ccf_m_flow_id_column.s);
+
 	if (queue_pos_param.s)
 		queue_pos_param.len = strlen(queue_pos_param.s);
 
@@ -295,6 +355,12 @@ static int mod_init(void)
 	if (register_timer( "cc_agents", cc_timer_agents, NULL, 1,
 	TIMER_FLAG_DELAY_ON_DELAY)<0) {
 		LM_ERR("failed to register agents timer function\n");
+		return -1;
+	}
+
+	if (register_timer( "cc_calls", cc_timer_calls, NULL, 1,
+	TIMER_FLAG_DELAY_ON_DELAY)<0) {
+		LM_ERR("failed to register calls timer function\n");
 		return -1;
 	}
 
@@ -311,13 +377,19 @@ static int mod_init(void)
 		return -1;
 	}
 
-	/* init and open DB connection */
+	/* init and open DB connection for provisioning data */
 	if (init_cc_db( &db_url )!=0) {
 		LM_ERR("failed to initialize the DB support\n");
 		return -1;
 	}
+	/* init DB connection (no connect) for ACC/CDR data */
 	if (init_cc_acc_db( &acc_db_url )!=0) {
 		LM_ERR("failed to initialize the acc DB support\n");
+		return -1;
+	}
+	/* init and open DB connection for runtime data */
+	if (init_cc_rt_db( &rt_db_url )!=0) {
+		LM_ERR("failed to initialize the realtime DB support\n");
 		return -1;
 	}
 
@@ -334,8 +406,9 @@ static int mod_init(void)
 		return -1;
 	}
 
-	/* close DB connection */
+	/* close DB connections here, to reopen in the worker processes */
 	cc_close_db();
+	cc_close_rt_db();
 
 	return 0;
 }
@@ -344,7 +417,7 @@ static int mod_init(void)
 static int child_init( int rank )
 {
 	/* init DB connection */
-	if ( rank<PROC_MAIN)
+	if ( rank<1 )
 		return 0;
 	if ( cc_connect_db(&db_url)!=0 ) {
 		LM_CRIT("cannot initialize database connection\n");
@@ -352,6 +425,10 @@ static int child_init( int rank )
 	}
 	if ( cc_connect_acc_db(&acc_db_url)!=0 ) {
 		LM_CRIT("cannot initialize acc database connection\n");
+		return -1;
+	}
+	if ( cc_connect_rt_db(&rt_db_url)!=0 ) {
+		LM_CRIT("cannot initialize rt database connection\n");
 		return -1;
 	}
 	return 0;
@@ -367,6 +444,10 @@ static int mi_child_init( void )
 	}
 	if ( cc_connect_acc_db(&acc_db_url)!=0 ) {
 		LM_CRIT("cannot initialize acc database connection\n");
+		return -1;
+	}
+	if ( cc_connect_rt_db(&rt_db_url)!=0 ) {
+		LM_CRIT("cannot initialize rt database connection\n");
 		return -1;
 	}
 	return 0;
@@ -389,6 +470,17 @@ static inline void update_awt( unsigned int duration )
 }
 
 
+static inline int get_wrapup_time(struct cc_agent *ag, struct cc_flow *fl)
+{
+	int x;
+
+	x = (ag && ag->wrapup_time!=0) ? ag->wrapup_time : wrapup_time;
+	if (fl && fl->max_wrapup && fl->max_wrapup<x)
+		return fl->max_wrapup;
+	return x;
+}
+
+
 static void terminate_call(struct cc_call *call, b2bl_dlg_stat_t* stat,
 		call_state prev_state)
 {
@@ -406,11 +498,12 @@ static void terminate_call(struct cc_call *call, b2bl_dlg_stat_t* stat,
 
 	prepare_cdr( call, &un, &fid , &aid);
 
-	if (prev_state==CC_CALL_TOAGENT) {
+	if (prev_state==CC_CALL_TOAGENT || prev_state==CC_CALL_PRE_TOAGENT) {
 		/* free the agent */
 		if (stat && stat->call_time && prev_state==CC_CALL_TOAGENT) {
 			call->agent->state = CC_AGENT_WRAPUP;
-			call->agent->last_call_end = get_ticks();
+			call->agent->wrapup_end_time = get_ticks()
+				+ get_wrapup_time(call->agent, call->flow);
 			call->flow->processed_calls ++;
 			call->flow->avg_call_duration =
 				( ((float)stat->call_time + 
@@ -427,8 +520,9 @@ static void terminate_call(struct cc_call *call, b2bl_dlg_stat_t* stat,
 			update_awt( get_ticks() - call->recv_time );
 			update_cc_flow_awt( call->flow, get_ticks() - call->recv_time );
 		}
-		/* update last_call_end for agent */
-		cc_db_update_agent_end_call(call->agent);
+		/* update end time for agent's wrapup */
+		cc_db_update_agent_wrapup_end(call->agent);
+		agent_raise_event( call->agent, NULL);
 		call->agent->ref_cnt--;
 		call->agent = NULL;
 	} else {
@@ -486,9 +580,11 @@ void handle_agent_reject(struct cc_call* call, int from_customer, int pickup_tim
 	prepare_cdr( call, &un, &fid , &aid);
 
 	call->agent->state = CC_AGENT_WRAPUP;
-	call->agent->last_call_end = get_ticks();
-	/* update last call_end for agent */
-	cc_db_update_agent_end_call(call->agent);
+	call->agent->wrapup_end_time = get_ticks() +
+				+ get_wrapup_time(call->agent, call->flow);
+	/* update end time for agent's wrapup */
+	cc_db_update_agent_wrapup_end(call->agent);
+	agent_raise_event( call->agent, NULL);
 	call->agent->ref_cnt--;
 	call->agent = NULL;
 
@@ -502,6 +598,7 @@ void handle_agent_reject(struct cc_call* call, int from_customer, int pickup_tim
 
 	lock_release( data->lock );
 
+	cc_call_state = call->state;
 	if(from_customer || call->prev_state != CC_CALL_QUEUED) {
 		/* send call to queue */
 		if (set_call_leg( NULL, call, &out)< 0 ) {
@@ -514,6 +611,7 @@ void handle_agent_reject(struct cc_call* call, int from_customer, int pickup_tim
 			update_stat( call->flow->st_onhold_calls, 1);
 		}
 	}
+	cc_call_state = CC_CALL_NONE;
 	/* write CDR */
 	cc_write_cdr( &un, &fid, &aid, -2, call->recv_time,
 		get_ticks() - call->recv_time, 0 , pickup_time, call->no_rejections-1,
@@ -521,6 +619,83 @@ void handle_agent_reject(struct cc_call* call, int from_customer, int pickup_tim
 	cc_db_update_call(call);
 }
 
+int b2bl_callback_agent(b2bl_cb_params_t *params, unsigned int event)
+{
+	struct cc_call *call = (struct cc_call*)params->param;
+	int cnt;
+	b2bl_dlg_stat_t* stat = params->stat;
+
+	LM_DBG(" call (%p) has BYE for event %d, \n", call, event);
+
+	lock_set_get( data->call_locks, call->lock_idx );
+	
+	if (event == B2B_DESTROY_CB) {
+		LM_DBG("A delete in b2blogic, call->state=%d, %p\n", call->state, call);
+		cnt = --call->ref_cnt;
+		lock_set_release( data->call_locks, call->lock_idx );
+		if (cnt==0)
+			free_cc_call( data, call);
+		return 0;
+	}
+
+	if(call->ign_cback) {
+		lock_set_release( data->call_locks, call->lock_idx );
+		return 2;
+	}
+	
+	if (event == B2B_BYE_CB && params->entity == 0) {
+		/* BYE from agent */
+		if (call->state==CC_CALL_PRE_TOAGENT) {
+			handle_agent_reject(call, 0, stat->setup_time);
+		}
+		lock_set_release( data->call_locks, call->lock_idx );
+		/* route the BYE according to scenario */
+		return 1;
+	}
+
+	/*
+	 * if negative reply from agent - deny call
+	 */
+	if(event == B2B_REJECT_CB && params->entity == 0) {
+		if(call->state == CC_CALL_PRE_TOAGENT) {
+			handle_agent_reject(call, 0, 0);
+		}
+		lock_set_release( data->call_locks, call->lock_idx );
+		return 1;
+	}
+
+	/* right-side leg of call sent BYE -> get next state */
+
+	if(call->state != CC_CALL_PRE_TOAGENT) {
+		LM_CRIT("State not PRE_TOAGENT\n");
+	}
+
+	call->state = CC_CALL_TOAGENT;
+
+	if (stat) call->setup_time = stat->setup_time;
+
+	/* call no longer on wait */
+	LM_DBG("** onhold-- Bridging [%p]\n", call);
+	update_stat( stg_onhold_calls, -1);
+	update_stat( call->flow->st_onhold_calls, -1);
+
+	LM_DBG("Bridge two calls [%p] - [%p]\n", call, call->agent);
+	cc_call_state = call->state;
+	cnt = --call->ref_cnt;
+	if(b2b_api.bridge_2calls(&call->b2bua_id, &call->b2bua_agent_id) < 0)
+	{
+		LM_ERR("Failed to bridge the agent with the customer\n");
+		lock_set_release( data->call_locks, call->lock_idx );
+		b2b_api.terminate_call(&call->b2bua_id);
+		cc_call_state = CC_CALL_NONE;
+		return -1;
+	}
+	cc_call_state = CC_CALL_NONE;
+	/* if the agent was connected to the costumer */	
+	lock_set_release( data->call_locks, call->lock_idx );
+	
+	return 0;
+}
 
 int b2bl_callback_customer(b2bl_cb_params_t *params, unsigned int event)
 {
@@ -534,6 +709,7 @@ int b2bl_callback_customer(b2bl_cb_params_t *params, unsigned int event)
 
 	lock_set_get( data->call_locks, call->lock_idx );
 	cs = call->state;
+	cc_call_state = call->state;
 
 	if (event==B2B_DESTROY_CB) {
 		LM_DBG("A delete in b2blogic, call->state=%d, %p\n", call->state, call);
@@ -560,11 +736,13 @@ int b2bl_callback_customer(b2bl_cb_params_t *params, unsigned int event)
 			free_cc_call( data, call);
 		else
 			LM_DBG("!!! Call ref not 0 - do not delete %p\n", call);
+		cc_call_state = CC_CALL_NONE;
 		return 0;
 	}
 
 	if(call->ign_cback) {
 		lock_set_release( data->call_locks, call->lock_idx );
+		cc_call_state = CC_CALL_NONE;
 		return 2;
 	}
 
@@ -580,8 +758,13 @@ int b2bl_callback_customer(b2bl_cb_params_t *params, unsigned int event)
 	
 	if (event==B2B_BYE_CB && params->entity==0) {
 		LM_DBG("BYE from the customer\n");
+		if(call->state==CC_CALL_PRE_TOAGENT) {
+			/* terminate the call to the agent */
+			b2b_api.terminate_call(&call->b2bua_agent_id);
+		}
 		/* external caller terminated the call */
 		call->state = CC_CALL_ENDED;
+		cc_call_state = CC_CALL_ENDED;
 		lock_set_release( data->call_locks, call->lock_idx );
 		if (cs<CC_CALL_TOAGENT) {
 			/* call terminated while onwait */
@@ -601,11 +784,13 @@ int b2bl_callback_customer(b2bl_cb_params_t *params, unsigned int event)
 		terminate_call(call, stat, cs);
 
 		/* route the BYE according to scenario */
+		cc_call_state = CC_CALL_NONE;
 		return 2;
 	}
 	/* if reInvite to the customer failed - end the call */
 	if(event == B2B_REJECT_CB && params->entity==0) {
 		lock_set_release( data->call_locks, call->lock_idx );
+		cc_call_state = CC_CALL_NONE;
 		return 1;
 	}
 
@@ -613,9 +798,11 @@ int b2bl_callback_customer(b2bl_cb_params_t *params, unsigned int event)
 		if(call->state == CC_CALL_TOAGENT) {
 			handle_agent_reject(call, 1, stat->setup_time);
 			lock_set_release( data->call_locks, call->lock_idx );
+			cc_call_state = CC_CALL_NONE;
 			return 0;
 		}
 		lock_set_release( data->call_locks, call->lock_idx );
+		cc_call_state = CC_CALL_NONE;
 		return 1;
 	}
 
@@ -623,6 +810,7 @@ int b2bl_callback_customer(b2bl_cb_params_t *params, unsigned int event)
 	 * events, just in the BYEs from media/agent side */
 	if (event!=B2B_BYE_CB) {
 		lock_set_release( data->call_locks, call->lock_idx );
+		cc_call_state = CC_CALL_NONE;
 		return 0;
 	}
 
@@ -632,12 +820,14 @@ int b2bl_callback_customer(b2bl_cb_params_t *params, unsigned int event)
 			call->agent->location.len, call->agent->location.s);
 		handle_agent_reject(call, 1, stat->setup_time);
 		lock_set_release( data->call_locks, call->lock_idx );
+		cc_call_state = CC_CALL_NONE;
 		return 0;
 	}
 
 	/* get next state */
 	lock_get( data->lock );
 
+	cc_call_state = CC_CALL_NONE;
 	if (cc_call_state_machine( data, call, &leg )!=0) {
 		LM_ERR("failed to get next call destination \n");
 		lock_release( data->lock );
@@ -645,6 +835,7 @@ int b2bl_callback_customer(b2bl_cb_params_t *params, unsigned int event)
 		/* force BYE to be sent in both parts */
 		return -1;
 	}
+	cc_call_state = call->state;
 
 	lock_release( data->lock );
 
@@ -654,6 +845,7 @@ int b2bl_callback_customer(b2bl_cb_params_t *params, unsigned int event)
 	if (call->state == CC_CALL_ENDED) {
 		lock_set_release( data->call_locks, call->lock_idx );
 		terminate_call( call, stat, cs);
+		cc_call_state = CC_CALL_NONE;
 		return 2;
 	} else if (call->state == CC_CALL_TOAGENT) {
 		/* call no longer on wait */
@@ -667,8 +859,10 @@ int b2bl_callback_customer(b2bl_cb_params_t *params, unsigned int event)
 		LM_ERR("failed to set new destination for call\n");
 		lock_set_release( data->call_locks, call->lock_idx );
 		pkg_free(leg.s);
+		cc_call_state = CC_CALL_NONE;
 		return -1;
 	}
+	cc_call_state = CC_CALL_NONE;
 	lock_set_release( data->call_locks, call->lock_idx );
 
 	if(cc_db_update_call(call) < 0)
@@ -684,15 +878,49 @@ int b2bl_callback_customer(b2bl_cb_params_t *params, unsigned int event)
 int set_call_leg( struct sip_msg *msg, struct cc_call *call, str *new_leg)
 {
 	str* id;
+	b2bl_init_params_t b2b_params;
+	str proxy = {0,0};
 
 	LM_DBG("call %p moving to %.*s , state %d\n", call,
 		new_leg->len, new_leg->s, call->state);
 
-	if (call->b2bua_id.len==0) {
+	if(call->state==CC_CALL_PRE_TOAGENT) {
+		call->ref_cnt++;
+
+		memset(&b2b_params, 0, sizeof b2b_params);
+		b2b_params.e1_type = B2B_CLIENT;
+		b2b_params.e1_to = call->agent->location;
+		b2b_params.e1_from_dname = call->caller_dn;
+		b2b_params.e2_type = B2B_CLIENT;
+		b2b_params.e2_to = *new_leg;
+
+		id = b2b_api.init(NULL, &b2b_scenario_agent, &b2b_params, b2bl_callback_agent,
+				(void*)call, B2B_DESTROY_CB|B2B_REJECT_CB|B2B_BYE_CB, NULL);
+
+		if (id==NULL || id->len==0 || id->s==NULL) {
+			LM_ERR("failed to connect agent to media server "
+					"(empty ID received)\n");
+			return -2;
+		}
+		call->b2bua_agent_id.len = id->len;
+		call->b2bua_agent_id.s = (char*)shm_malloc(id->len);
+		if(call->b2bua_agent_id.s == NULL) {
+			LM_ERR("No more memory\n");
+			return -2;
+		}
+		memcpy(call->b2bua_agent_id.s, id->s, id->len);
+	}
+	else if (call->b2bua_id.len==0) {
 		/* b2b instance not initialized yet =>
 		 * create new b2bua instance */
 		call->ref_cnt++;
-		id = b2b_api.init( msg, &b2b_scenario, &new_leg, b2bl_callback_customer,
+
+		memset(&b2b_params, 0, sizeof b2b_params);
+		b2b_params.e1_type = B2B_SERVER;
+		b2b_params.e2_type = B2B_CLIENT;
+		b2b_params.e2_to = *new_leg;
+
+		id = b2b_api.init(msg, &b2b_scenario, &b2b_params, b2bl_callback_customer,
 				(void*)call, B2B_DESTROY_CB|B2B_REJECT_CB|B2B_BYE_CB, NULL /* custom_hdrs */ );
 		if (id==NULL || id->len==0 || id->s==NULL) {
 			LM_ERR("failed to init new b2bua call (empty ID received)\n");
@@ -710,7 +938,8 @@ int set_call_leg( struct sip_msg *msg, struct cc_call *call, str *new_leg)
 		call->b2bua_id.len = id->len;
 	} else {
 		/* call already ongoing */
-		if(b2b_api.bridge( &call->b2bua_id, new_leg, &call->caller_dn, 0) < 0) {
+		if(b2b_api.bridge( &call->b2bua_id, new_leg, &proxy,
+			&call->caller_dn, 0) < 0) {
 			LM_ERR("bridging failed\n");
 			b2b_api.terminate_call(&call->b2bua_id);
 			return -1;
@@ -776,24 +1005,17 @@ done:
 }
 
 
-static int w_handle_call(struct sip_msg *msg, char *flow_var)
+static int w_handle_call(struct sip_msg *msg, str *flow_name, str *param)
 {
 	struct cc_flow *flow;
 	struct cc_call *call;
 	str leg = {NULL,0};
 	str *dn;
-	str val;
 	int dec;
 	int ret = -1;
 
 	call = NULL;
 	dec = 0;
-
-	/* get the flow name */
-	if (fixup_get_svalue(msg, (gparam_p)flow_var, &val)!=0) {
-		LM_ERR("failed to evaluate the flow name variable\n");
-		return -1;
-	}
 
 	/* parse FROM URI */
 	if (parse_from_uri(msg)==NULL) {
@@ -804,15 +1026,16 @@ static int w_handle_call(struct sip_msg *msg, char *flow_var)
 	lock_get( data->lock );
 
 	/* get the flow ID */
-	flow = get_flow_by_name(data, &val);
+	flow = get_flow_by_name(data, flow_name);
 	if (flow==NULL) {
-		LM_ERR("flow <%.*s> does not exists\n", val.len, val.s);
+		LM_ERR("flow <%.*s> does not exists\n", flow_name->len, flow_name->s);
 		ret = -3;
 		goto error;
 	}
 	LM_DBG("using call flow %p\n", flow);
 
-	if (flow->logged_agents==0 /* no logged agents */ ) {
+	if (flow->logged_agents==0 /* no logged agents */
+	&& reject_on_no_agents /*reject calls if no agents logged*/) {
 		LM_NOTICE("flow <%.*s> closed\n",flow->id.len,flow->id.s);
 		ret = -4;
 		goto error;
@@ -830,7 +1053,7 @@ static int w_handle_call(struct sip_msg *msg, char *flow_var)
 	}
 	LM_DBG("cid=<%.*s>\n",dn->len,dn->s);
 
-	call = new_cc_call(data, flow, dn, &get_from(msg)->parsed_uri.user);
+	call = new_cc_call(data, flow, dn, &get_from(msg)->parsed_uri.user, param);
 	if (call==NULL) {
 		LM_ERR("failed to create new call\n");
 		ret = -5;
@@ -839,10 +1062,13 @@ static int w_handle_call(struct sip_msg *msg, char *flow_var)
 	call->fst_flags |= FSTAT_INCALL;
 
 	/* get estimated wait time */
-	call->eta = (unsigned int) (( flow->avg_call_duration *
-		(float)get_stat_val(flow->st_queued_calls) ) /
-		(float)flow->logged_agents);
-	
+	if (flow->logged_agents)
+		call->eta = (unsigned int) (( flow->avg_call_duration *
+			(float)get_stat_val(flow->st_queued_calls) ) /
+			(float)flow->logged_agents);
+	else
+		call->eta = INT_MAX;
+
 	LM_DBG("avg_call_duration=%.2f queued_calls=%lu logedin_agents=%u\n",
 		flow->avg_call_duration, get_stat_val(flow->st_queued_calls),
 		flow->logged_agents);
@@ -861,6 +1087,7 @@ static int w_handle_call(struct sip_msg *msg, char *flow_var)
 		ret = -5;
 		goto error;
 	}
+	cc_call_state = call->state;
 
 	lock_release( data->lock );
 	LM_DBG("new destination for call(%p) is %.*s (state=%d)\n",
@@ -892,58 +1119,50 @@ static int w_handle_call(struct sip_msg *msg, char *flow_var)
 		LM_ERR("Failed to insert call record in db\n");
 	}
 
+	cc_call_state = CC_CALL_NONE;
 	return 1;
 error:
 	lock_release( data->lock );
 error1:
-	if (call) { free_cc_call( data, call); flow->ongoing_calls--; }
+	if (call) {
+		if (call->state==CC_CALL_QUEUED)
+				cc_queue_rmv_call( data, call);
+		free_cc_call( data, call);
+		flow->ongoing_calls--;
+	}
+	cc_call_state = CC_CALL_NONE;
 	return ret;
 }
 
 
-static int w_agent_login(struct sip_msg *req, char *agent_v, char *state_v)
+static int w_agent_login(struct sip_msg *req, str *agent_s, int *state)
 {
 	struct cc_agent *agent, *prev_agent;
-	str agent_s;
-	int state;
-	unsigned int flags;
-
-
-	/* get state */
-	if (fixup_get_isvalue( req, (gparam_p)state_v, &state, &agent_s,
-	&flags)!=0 || ((flags&GPARAM_INT_VALUE_FLAG)==0) ) {
-		LM_ERR("unable to evaluate state spec \n");
-		return -1;
-	}
-	/* get agent */
-	if (fixup_get_svalue( req, (gparam_p)agent_v, &agent_s)!=0) {
-		LM_ERR("unable to evaluate agent spec \n");
-		return -2;
-	}
 
 	/* block access to data */
 	lock_get( data->lock );
 
 	/* name of the agent */
-	agent = get_agent_by_name( data, &agent_s, &prev_agent);
+	agent = get_agent_by_name( data, agent_s, &prev_agent);
 	if (agent==NULL) {
 		lock_release( data->lock );
-		LM_DBG("agent <%.*s> not found\n",agent_s.len,agent_s.s);
+		LM_DBG("agent <%.*s> not found\n",agent_s->len,agent_s->s);
 		return -3;
 	}
 
-	if (agent->loged_in != state) {
+	if (agent->loged_in != *state) {
 
-		if(state && (agent->state==CC_AGENT_WRAPUP) &&
-			(get_ticks() - agent->last_call_end > wrapup_time))
+		if(*state && (agent->state==CC_AGENT_WRAPUP) &&
+			(get_ticks() > agent->wrapup_end_time))
 			agent->state = CC_AGENT_FREE;
 
-		if(state && data->agents[CC_AG_ONLINE] == NULL)
+		if(*state && data->agents[CC_AG_ONLINE] == NULL)
 			data->last_online_agent = agent;
 
+		/* agent event is triggered here */
 		agent_switch_login(data, agent, prev_agent);
 
-		if(state) {
+		if(*state) {
 			data->logedin_agents++;
 			log_agent_to_flows( data, agent, 1);
 		} else {
@@ -980,12 +1199,14 @@ static void cc_timer_agents(unsigned int ticks, void* param)
 		/* iterate all agents*/
 		do {
 
-			//LM_DBG("%.*s , state=%d, last_call_end=%u, ticks=%u, wrapup=%u\n",
-			//		agent->id.len, agent->id.s, agent->state, agent->last_call_end, ticks, wrapup_time);
+			//LM_DBG("%.*s , state=%d, wrapup_end_time=%u, ticks=%u, "
+			//		"wrapup=%u\n", agent->id.len, agent->id.s, agent->state,
+			//		agent->wrapup_end_time, ticks, wrapup_time);
 			/* for agents in WRAPUP time, check if expired */
 			if ( (agent->state==CC_AGENT_WRAPUP) &&
-					(ticks - agent->last_call_end > wrapup_time)) {
+					(ticks > agent->wrapup_end_time )) {
 				agent->state = CC_AGENT_FREE;
+				agent_raise_event( agent, NULL);
 				/* move it to the end of the list*/
 				if(data->last_online_agent != agent) {
 					remove_cc_agent(data, agent, prev_agent);
@@ -1051,7 +1272,10 @@ next_ag:
 
 			lock_get( data->lock );
 
-			dest = agent->location;
+			if(!call->flow->recordings[AUDIO_FLOW_ID].len)
+				dest = agent->location;
+			else
+				dest = call->flow->recordings[AUDIO_FLOW_ID];
 
 			/* make a copy for destination to agent */
 			out.len = OUT_BUF_LEN(dest.len);
@@ -1059,16 +1283,21 @@ next_ag:
 			memcpy( out.s, dest.s, out.len);
 			
 			call->prev_state = call->state;
-			call->state = CC_CALL_TOAGENT;
-			/* call no longer on wait */
-			LM_DBG("** onhold-- Took out of the queue [%p]\n", call);
-			update_stat( stg_onhold_calls, -1);
-			update_stat( call->flow->st_onhold_calls, -1);
+			if(!call->flow->recordings[AUDIO_FLOW_ID].len) {
+				call->state = CC_CALL_TOAGENT;
+				/* call no longer on wait */
+				LM_DBG("** onhold-- Took out of the queue [%p]\n", call);
+				update_stat( stg_onhold_calls, -1);
+				update_stat( call->flow->st_onhold_calls, -1);
+			}else{
+				call->state = CC_CALL_PRE_TOAGENT;
+			}
 
 			/* mark agent as used */
 			agent->state = CC_AGENT_INCALL;
 			call->agent = agent;
 			call->agent->ref_cnt++;
+			agent_raise_event( agent, call);
 			update_stat( stg_dist_incalls, 1);
 			update_stat( call->flow->st_dist_incalls, 1);
 			call->fst_flags |= FSTAT_DIST;
@@ -1078,9 +1307,11 @@ next_ag:
 			lock_release( data->lock );
 
 			/* send call to selected agent */
+			cc_call_state = call->state;
 			if (set_call_leg( NULL, call, &out)< 0 ) {
 				LM_ERR("failed to set new destination for call\n");
 			}
+			cc_call_state = CC_CALL_NONE;
 			lock_set_release( data->call_locks, call->lock_idx );
 
 			if(cc_db_update_call(call) < 0)
@@ -1090,6 +1321,89 @@ next_ag:
 		}
 
 	} while (call);
+}
+
+
+static void cc_timer_calls(unsigned int ticks, void* param)
+{
+	struct cc_call  *call;
+	str out;
+
+	if (data==NULL || data->queue.calls_no==0)
+		return;
+
+	/* iterate all queued calls to check for how long they were waiting */
+
+	do {
+
+		call = NULL;
+		lock_get( data->lock );
+
+		for ( call=data->queue.first ; call ; call=call->lower_in_queue) {
+			if (call->flow->diss_onhold_th &&
+			(ticks - call->last_start > call->flow->diss_onhold_th) &&
+			call->flow->recordings[AUDIO_DISSUADING].len ) {
+				LM_DBG("call %p in queue for %d(%d) sec -> dissuading msg\n",
+					call,ticks-call->last_start,call->flow->diss_onhold_th);
+				/* remove from queue */
+				cc_queue_rmv_call( data, call);
+				break;
+			}
+		}
+
+		lock_release( data->lock );
+
+		/* no locking here */
+
+		if (call) {
+
+			lock_set_get( data->call_locks, call->lock_idx );
+			call->ref_cnt--;
+
+			/* is the call state still valid? (as queued) */
+			if(call->state != CC_CALL_QUEUED) {
+				if (call->state==CC_CALL_ENDED && call->ref_cnt==0) {
+					lock_set_release( data->call_locks, call->lock_idx );
+					free_cc_call( data, call);
+				} else {
+					lock_set_release( data->call_locks, call->lock_idx );
+				}
+				continue;
+			}
+			
+			lock_get( data->lock );
+
+			/* make a copy for destination to dissuading */
+			out.len = OUT_BUF_LEN(call->flow->recordings[AUDIO_DISSUADING].len);
+			if (out.len==0) {
+				cc_queue_push_call( data, call, 1/*top*/);
+
+				/* unlock data */
+				lock_release( data->lock );
+			} else {
+				out.s = out_buf;
+				memcpy( out.s, call->flow->recordings[AUDIO_DISSUADING].s,
+					out.len);
+
+				call->state = call->flow->diss_hangup ?
+					CC_CALL_DISSUADING2 : CC_CALL_DISSUADING1;
+
+				/* unlock data */
+				lock_release( data->lock );
+
+				cc_call_state = call->state;
+				/* send call to selected destination */
+				if (set_call_leg( NULL, call, &out)<-0 ) {
+					LM_ERR("failed to set new destination for call\n");
+				}
+				cc_call_state = CC_CALL_NONE;
+			}
+			lock_set_release( data->call_locks, call->lock_idx );
+		}
+
+	} while(call);
+
+	return;
 }
 
 
@@ -1277,11 +1591,7 @@ static mi_response_t *mi_cc_list_calls(const mi_params_t *params,
 	mi_response_t *resp;
 	mi_item_t *resp_obj;
 	mi_item_t *calls_arr, *call_item;
-	static str call_state[12]= {{"none", 4},
-			{"welcome", 7},
-			{"queued", 6},
-			{"toagent", 7},
-			{"ended", 5}};
+	str *state;
 
 	resp = init_mi_result_object(&resp_obj);
 	if (!resp)
@@ -1313,10 +1623,12 @@ static mi_response_t *mi_cc_list_calls(const mi_params_t *params,
 			if (add_mi_string(call_item, MI_SSTR("State"),
 				MI_SSTR("ignored")) < 0)
 				goto error;
-		} else
+		} else {
+			state = call_state_str(call->state);
 			if (add_mi_string(call_item, MI_SSTR("State"),
-				call_state[call->state].s, call_state[call->state].len) < 0)
+				state->s, state->len) < 0)
 				goto error;
+		}
 
 		LM_DBG("call->recv_time= %d, ticks= %d\n", call->recv_time, get_ticks());
 		if(call->state != CC_CALL_ENDED)
@@ -1379,14 +1691,15 @@ static mi_response_t *mi_agent_login(const mi_params_t *params,
 	if (agent->loged_in != loged_in) {
 
 		if(loged_in && (agent->state==CC_AGENT_WRAPUP) &&
-			(get_ticks() - agent->last_call_end > wrapup_time))
+			(get_ticks() > agent->wrapup_end_time))
 			agent->state = CC_AGENT_FREE;
 
 		if(loged_in && data->agents[CC_AG_ONLINE] == NULL)
 			data->last_online_agent = agent;
 
+		/* agent event is triggered here */
 		agent_switch_login(data, agent, prev_agent);
-		
+
 		if(loged_in) {
 			data->logedin_agents++;
 			log_agent_to_flows( data, agent, 1);
@@ -1518,3 +1831,13 @@ error:
 }
 
 
+static int pv_get_cc_state( struct sip_msg *msg, pv_param_t *param,
+		pv_value_t *res)
+{
+	if (cc_call_state == CC_CALL_NONE)
+		return pv_get_null( msg, param, res);
+
+	res->rs = *call_state_str(cc_call_state);
+	res->flags = PV_VAL_STR;
+	return 0;
+}

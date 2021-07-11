@@ -71,6 +71,7 @@ struct module_exports exports= {
 	MOD_TYPE_CACHEDB,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	NULL,            /* OpenSIPS module dependencies */
 	NULL,            /* exported functions */
 	0,               /* exported async functions */
@@ -80,10 +81,12 @@ struct module_exports exports= {
 	0,       		 /* exported pseudo-variables */
 	0,				 /* exported transformations */
 	0,               /* extra processes */
+	0,               /* module pre-initialization function */
 	mod_init,        /* module initialization function */
 	0,               /* reply processing function */
 	mod_destroy,
-	child_init       /* per-child init function */
+	child_init,      /* per-child init function */
+	0                /* reload confirm function */
 };
 
 
@@ -127,6 +130,7 @@ static int mod_init(void)
 	cde.cdb_func.get_counter = cassandra_get_counter;
 	cde.cdb_func.set = cassandra_set;
 	cde.cdb_func.remove = cassandra_remove;
+	cde.cdb_func._remove = _cassandra_remove;
 	cde.cdb_func.add = cassandra_add;
 	cde.cdb_func.sub = cassandra_sub;
 	cde.cdb_func.query = cassandra_col_query;

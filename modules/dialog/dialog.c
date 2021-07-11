@@ -1,7 +1,7 @@
 /*
  * dialog module - basic support for dialog tracking
  *
- * Copyright (C) 2008-2014 OpenSIPS Solutions
+ * Copyright (C) 2008-2020 OpenSIPS Solutions
  * Copyright (C) 2006 Voice Sistem SRL
  *
  * This file is part of opensips, a free SIP server.
@@ -18,21 +18,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
- *
- * History:
- * --------
- *  2006-04-14 initial version (bogdan)
- *  2006-11-28 Added statistic support for the number of early and failed
- *              dialogs. (Jeffrey Magder - SOMA Networks)
- *  2007-04-30 added dialog matching without DID (dialog ID), but based only
- *              on RFC3261 elements - based on an original patch submitted
- *              by Michel Bensoussan <michel@extricom.com> (bogdan)
- *  2007-05-15 added saving dialogs' information to database (ancuta)
- *  2007-07-04 added saving dialog cseq, contact, record route
- *              and bind_addresses(sock_info) for caller and callee (ancuta)
- *  2008-04-14 added new type of callback to be triggered when dialogs are
- *              loaded from DB (bogdan)
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 
@@ -48,7 +34,6 @@
 #include "../../ut.h"
 #include "../../pt.h"
 #include "../../pvar.h"
-#include "../../mod_fix.h"
 #include "../../context.h"
 #include "../../script_cb.h"
 #include "../../script_var.h"
@@ -59,6 +44,7 @@
 #include "../clusterer/api.h"
 #include "../../lib/container.h"
 
+#include "dlg_ctx.h"
 #include "dlg_hash.h"
 #include "dlg_timer.h"
 #include "dlg_handlers.h"
@@ -126,44 +112,53 @@ int profile_repl_cluster = 0;
 str dlg_repl_cap = str_init("dialog-dlg-repl");
 str prof_repl_cap = str_init("dialog-prof-repl");
 
+int cluster_auto_sync = 1;
+
 static int pv_get_dlg_count( struct sip_msg *msg, pv_param_t *param,
 		pv_value_t *res);
 
 /* commands wrappers and fixups */
-static int fixup_profile(void** param, int param_no);
-static int fixup_get_profile2(void** param, int param_no);
-static int fixup_get_profile3(void** param, int param_no);
-static int w_create_dialog(struct sip_msg*);
-static int w_create_dialog2(struct sip_msg*,char *);
-static int w_match_dialog(struct sip_msg*, char *seq_match_mode_gp);
+static int w_create_dialog(struct sip_msg*, str *flags_str);
+static int w_match_dialog(struct sip_msg *msg, void *seq_match_mode_val);
 static int api_match_dialog(struct sip_msg *msg, int _seq_match_mode);
-static int fixup_create_dlg2(void **param,int param_no);
 static int w_validate_dialog(struct sip_msg*);
 static int w_fix_route_dialog(struct sip_msg*);
-static int w_set_dlg_profile(struct sip_msg*, char*, char*);
-static int w_unset_dlg_profile(struct sip_msg*, char*, char*);
-static int w_is_in_profile(struct sip_msg*, char*, char*);
-static int w_get_profile_size(struct sip_msg*, char*, char*, char*);
-static int fixup_mmode(void **param, int param_no);
-static int fixup_dlg_flag(void** param, int param_no);
-static int w_set_dlg_flag(struct sip_msg*, char*);
-static int w_reset_dlg_flag(struct sip_msg*, char*);
-static int w_is_dlg_flag_set(struct sip_msg*, char*);
-static int fixup_dlg_sval(void** param, int param_no);
-static int fixup_dlg_fval(void** param, int param_no);
-static int w_store_dlg_value(struct sip_msg*, char*, char*);
-static int w_fetch_dlg_value(struct sip_msg*, char*, char*);
-static int fixup_get_info(void** param, int param_no);
-static int fixup_get_jsons(void** param, int param_no);
-static int fixup_get_vals(void** param, int param_no);
-static int w_get_dlg_info(struct sip_msg*, char*, char*, char*, char*,char *);
-static int w_get_dlg_jsons_by_val(struct sip_msg*, char*, char*, char*, char*);
-static int w_get_dlg_jsons_by_profile(struct sip_msg*, char*, char*, char*, char*);
-static int w_get_dlg_vals(struct sip_msg*, char*, char*, char*);
-static int w_tsl_dlg_flag(struct sip_msg *msg, char *_idx, char *_val);
-static int w_set_dlg_shtag(struct sip_msg *msg, char *shtag);
-static int load_dlg_ctx(struct sip_msg *msg, char *callid);
+static int w_set_dlg_profile(struct sip_msg *msg, str *prof_name, str *value);
+static int w_unset_dlg_profile(struct sip_msg *msg, str *prof_name, str *value);
+static int w_is_in_profile(struct sip_msg *msg, str *prof_name, str *value);
+static int w_get_profile_size(struct sip_msg *msg, str *prof_name,
+							str *value, pv_spec_t *result);
+static int fixup_mmode(void **param);
+static int fixup_dlg_flag(void** param);
+static int fixup_check_avp(void** param);
+static int fixup_check_var(void** param);
+static int fixup_lmode(void **param);
+static int fixup_leg(void **param);
+static int w_set_dlg_flag(struct sip_msg *msg, void *mask);
+static int w_reset_dlg_flag(struct sip_msg *msg, void *mask);
+static int w_is_dlg_flag_set(struct sip_msg *msg, void *mask);
+static int w_store_dlg_value(struct sip_msg *msg, str *name, str *val);
+int w_fetch_dlg_value(struct sip_msg *msg, str *name, pv_spec_t *result);
+static int w_get_dlg_info(struct sip_msg *msg, str *attr, pv_spec_t *attr_val,
+		str *key, str *key_val, pv_spec_t *number_val);
+static int w_get_dlg_jsons_by_val(struct sip_msg *msg,
+		str *attr, str *attr_val, pv_spec_t *out, pv_spec_t *number_val);
+static int w_get_dlg_jsons_by_profile(struct sip_msg *msg,
+		str *attr, str *attr_val, pv_spec_t *out, pv_spec_t *number_val);
+static int w_get_dlg_vals(struct sip_msg *msg, pv_spec_t *v_name,
+		pv_spec_t *v_val, str *callid);
+static int w_tsl_dlg_flag(struct sip_msg *msg, int *_idx, int *_val);
+static int w_set_dlg_shtag(struct sip_msg *msg, str *shtag);
+static int load_dlg_ctx(struct sip_msg *msg, str *callid, void* lmode);
 static int unload_dlg_ctx(struct sip_msg *msg);
+
+static int fixup_route(void** param);
+static int dlg_on_timeout(struct sip_msg* msg, void *route_id);
+static int dlg_on_answer(struct sip_msg* msg, void *route_id);
+static int dlg_on_hangup(struct sip_msg* msg, void *route_id);
+static int dlg_send_sequential(struct sip_msg* msg, str *method, int leg,
+		str *body, str *ct, str *headers);
+
 
 /* item/pseudo-variables functions */
 int pv_get_dlg_lifetime(struct sip_msg *msg,pv_param_t *param,pv_value_t *res);
@@ -182,74 +177,106 @@ int pv_get_dlg_json(struct sip_msg *msg, pv_param_t *param,
 int pv_get_dlg_ctx_json(struct sip_msg *msg, pv_param_t *param,
 		pv_value_t *res);
 
-
 static cmd_export_t cmds[]={
-	{"create_dialog", (cmd_function)w_create_dialog,      0,NULL,
-			0, REQUEST_ROUTE},
-	{"create_dialog", (cmd_function)w_create_dialog2,     1,fixup_create_dlg2,
-			0, REQUEST_ROUTE},
-	{"set_dlg_profile", (cmd_function)w_set_dlg_profile,  1,fixup_profile,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE | BRANCH_ROUTE },
-	{"set_dlg_profile", (cmd_function)w_set_dlg_profile,  2,fixup_profile,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE | BRANCH_ROUTE },
-	{"unset_dlg_profile", (cmd_function)w_unset_dlg_profile,1,fixup_profile,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE | BRANCH_ROUTE },
-	{"unset_dlg_profile", (cmd_function)w_unset_dlg_profile,2,fixup_profile,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE | BRANCH_ROUTE },
-	{"is_in_profile", (cmd_function)w_is_in_profile,      1,fixup_profile,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE |
-			BRANCH_ROUTE | LOCAL_ROUTE },
-	{"is_in_profile", (cmd_function)w_is_in_profile,      2,fixup_profile,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE |
-			BRANCH_ROUTE | LOCAL_ROUTE },
-	{"get_profile_size",(cmd_function)w_get_profile_size, 2,fixup_get_profile2,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE |
-			BRANCH_ROUTE | LOCAL_ROUTE },
-	{"get_profile_size",(cmd_function)w_get_profile_size, 3,fixup_get_profile3,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE |
-			BRANCH_ROUTE | LOCAL_ROUTE},
-	{"set_dlg_flag",(cmd_function)w_set_dlg_flag,         1,fixup_dlg_flag,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE |
-			BRANCH_ROUTE | LOCAL_ROUTE},
-	{"test_and_set_dlg_flag",(cmd_function)w_tsl_dlg_flag,2,fixup_uint_uint,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE |
-			BRANCH_ROUTE | LOCAL_ROUTE },
-	{"reset_dlg_flag",(cmd_function)w_reset_dlg_flag,     1,fixup_dlg_flag,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE |
-			BRANCH_ROUTE | LOCAL_ROUTE },
-	{"is_dlg_flag_set",(cmd_function)w_is_dlg_flag_set,   1,fixup_dlg_flag,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE |
-			BRANCH_ROUTE | LOCAL_ROUTE },
-	{"store_dlg_value",(cmd_function)w_store_dlg_value,   2,fixup_dlg_sval,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE |
-			BRANCH_ROUTE | LOCAL_ROUTE },
-	{"fetch_dlg_value",(cmd_function)w_fetch_dlg_value,   2,fixup_dlg_fval,
-			0, REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE |
-			BRANCH_ROUTE | LOCAL_ROUTE },
-	{"validate_dialog",(cmd_function)w_validate_dialog,   0,         NULL,
-			0, REQUEST_ROUTE},
-	{"fix_route_dialog",(cmd_function)w_fix_route_dialog,0,NULL,
-			0, REQUEST_ROUTE},
-	{"get_dialog_info",(cmd_function)w_get_dlg_info,      5,fixup_get_info,
-			0, ALL_ROUTES },
-	{"get_dialog_vals",(cmd_function)w_get_dlg_vals,      3,fixup_get_vals,
-			0, ALL_ROUTES },
-	{"get_dialogs_by_val",(cmd_function)w_get_dlg_jsons_by_val,	4,fixup_get_jsons,
-			0, ALL_ROUTES },
-	{"get_dialogs_by_profile",(cmd_function)w_get_dlg_jsons_by_profile,	4,fixup_get_jsons,
-			0, ALL_ROUTES },
-	{"match_dialog",  (cmd_function)w_match_dialog,       0,NULL,
-			0, REQUEST_ROUTE},
-	{"match_dialog",  (cmd_function)w_match_dialog,       1,fixup_mmode,
-			0, REQUEST_ROUTE},
-	{"set_dlg_sharing_tag", (cmd_function)w_set_dlg_shtag, 1,
-			fixup_spve_null, 0, REQUEST_ROUTE},
-	{"load_dialog_ctx",(cmd_function)load_dlg_ctx,         1, fixup_sgp_null,
-			0, ALL_ROUTES },
-	{"unload_dialog_ctx",(cmd_function)unload_dlg_ctx,     0, NULL,
-			0, ALL_ROUTES },
-	{"load_dlg",  (cmd_function)load_dlg,   0, 0, 0, 0},
-	{0,0,0,0,0,0}
+	{"create_dialog", (cmd_function)w_create_dialog, {
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE},
+	{"set_dlg_profile", (cmd_function)w_set_dlg_profile, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE | BRANCH_ROUTE},
+	{"unset_dlg_profile", (cmd_function)w_unset_dlg_profile, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE | BRANCH_ROUTE},
+	{"is_in_profile", (cmd_function)w_is_in_profile, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE | BRANCH_ROUTE},
+	{"get_profile_size", (cmd_function)w_get_profile_size, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_VAR,fixup_check_var,0}, {0,0,0}},
+		REQUEST_ROUTE| FAILURE_ROUTE | ONREPLY_ROUTE | BRANCH_ROUTE},
+	{"set_dlg_flag", (cmd_function)w_set_dlg_flag, {
+		{CMD_PARAM_INT,fixup_dlg_flag,0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
+	{"test_and_set_dlg_flag",(cmd_function)w_tsl_dlg_flag, {
+		{CMD_PARAM_INT,0,0},
+		{CMD_PARAM_INT,0,0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
+	{"reset_dlg_flag", (cmd_function)w_reset_dlg_flag, {
+		{CMD_PARAM_INT,fixup_dlg_flag,0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
+	{"is_dlg_flag_set",(cmd_function)w_is_dlg_flag_set, {
+		{CMD_PARAM_INT,fixup_dlg_flag,0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
+	{"store_dlg_value",(cmd_function)w_store_dlg_value, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR,0,0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
+	{"fetch_dlg_value",(cmd_function)w_fetch_dlg_value, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_VAR,fixup_check_var,0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
+	{"validate_dialog",(cmd_function)w_validate_dialog, {{0,0,0}},
+		REQUEST_ROUTE},
+	{"fix_route_dialog",(cmd_function)w_fix_route_dialog, {{0,0,0}},
+		REQUEST_ROUTE},
+	{"get_dialog_info",(cmd_function)w_get_dlg_info, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_VAR,fixup_check_avp,0},
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_VAR,fixup_check_var,0}, {0,0,0}},
+		ALL_ROUTES},
+	{"get_dialog_vals",(cmd_function)w_get_dlg_vals, {
+		{CMD_PARAM_VAR,fixup_check_avp,0},
+		{CMD_PARAM_VAR,fixup_check_avp,0},
+		{CMD_PARAM_STR,0,0}, {0,0,0}},
+		ALL_ROUTES},
+	{"get_dialogs_by_val",(cmd_function)w_get_dlg_jsons_by_val, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_VAR,fixup_check_avp,0},
+		{CMD_PARAM_VAR,fixup_check_var,0}, {0,0,0}},
+		ALL_ROUTES},
+	{"get_dialogs_by_profile",(cmd_function)w_get_dlg_jsons_by_profile, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_VAR,fixup_check_avp,0},
+		{CMD_PARAM_VAR,fixup_check_var,0}, {0,0,0}},
+		ALL_ROUTES},
+	{"match_dialog",  (cmd_function)w_match_dialog, {
+		{CMD_PARAM_STR|CMD_PARAM_OPT,fixup_mmode,0}, {0,0,0}},
+		REQUEST_ROUTE},
+	{"set_dlg_sharing_tag", (cmd_function)w_set_dlg_shtag, {
+		{CMD_PARAM_STR,0,0}, {0,0,0}},
+		REQUEST_ROUTE},
+	{"load_dialog_ctx",(cmd_function)load_dlg_ctx, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,fixup_lmode,0}, {0,0,0}},
+		ALL_ROUTES},
+	{"unload_dialog_ctx",(cmd_function)unload_dlg_ctx,
+		{{0,0,0}}, ALL_ROUTES},
+	{"dlg_on_timeout", (cmd_function)dlg_on_timeout, {
+		{CMD_PARAM_STR|CMD_PARAM_OPT, fixup_route, 0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE},
+	{"dlg_on_answer", (cmd_function)dlg_on_answer, {
+		{CMD_PARAM_STR|CMD_PARAM_OPT, fixup_route, 0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE},
+	{"dlg_on_hangup", (cmd_function)dlg_on_hangup, {
+		{CMD_PARAM_STR|CMD_PARAM_OPT, fixup_route, 0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE},
+	{"dlg_send_sequential", (cmd_function)dlg_send_sequential, {
+		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_STR, fixup_leg, 0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT, 0, 0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT, 0, 0}, {0,0,0}},
+		ALL_ROUTES},
+	{"load_dlg", (cmd_function)load_dlg, {{0,0,0}}, 0},
+	{0,0,{{0,0,0}},0}
 };
 
 static param_export_t mod_params[]={
@@ -306,6 +333,7 @@ static param_export_t mod_params[]={
 	{ "replicate_profiles_check", INT_PARAM, &repl_prof_timer_check },
 	{ "replicate_profiles_buffer",INT_PARAM, &repl_prof_buffer_th   },
 	{ "replicate_profiles_expire",INT_PARAM, &repl_prof_timer_expire},
+	{ "cluster_auto_sync",        INT_PARAM, &cluster_auto_sync     },
 	{ 0,0,0 }
 };
 
@@ -356,6 +384,7 @@ static mi_export_t mi_cmds[] = {
 	},
 	{ "dlg_cluster_sync", 0, 0, 0, {
 		{mi_sync_cl_dlg, {0}},
+		{mi_sync_cl_dlg, {"sharing_tag", 0}},
 		{EMPTY_MI_RECIPE}}
 	},
 	{ "profile_get_size", 0, 0, 0, {
@@ -383,6 +412,19 @@ static mi_export_t mi_cmds[] = {
 	},
 	{ "dlg_push_var", 0, 0, 0, {
 		{mi_push_dlg_var, {"dlg_val_name", "dlg_val_value", "DID", 0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "dlg_send_sequential",
+		"send sequential request within dialog",
+		MI_ASYNC_RPL_FLAG|MI_NAMED_PARAMS_ONLY, 0, {
+		{mi_send_sequential_dlg, {"callid", 0}},
+		{mi_send_sequential_dlg, {"callid", "mode", 0}},
+		{mi_send_sequential_dlg, {"callid", "method", 0}},
+		{mi_send_sequential_dlg, {"callid", "body", 0}},
+		{mi_send_sequential_dlg, {"callid", "mode", "method", 0}},
+		{mi_send_sequential_dlg, {"callid", "mode", "body", 0}},
+		{mi_send_sequential_dlg, {"callid", "method", "body", 0}},
+		{mi_send_sequential_dlg, {"callid", "method", "body", "mode", 0}},
 		{EMPTY_MI_RECIPE}}
 	},
 	{EMPTY_MI_EXPORT}
@@ -429,7 +471,8 @@ static module_dependency_t *get_deps_db_mode(param_export_t *param)
 
 static dep_export_t deps = {
 	{ /* OpenSIPS module dependencies */
-		{ MOD_TYPE_DEFAULT, "tm", DEP_ABORT },
+		/* since dialog registers a tm "unref" callback, tm must destroy 1st */
+		{ MOD_TYPE_DEFAULT, "tm", DEP_ABORT|DEP_REVERSE_DESTROY },
 		{ MOD_TYPE_NULL, NULL, 0 },
 	},
 	{ /* modparam dependencies */
@@ -446,6 +489,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	&deps,           /* OpenSIPS module dependencies */
 	cmds,            /* exported functions */
 	0,               /* exported async functions */
@@ -455,289 +499,74 @@ struct module_exports exports= {
 	mod_items,       /* exported pseudo-variables */
 	0,			 	 /* exported transformations */
 	0,               /* extra processes */
+	0,               /* module pre-initialization function */
 	mod_init,        /* module initialization function */
 	0,               /* reply processing function */
 	mod_destroy,
-	child_init       /* per-child init function */
+	child_init,      /* per-child init function */
+	0                /* reload confirm function */
 };
 
 
-static int fixup_profile(void** param, int param_no)
+static int fixup_check_var(void** param)
 {
-	pv_elem_t *model=NULL;
-	str s;
+	if (!pv_is_w((pv_spec_t *)*param)) {
+		LM_ERR("the return parameter must be a writable pseudo-variable\n");
+		return E_SCRIPT;
+	}
 
-	s.s = (char*)(*param);
-	s.len = strlen(s.s);
-	if(s.len==0) {
-		LM_ERR("param %d is empty string!\n", param_no);
+	return 0;
+}
+
+static int fixup_check_avp(void** param)
+{
+	if (((pv_spec_t *)*param)->type!=PVT_AVP) {
+		LM_ERR("the return parameter must be an AVP\n");
+		return E_SCRIPT;
+	}
+
+	return 0;
+}
+
+static int fixup_dlg_flag(void** param)
+{
+	int val = *(int*)*param;
+
+	if (val<0) {
+		LM_ERR("Negative index\n");
 		return E_CFG;
 	}
-
-	if (param_no == 1)
-		return fixup_sgp(param);
-	else if (param_no==2) {
-		if(pv_parse_format(&s ,&model) || model==NULL) {
-			LM_ERR("wrong format [%s] for value param!\n", s.s);
-			return E_CFG;
-		}
-		*param = (void*)model;
-	}
-	return 0;
-}
-
-
-
-static int fixup_get_profile2(void** param, int param_no)
-{
-	pv_spec_t *sp;
-	int ret;
-	action_elem_t * p;
-
-	if (param_no==1) {
-		return fixup_profile(param, 1);
-	} else if (param_no==2) {
-		ret = fixup_pvar(param);
-		if (ret<0) return ret;
-		sp = (pv_spec_t*)(*param);
-		if (sp->type!=PVT_AVP && sp->type!=PVT_SCRIPTVAR) {
-			LM_ERR("return must be an AVP or SCRIPT VAR!\n");
-			return E_SCRIPT;
-		}
-
-		p = container_of(param, action_elem_t, u.data);
-		p++;
-		p->u.data = *param;
-
-		*param = NULL;
-	}
-
-	return 0;
-}
-
-
-static int fixup_get_profile3(void** param, int param_no)
-{
-	int ret;
-	pv_spec_t *sp;
-
-	if (param_no==1) {
-		return fixup_profile(param, 1);
-	} else if (param_no==2) {
-		return fixup_profile(param, 2);
-	} else if (param_no==3) {
-		ret = fixup_pvar(param);
-		if (ret<0) return ret;
-		sp = (pv_spec_t*)(*param);
-		if (!pv_is_w(sp)) {
-			LM_ERR("'size' must be a writable pvar! (given: %d)\n",
-			       pv_type(sp->type));
-			return E_SCRIPT;
-		}
-	}
-
-	return 0;
-}
-
-
-static int fixup_dlg_flag(void** param, int param_no)
-{
-	unsigned int ui;
-	str s;
-
-	s.s = (char*)*param;
-	s.len = strlen(s.s);
-	if (str2int(&s, &ui)!=0) {
-		LM_ERR("flag index must be a number <%s>\n", (char *)(*param));
-		return E_CFG;
-	}
-	if ( ui>=8*sizeof(unsigned int) ) {
+	if (val>=8*sizeof(unsigned int) ) {
 		LM_ERR("flag index too high <%u> (max=%u)\n",
-			ui, (unsigned int)(8*sizeof(unsigned int)-1) );
+			val, (unsigned int)(8*sizeof(unsigned int)-1) );
 		return E_CFG;
 	}
-	pkg_free(*param);
-	*param=(void *)(unsigned long)(1<<ui);
+
+	*param=(void *)(1UL<<val);
 	return 0;
 }
 
-static int fixup_mmode(void **param, int param_no)
+static int fixup_mmode(void **param)
 {
-	int rc;
-	gparam_p gp;
-
-	rc = fixup_sgp(param);
-	if (rc != 0)
-		return rc;
-
-	gp = (gparam_p)*param;
-	if (gp->type != GPARAM_TYPE_STR)
-		return 0;
-
-	gp->v.sval.len = dlg_match_mode_str_to_int(&gp->v.sval);
+	*param = (void*)(unsigned long)dlg_match_mode_str_to_int((str*)*param);
 
 	return 0;
 }
 
-static int fixup_create_dlg2(void **param, int param_no)
-{
-	return fixup_sgp(param);
-}
 
-static int fixup_dlg_sval(void** param, int param_no)
+static int fixup_route(void** param)
 {
-	pv_elem_t *model=NULL;
-	str s;
+	int rt;
 
-	s.s = (char*)*param;
-	s.len = strlen(s.s);
-	if (param_no==1) {
-		/* name of the value */
-		return fixup_str(param);
-	} else if (param_no==2) {
-		/* value */
-		if(pv_parse_format(&s ,&model) || model==NULL) {
-			LM_ERR("wrong format [%s] for value param!\n", s.s);
-			return E_CFG;
-		}
-		*param = (void*)model;
+	rt = get_script_route_ID_by_name_str( (str*)*param,
+		sroutes->request, RT_NO);
+	if (rt==-1) {
+		LM_ERR("route <%.*s> does not exist\n",
+			((str*)*param)->len, ((str*)*param)->s);
+		return -1;
 	}
 
-	return 0;
-}
-
-
-static int fixup_dlg_fval(void** param, int param_no)
-{
-	pv_spec_t *sp;
-	int ret;
-
-	if (param_no==1) {
-		/* name of the value */
-		return fixup_str(param);
-	} else if (param_no==2) {
-		/* var to store the value */
-		ret = fixup_pvar(param);
-		if (ret<0) return ret;
-		sp = (pv_spec_t*)(*param);
-		if (!pv_is_w(sp)) {
-			LM_ERR("output pvar must be writable! (given: %d)\n",
-			       pv_type(sp->type));
-			return E_SCRIPT;
-		}
-	}
-
-	return 0;
-}
-
-
-static int fixup_get_info(void** param, int param_no)
-{
-	pv_elem_t *model=NULL;
-	pv_spec_t *sp,*sp2;
-	str s;
-	int ret;
-
-	if (param_no==1) {
-		/* name of the dlg val to be returned  */
-		return fixup_str(param);
-	} else if (param_no==2) {
-		/* var to store the dlg_val value */
-		ret = fixup_pvar(param);
-		if (ret<0) return ret;
-		sp = (pv_spec_t*)(*param);
-		if (sp->type!=PVT_AVP) {
-			LM_ERR("return must be an AVP!\n");
-			return E_SCRIPT;
-		}
-	} else if (param_no==3) {
-		/* name of the dlg val to identify the dialog */
-		return fixup_str(param);
-	} else if (param_no==4) {
-		/* var to hold the value of the indeification dlg val */
-		s.s = (char*)*param;
-		s.len = strlen(s.s);
-		if(pv_parse_format(&s ,&model) || model==NULL) {
-			LM_ERR("wrong format [%s] for value param!\n", s.s);
-			return E_CFG;
-		}
-		*param = (void*)model;
-	} else if (param_no==5) {
-		/* output variable with number of matched dialogs */
-		ret = fixup_pvar(param);
-		if (ret<0) return ret;
-		sp2 = (pv_spec_t*)(*param);
-		if (sp2->type!=PVT_AVP && sp2->type!=PVT_SCRIPTVAR) {
-			LM_ERR("return must be an AVP or SCRIPTVAR!\n");
-			return E_SCRIPT;
-		}
-	}
-
-	return 0;
-}
-
-static int fixup_get_jsons(void** param, int param_no)
-{
-	pv_elem_t *model=NULL;
-	pv_spec_t *sp,*sp2;
-	str s;
-	int ret;
-
-	if (param_no==1) {
-		/* name of the dlg val or profile to look for */
-		return fixup_str(param);
-	} else if (param_no==2) {
-		/* var with the val contents, or profile value */
-		s.s = (char*)*param;
-		s.len = strlen(s.s);
-		if(pv_parse_format(&s ,&model) || model==NULL) {
-			LM_ERR("wrong format [%s] for value param!\n", s.s);
-			return E_CFG;
-		}
-		*param = (void*)model;
-	} else if (param_no==3) {
-		/* avp to store the jsons */
-		ret = fixup_pvar(param);
-		if (ret<0) return ret;
-		sp = (pv_spec_t*)(*param);
-		if (sp->type!=PVT_AVP) {
-			LM_ERR("return must be an AVP!\n");
-			return E_SCRIPT;
-		}
-	} else if (param_no==4) {
-		/* output variable with number of matched dialogs */
-		ret = fixup_pvar(param);
-		if (ret<0) return ret;
-		sp2 = (pv_spec_t*)(*param);
-		if (sp2->type!=PVT_AVP && sp2->type!=PVT_SCRIPTVAR) {
-			LM_ERR("return must be an AVP or SCRIPTVAR!\n");
-			return E_SCRIPT;
-		}
-	}
-
-	return 0;
-}
-
-static int fixup_get_vals(void** param, int param_no)
-{
-	pv_spec_t *sp;
-	int ret;
-
-	if (param_no==1 || param_no==2) {
-		/* variables to be populated with the name:value of the 
-		 * found dialog ; we accept only AVPs are they are the
-		 * only one able to hold arrays */
-		ret = fixup_pvar(param);
-		if (ret<0) return ret;
-		sp = (pv_spec_t*)(*param);
-		if (sp->type!=PVT_AVP) {
-			LM_ERR("return must be an AVP!\n");
-			return E_SCRIPT;
-		}
-	} else if (param_no==3) {
-		/* the callid of the dialog to be looked up */
-		return fixup_sgp(param);
-	}
+	*param = (void*)(unsigned long int)rt;
 
 	return 0;
 }
@@ -797,10 +626,29 @@ int load_dlg( struct dlg_binds *dlgb )
 	dlgb->set_mod_flag = set_mod_flag_wrapper;
 	dlgb->is_mod_flag_set = is_mod_flag_set_wrapper;
 
-	dlgb->ref_dlg = ref_dlg;
-	dlgb->unref_dlg = unref_dlg_destroy_safe;
+	dlgb->dlg_ref = _ref_dlg;
+	dlgb->dlg_unref = unref_dlg_destroy_safe;
+
+	dlgb->get_direction = get_dlg_direction;
+	dlgb->get_dlg_did = dlg_get_did;
+	dlgb->get_dlg_by_did = get_dlg_by_did;
+	dlgb->get_dlg_by_callid = get_dlg_by_callid;
+	dlgb->send_indialog_request = send_indialog_request;
 
 	dlgb->get_rr_param = get_rr_param;
+
+	/* dlg context functions */
+	dlgb->dlg_ctx_register_int = dlg_ctx_register_int;
+	dlgb->dlg_ctx_register_str = dlg_ctx_register_str;
+	dlgb->dlg_ctx_register_ptr = dlg_ctx_register_ptr;
+
+	dlgb->dlg_ctx_put_int = dlg_ctx_put_int;
+	dlgb->dlg_ctx_put_str = dlg_ctx_put_str;
+	dlgb->dlg_ctx_put_ptr = dlg_ctx_put_ptr;
+
+	dlgb->dlg_ctx_get_int = dlg_ctx_get_int;
+	dlgb->dlg_ctx_get_str = dlg_ctx_get_str;
+	dlgb->dlg_ctx_get_ptr = dlg_ctx_get_ptr;
 
 	return 1;
 }
@@ -1015,7 +863,7 @@ static int mod_init(void)
 			return -1;
 		}
 
-		if (clusterer_api.request_sync(&dlg_repl_cap, dialog_repl_cluster, 0) < 0)
+		if (clusterer_api.request_sync(&dlg_repl_cap, dialog_repl_cluster) < 0)
 			LM_ERR("Sync request failed\n");
 	}
 
@@ -1061,6 +909,10 @@ static int mod_init(void)
 		if (dlg_hash_size==(1<<n))
 			break;
 		if (dlg_hash_size<(1<<n)) {
+			/* make sure n does not go underflow - this is only possible if
+			 * hash_size is declared to 0, and we "fix" it to 1 */
+			if (n == 0)
+				n = 1;
 			LM_WARN("hash_size is not a power "
 				"of 2 as it should be -> rounding from %d to %d\n",
 				dlg_hash_size, 1<<(n-1));
@@ -1113,12 +965,9 @@ static int child_init(int rank)
 		if_update_stat(dlg_enable_stats, early_dlgs, early_dlgs_cnt);
 	}
 
-	if (
-	(dlg_db_mode==DB_MODE_REALTIME && (rank>=PROC_MAIN||rank==PROC_MODULE)) ||
-	(dlg_db_mode==DB_MODE_SHUTDOWN && (rank==PROC_MAIN||rank==PROC_MODULE)) ||
-	(dlg_db_mode==DB_MODE_DELAYED  && (rank>=PROC_MAIN||rank==PROC_MODULE))
-	){
-		if ( dlg_connect_db(&db_url) ) {
+	if ( (dlg_db_mode==DB_MODE_REALTIME || dlg_db_mode==DB_MODE_DELAYED ) &&
+	(rank>=1 || rank==PROC_MODULE) ) {
+		if ( dlg_connect_db(&db_url)<0 ) {
 			LM_ERR("failed to connect to database (rank=%d)\n",rank);
 			return -1;
 		}
@@ -1135,8 +984,12 @@ static int child_init(int rank)
 static void mod_destroy(void)
 {
 	if (dlg_db_mode != DB_MODE_NONE) {
-		dialog_update_db(0, 0/*do not do locking*/);
-		destroy_dlg_db();
+		if ( dlg_connect_db(&db_url)<0 ) {
+			LM_ERR("failed to connect to database\n");
+		} else {
+			dialog_update_db(0, 0/*do not do locking*/);
+			destroy_dlg_db();
+		}
 	}
 
 	/* no DB interaction from now on */
@@ -1155,30 +1008,20 @@ static void mod_destroy(void)
 }
 
 
-static int w_create_dialog(struct sip_msg *req)
+static int w_create_dialog(struct sip_msg *req, str *flags_str)
 {
 	struct cell *t;
-
-	t = d_tmb.t_gett();
-	if (dlg_create_dialog( (t==T_UNDEFINED)?NULL:t, req,0)!=0)
-		return -1;
-
-	return 1;
-}
-
-static int w_create_dialog2(struct sip_msg *req,char *param)
-{
-	struct cell *t;
-	str res = {0,0};
 	int flags;
 
-	if (fixup_get_svalue(req, (gparam_p)param, &res) !=0)
-	{
-		LM_ERR("no create dialog flags\n");
-		return -1;
-	}
+	flags = flags_str? parse_create_dlg_flags(flags_str): 0;
 
-	flags = parse_create_dlg_flags(res);
+	/* don't allow both Re-INVITE and OPTIONS pinging */
+	if ((flags & (DLG_FLAG_PING_CALLER|DLG_FLAG_REINVITE_PING_CALLER)) ==
+		(DLG_FLAG_PING_CALLER|DLG_FLAG_REINVITE_PING_CALLER))
+		flags &= ~DLG_FLAG_PING_CALLER;
+	if ((flags & (DLG_FLAG_PING_CALLEE|DLG_FLAG_REINVITE_PING_CALLEE)) ==
+		(DLG_FLAG_PING_CALLEE|DLG_FLAG_REINVITE_PING_CALLEE))
+		flags &= ~DLG_FLAG_PING_CALLEE;
 
 	t = d_tmb.t_gett();
 	if (dlg_create_dialog( (t==T_UNDEFINED)?NULL:t, req, flags)!=0)
@@ -1188,27 +1031,14 @@ static int w_create_dialog2(struct sip_msg *req,char *param)
 }
 
 
-static int w_match_dialog(struct sip_msg *msg, char *seq_match_mode_gp)
+static int w_match_dialog(struct sip_msg *msg, void *seq_match_mode_val)
 {
-	str res = STR_NULL;
-	gparam_p mm_gp = (gparam_p)seq_match_mode_gp;
 	int mm;
 
-	if (!seq_match_mode_gp) {
+	if (!seq_match_mode_val)
 		mm = SEQ_MATCH_DEFAULT;
-	} else {
-		if (mm_gp->type == GPARAM_TYPE_STR) {
-			mm = mm_gp->v.sval.len;
-		} else {
-			if (fixup_get_svalue(msg, mm_gp, &res) != 0) {
-				LM_ERR("failed to extract matching mode pv! "
-				       "using 'DID_FALLBACK'\n");
-				mm = SEQ_MATCH_FALLBACK;
-			} else {
-				mm = dlg_match_mode_str_to_int(&res);
-			}
-		}
-	}
+	else
+		mm = (int)(long)seq_match_mode_val;
 
 	return api_match_dialog(msg, mm);
 }
@@ -1324,23 +1154,14 @@ static int w_fix_route_dialog(struct sip_msg *req)
 }
 
 
-static int w_set_dlg_profile(struct sip_msg *msg, char *prof_name, char *value)
+static int w_set_dlg_profile(struct sip_msg *msg, str *prof_name, str *value)
 {
 	struct dlg_cell *dlg;
-	pv_elem_t *pve = (pv_elem_t *)value;
-	str val_s;
-	str prof_name_s;
 	struct dlg_profile_table *profile;
 
-	if (fixup_get_svalue(msg, (gparam_p)prof_name, &prof_name_s) != 0 ||
-		prof_name_s.len == 0 || prof_name_s.s == NULL) {
-		LM_WARN("cannot get profile name\n");
-		return -1;
-	}
-
-	profile = search_dlg_profile(&prof_name_s);
+	profile = search_dlg_profile(prof_name);
 	if (!profile) {
-		LM_ERR("profile <%.*s> not defined\n", prof_name_s.len, prof_name_s.s);
+		LM_ERR("profile <%.*s> not defined\n", prof_name->len, prof_name->s);
 		return -1;
 	}
 
@@ -1350,12 +1171,11 @@ static int w_set_dlg_profile(struct sip_msg *msg, char *prof_name, char *value)
 	}
 
 	if (profile->has_value) {
-		if ( pve==NULL || pv_printf_s(msg, pve, &val_s)!=0 ||
-		val_s.len == 0 || val_s.s == NULL) {
-			LM_WARN("cannot get string for value\n");
-			return -1;
+		if (!value) {
+			LM_WARN("missing value\n");
+			return -1;	
 		}
-		if ( set_dlg_profile( dlg, &val_s, profile, 0) < 0 ) {
+		if ( set_dlg_profile( dlg, value, profile, 0) < 0 ) {
 			LM_ERR("failed to set profile\n");
 			return -1;
 		}
@@ -1369,23 +1189,14 @@ static int w_set_dlg_profile(struct sip_msg *msg, char *prof_name, char *value)
 }
 
 
-static int w_unset_dlg_profile(struct sip_msg *msg, char *prof_name, char *value)
+static int w_unset_dlg_profile(struct sip_msg *msg, str *prof_name, str *value)
 {
 	struct dlg_cell *dlg;
-	pv_elem_t *pve = (pv_elem_t *)value;
-	str val_s;
-	str prof_name_s;
 	struct dlg_profile_table *profile;
 
-	if (fixup_get_svalue(msg, (gparam_p)prof_name, &prof_name_s) != 0 ||
-		prof_name_s.len == 0 || prof_name_s.s == NULL) {
-		LM_WARN("cannot get profile name\n");
-		return -1;
-	}
-
-	profile = search_dlg_profile(&prof_name_s);
+	profile = search_dlg_profile(prof_name);
 	if (!profile) {
-		LM_ERR("profile <%.*s> not defined\n", prof_name_s.len, prof_name_s.s);
+		LM_ERR("profile <%.*s> not defined\n", prof_name->len, prof_name->s);
 		return -1;
 	}
 
@@ -1395,18 +1206,19 @@ static int w_unset_dlg_profile(struct sip_msg *msg, char *prof_name, char *value
 	}
 
 	if (profile->has_value) {
-		if ( pve==NULL || pv_printf_s(msg, pve, &val_s)!=0 ||
-		val_s.len == 0 || val_s.s == NULL) {
-			LM_WARN("cannot get string for value\n");
+		if (!value) {
+			LM_WARN("missing value\n");
 			return -1;
 		}
-		if ( unset_dlg_profile( dlg, &val_s, profile) < 0 ) {
-			LM_ERR("failed to unset profile\n");
+		if ( unset_dlg_profile( dlg, value, profile) < 0 ) {
+			LM_WARN("dialog not found in profile %.*s with value %.*s\n",
+					prof_name->len, prof_name->s, value->len, value->s);
 			return -1;
 		}
 	} else {
 		if ( unset_dlg_profile( dlg, NULL, profile) < 0 ) {
-			LM_ERR("failed to unset profile\n");
+			LM_WARN("dialog not found in profile %.*s\n",
+					prof_name->len, prof_name->s);
 			return -1;
 		}
 	}
@@ -1414,23 +1226,14 @@ static int w_unset_dlg_profile(struct sip_msg *msg, char *prof_name, char *value
 }
 
 
-static int w_is_in_profile(struct sip_msg *msg, char *prof_name, char *value)
+static int w_is_in_profile(struct sip_msg *msg, str *prof_name, str *value)
 {
 	struct dlg_cell *dlg;
-	pv_elem_t *pve = (pv_elem_t *)value;
-	str val_s;
-	str prof_name_s;
 	struct dlg_profile_table *profile;
 
-	if (fixup_get_svalue(msg, (gparam_p)prof_name, &prof_name_s) != 0 ||
-		prof_name_s.len == 0 || prof_name_s.s == NULL) {
-		LM_WARN("cannot get profile name\n");
-		return -1;
-	}
-
-	profile = search_dlg_profile(&prof_name_s);
+	profile = search_dlg_profile(prof_name);
 	if (!profile) {
-		LM_ERR("profile <%.*s> not defined\n", prof_name_s.len, prof_name_s.s);
+		LM_ERR("profile <%.*s> not defined\n", prof_name->len, prof_name->s);
 		return -1;
 	}
 
@@ -1439,57 +1242,34 @@ static int w_is_in_profile(struct sip_msg *msg, char *prof_name, char *value)
 		return -1;
 	}
 
-	if (pve!=NULL && profile->has_value) {
-		if ( pv_printf_s(msg, pve, &val_s)!=0 ||
-		val_s.len == 0 || val_s.s == NULL) {
-			LM_WARN("cannot get string for value\n");
-			return -1;
-		}
-		return is_dlg_in_profile(dlg, profile, &val_s);
+	if (value && profile->has_value) {
+		return is_dlg_in_profile(dlg, profile, value);
 	} else {
 		return is_dlg_in_profile(dlg, profile, NULL);
 	}
 }
 
 
-static int w_get_profile_size(struct sip_msg *msg, char *prof_name,
-													char *value, char *result)
+static int w_get_profile_size(struct sip_msg *msg, str *prof_name,
+							str *value, pv_spec_t *result)
 {
-	pv_elem_t *pve;
-	str val_s;
-	pv_spec_t *sp_dest;
 	pv_value_t size;
-	str prof_name_s;
 	struct dlg_profile_table *profile;
 
-	if (fixup_get_svalue(msg, (gparam_p)prof_name, &prof_name_s) != 0 ||
-		prof_name_s.len == 0 || prof_name_s.s == NULL) {
-		LM_WARN("cannot get profile name\n");
-		return -1;
-	}
-
-	profile = search_dlg_profile(&prof_name_s);
+	profile = search_dlg_profile(prof_name);
 	if (!profile) {
-		LM_ERR("profile <%.*s> not defined\n", prof_name_s.len, prof_name_s.s);
+		LM_ERR("profile <%.*s> not defined\n", prof_name->len, prof_name->s);
 		return -1;
 	}
 
-	pve = (pv_elem_t *)value;
-	sp_dest = (pv_spec_t *)result;
-
-	if (pve!=NULL && profile->has_value) {
-		if ( pv_printf_s(msg, pve, &val_s)!=0 ||
-		val_s.len == 0 || val_s.s == NULL) {
-			LM_WARN("cannot get string for value\n");
-			return -1;
-		}
-		size.ri = get_profile_size(profile, &val_s);
+	if (value && profile->has_value) {
+		size.ri = get_profile_size(profile, value);
 	} else {
 		size.ri = get_profile_size(profile, NULL);
 	}
 
 	size.flags = PV_TYPE_INT|PV_VAL_INT;
-	if (pv_set_value(msg, sp_dest, 0, &size) != 0) {
+	if (pv_set_value(msg, result, 0, &size) != 0) {
 		LM_ERR("failed to set the output profile size!\n");
 		return -1;
 	}
@@ -1498,7 +1278,7 @@ static int w_get_profile_size(struct sip_msg *msg, char *prof_name,
 }
 
 
-static int w_set_dlg_flag(struct sip_msg *msg, char *mask)
+static int w_set_dlg_flag(struct sip_msg *msg, void *mask)
 {
 	struct dlg_cell *dlg;
 
@@ -1511,7 +1291,7 @@ static int w_set_dlg_flag(struct sip_msg *msg, char *mask)
 }
 
 
-static int w_reset_dlg_flag(struct sip_msg *msg, char *mask)
+static int w_reset_dlg_flag(struct sip_msg *msg, void *mask)
 {
 	struct dlg_cell *dlg;
 
@@ -1523,7 +1303,7 @@ static int w_reset_dlg_flag(struct sip_msg *msg, char *mask)
 }
 
 
-static int w_is_dlg_flag_set(struct sip_msg *msg, char *mask)
+static int w_is_dlg_flag_set(struct sip_msg *msg, void *mask)
 {
 	struct dlg_cell *dlg;
 
@@ -1533,57 +1313,44 @@ static int w_is_dlg_flag_set(struct sip_msg *msg, char *mask)
 	return (dlg->user_flags&((unsigned int)(unsigned long)mask))?1:-1;
 }
 
-static int w_tsl_dlg_flag(struct sip_msg *msg, char *_idx, char *_val)
+static int w_tsl_dlg_flag(struct sip_msg *msg, int *_idx, int *_val)
 {
 	struct dlg_cell *dlg;
 
 	if ( (dlg=get_current_dialog())==NULL )
 		return -2;
 
-	return test_and_set_dlg_flag(dlg, (unsigned long)*(unsigned int *)_idx,
-			(unsigned long)*(unsigned int *) _val);
+	return test_and_set_dlg_flag(dlg, *_idx, *_val);
 }
 
 
-int w_store_dlg_value(struct sip_msg *msg, char *name, char *val)
+static int w_store_dlg_value(struct sip_msg *msg, str *name, str *val)
 {
 	struct dlg_cell *dlg;
-	pv_elem_t *pve = (pv_elem_t *)val;
-	str val_s;
 
 	if ( (dlg=get_current_dialog())==NULL )
 		return -1;
 
-	if ( pve==NULL || pv_printf_s(msg, pve, &val_s)!=0 ||
-	val_s.len == 0 || val_s.s == NULL) {
-		LM_WARN("cannot get string for value\n");
-		return -1;
-	}
-
-	return (store_dlg_value( dlg, (str*)name, &val_s)==0)?1:-1;
+	return (store_dlg_value( dlg, name, val)==0)?1:-1;
 }
 
 
-int w_fetch_dlg_value(struct sip_msg *msg, char *name, char *result)
+int w_fetch_dlg_value(struct sip_msg *msg, str *name, pv_spec_t *result)
 {
 	struct dlg_cell *dlg;
-
-	pv_spec_t *sp_dest;
 	pv_value_t value;
 
-	sp_dest = (pv_spec_t *)result;
-
 	if ( (dlg=get_current_dialog())==NULL )
 		return -1;
 
-	if (fetch_dlg_value( dlg, (str*)name, &value.rs, 0) ) {
+	if (fetch_dlg_value( dlg, name, &value.rs, 0) ) {
 		LM_DBG("failed to fetch dialog value <%.*s>\n",
 			((str*)name)->len, ((str*)name)->s);
 		return -1;
 	}
 
 	value.flags = PV_VAL_STR;
-	if (pv_set_value(msg, sp_dest, 0, &value) != 0) {
+	if (pv_set_value(msg, result, 0, &value) != 0) {
 		LM_ERR("failed to set the fetched dlg value!\n");
 		return -1;
 	}
@@ -1592,25 +1359,15 @@ int w_fetch_dlg_value(struct sip_msg *msg, char *name, char *result)
 }
 
 
-static int w_get_dlg_info(struct sip_msg *msg, char *attr, char *attr_val,
-			char *key, char *key_val,char *number_val)
+static int w_get_dlg_info(struct sip_msg *msg, str *attr, pv_spec_t *attr_val,
+			str *key, str *key_val, pv_spec_t *number_val)
 {
 	struct dlg_cell *dlg;
 	struct dlg_entry *d_entry;
-	pv_elem_t *pve = (pv_elem_t *)key_val;
-	pv_spec_t *dst = (pv_spec_t *)attr_val;
-	pv_spec_t *no_dlgs = (pv_spec_t *)number_val;
 	pv_value_t val;
-	str val_s;
 	int n;
 	unsigned int h;
 	unsigned short aux;
-
-	if ( pve==NULL || pv_printf_s(msg, pve, &val_s)!=0 ||
-	val_s.len == 0 || val_s.s == NULL) {
-		LM_WARN("cannot get string for value\n");
-		return -1;
-	}
 
 	/* go through all hash entries (entire table) */
 
@@ -1627,22 +1384,22 @@ static int w_get_dlg_info(struct sip_msg *msg, char *attr, char *attr_val,
 			if ( dlg->state>DLG_STATE_CONFIRMED )
 				continue;
 
-			if (check_dlg_value_unsafe( dlg, (str*)key, &val_s)==0) {
+			if (check_dlg_value_unsafe( dlg, key, key_val)==0) {
 				LM_DBG("dialog found, fetching variable\n");
 
 				/* XXX - in lack of an unsafe version of fetch_dlg_value */ 
 				aux = dlg->locked_by;
 				dlg->locked_by = process_no;
 				
-				if (fetch_dlg_value( dlg, (str*)attr, &val.rs, 0) ) {
+				if (fetch_dlg_value( dlg, attr, &val.rs, 0) ) {
 					dlg->locked_by = aux;
 					dlg_unlock( d_table, d_entry);
 					LM_ERR("failed to fetch dialog value <%.*s>\n",
-						((str*)attr)->len, ((str*)attr)->s);
+						(attr)->len, (attr)->s);
 					return -1;
 				} else {
 					val.flags = PV_VAL_STR;
-					if (dst->setf( msg, &dst->pvp, 0, &val )!=0) {
+					if (attr_val->setf( msg, &attr_val->pvp, 0, &val )!=0) {
 						LM_ERR("Failed to set out pvar \n");
 						dlg->locked_by = aux;
 						dlg_unlock( d_table, d_entry);
@@ -1659,7 +1416,7 @@ static int w_get_dlg_info(struct sip_msg *msg, char *attr, char *attr_val,
 	}
 
 	if (n==0) {
-		LM_ERR("No matched dialogs \n");
+		LM_DBG("No matched dialogs\n");
 		return -1;
 	}
 
@@ -1668,7 +1425,7 @@ static int w_get_dlg_info(struct sip_msg *msg, char *attr, char *attr_val,
 	val.rs.len=0;
 	val.rs.s=NULL;
 
-	if (no_dlgs->setf( msg, &no_dlgs->pvp, 0, &val )!=0) {
+	if (number_val->setf( msg, &number_val->pvp, 0, &val )!=0) {
 		LM_ERR("Failed to set dlg_no pvar to %d \n",n);
 		return -1;
 	}
@@ -1676,21 +1433,14 @@ static int w_get_dlg_info(struct sip_msg *msg, char *attr, char *attr_val,
 	return n;
 }
 
-static int w_get_dlg_vals(struct sip_msg *msg, char *v_name, char  *v_val,
-																char *callid)
+static int w_get_dlg_vals(struct sip_msg *msg, pv_spec_t *v_name,
+						pv_spec_t *v_val, str *callid)
 {
 	struct dlg_cell *dlg;
 	struct dlg_val *dv;
 	pv_value_t val;
-	str callid_s;
 
-	if (fixup_get_svalue(msg, (gparam_p)callid, &callid_s)!=0 ||
-	callid_s.len == 0 || callid_s.s == NULL) {
-		LM_WARN("cannot get string for dialog callid\n");
-		return -1;
-	}
-
-	dlg = get_dlg_by_callid( &callid_s, 1 );
+	dlg = get_dlg_by_callid(callid, 1);
 
 	if (dlg==NULL) {
 		/* nothing found */
@@ -1707,13 +1457,13 @@ static int w_get_dlg_vals(struct sip_msg *msg, char *v_name, char  *v_val,
 		/* add name to AVP */
 		val.flags = PV_VAL_STR;
 		val.rs = dv->name;
-		if ( pv_set_value( msg, (pv_spec_p)v_name, 0, &val)<0 ) {
+		if ( pv_set_value( msg, v_name, 0, &val)<0 ) {
 			LM_ERR("failed to add new name in dlg val list, ignoring\n");
 		} else {
 			/* add value to AVP */
 			val.flags = PV_VAL_STR;
 			val.rs = dv->val;
-			if ( pv_set_value( msg, (pv_spec_p)v_val, 0, &val)<0 ) {
+			if ( pv_set_value( msg, v_val, 0, &val)<0 ) {
 				LM_ERR("failed to add new value in dlg val list, ignoring\n");
 				/* better exit here, as we will desync the lists */
 				unref_dlg(dlg, 1);
@@ -1728,9 +1478,8 @@ static int w_get_dlg_vals(struct sip_msg *msg, char *v_name, char  *v_val,
 	return 1;
 }
 
-static int w_set_dlg_shtag(struct sip_msg *msg, char *shtag)
+static int w_set_dlg_shtag(struct sip_msg *msg, str *shtag)
 {
-	str tag_name;
 	struct dlg_cell *dlg;
 
 	if (!dialog_repl_cluster) {
@@ -1738,17 +1487,12 @@ static int w_set_dlg_shtag(struct sip_msg *msg, char *shtag)
 		return 1;
 	}
 
-	if (fixup_get_svalue(msg, (gparam_p)shtag, &tag_name) < 0) {
-		LM_ERR("no sharing tag\n");
-		return -1;
-	}
-
 	if ((dlg = get_current_dialog()) == NULL) {
 		LM_ERR("Unable to fetch dialog\n");
 		return -1;
 	}
 
-	if (set_dlg_shtag(dlg, &tag_name) < 0) {
+	if (set_dlg_shtag(dlg, shtag) < 0) {
 		LM_ERR("Unable to set sharing tag\n");
 		return -1;
 	}
@@ -1875,20 +1619,26 @@ int pv_get_dlg_timeout(struct sip_msg *msg, pv_param_t *param,
 int pv_get_dlg_dir(struct sip_msg *msg, pv_param_t *param,
 		pv_value_t *res)
 {
-	struct dlg_cell *dlg;
+	int dir;
 
 	if(res==NULL)
 		return -1;
 
-	if ( (dlg=get_current_dialog())==NULL || ctx_lastdstleg_get()<0)
-		return pv_get_null( msg, param, res);
-
-	if (ctx_lastdstleg_get()==0) {
-		res->rs.s = "upstream";
-		res->rs.len = 8;
-	} else {
-		res->rs.s = "downstream";
-		res->rs.len = 10;
+	dir = get_dlg_direction();
+	switch (dir) {
+		case DLG_DIR_NONE:
+			return pv_get_null( msg, param, res);
+		case DLG_DIR_UPSTREAM:
+			res->rs.s = "upstream";
+			res->rs.len = 8;
+			break;
+		case DLG_DIR_DOWNSTREAM:
+			res->rs.s = "downstream";
+			res->rs.len = 10;
+			break;
+		default:
+			LM_BUG("unknwn dlg direction %d!\n", dir);
+			return -1;
 	}
 
 	res->flags = PV_VAL_STR;
@@ -1896,13 +1646,11 @@ int pv_get_dlg_dir(struct sip_msg *msg, pv_param_t *param,
 	return 0;
 }
 
-/* the maximum value we can have is 2 ints + ':' */
-static char buf_get_did[2 * INT2STR_MAX_LEN];
 int pv_get_dlg_did(struct sip_msg *msg, pv_param_t *param,
 		pv_value_t *res)
 {
 	struct dlg_cell *dlg;
-	str aux;
+	str *did;
 
 	if(res==NULL)
 		return -1;
@@ -1910,27 +1658,10 @@ int pv_get_dlg_did(struct sip_msg *msg, pv_param_t *param,
 	if ( (dlg=get_current_dialog())==NULL )
 		return pv_get_null( msg, param, res);
 
-	res->rs.s = buf_get_did;
-
-	aux.s = int2str( (unsigned long)dlg->h_entry, &aux.len);
-	if (!aux.s || !aux.len) {
-		LM_ERR("invalid hash entry\n");
-		return -1;
-	}
-
-	memcpy(buf_get_did, aux.s, aux.len);
-	buf_get_did[aux.len] = ':';
-	res->rs.len = aux.len + 1;
-
-	aux.s = int2str( (unsigned long)dlg->h_id, &aux.len);
-	if (!aux.s || !aux.len) {
-		LM_ERR("invalid hash id\n");
-		return -1;
-	}
-
-	memcpy(buf_get_did + res->rs.len, aux.s, aux.len);
-	res->rs.len += aux.len;
-
+	did = dlg_get_did(dlg);
+	if (!did)
+		return pv_get_null( msg, param, res);
+	res->rs = *did;
 	res->flags = PV_VAL_STR;
 
 	return 0;
@@ -2067,6 +1798,7 @@ int pv_set_dlg_timeout(struct sip_msg *msg, pv_param_t *param,
 static char *dlg_get_json_out(struct dlg_cell *dlg,int ctx,int *out_len)
 {
 	static char dlg_info[DLG_CTX_JSON_BUFF_SIZE];
+	struct dlg_profile_link *dl,*dl2;
 	struct dlg_val* dv;
 	char *p;
 	int i,j,k,len;
@@ -2107,7 +1839,7 @@ static char *dlg_get_json_out(struct dlg_cell *dlg,int ctx,int *out_len)
 		dlg->legs[DLG_CALLER_LEG].r_cseq.len,dlg->legs[DLG_CALLER_LEG].r_cseq.s,
 		dlg->legs[DLG_CALLER_LEG].route_set.len,dlg->legs[DLG_CALLER_LEG].route_set.s,
 		dlg->legs[DLG_CALLER_LEG].bind_addr->sock_str.len,dlg->legs[DLG_CALLER_LEG].bind_addr->sock_str.s,
-		dlg->legs[DLG_CALLER_LEG].adv_sdp.len,dlg->legs[DLG_CALLER_LEG].adv_sdp.s);
+		dlg->legs[DLG_CALLER_LEG].out_sdp.len,dlg->legs[DLG_CALLER_LEG].out_sdp.s);
 		
 		if (i<0) {
 			LM_ERR("Failed to print dlg json \n");		
@@ -2118,9 +1850,9 @@ static char *dlg_get_json_out(struct dlg_cell *dlg,int ctx,int *out_len)
 		p+=i;
 	}
 
-	memcpy(p,",\"callees\":[",11);
-	p+=11;
-	DEC_AND_CHECK_LEN(len,11);
+	memcpy(p,",\"callees\":[",12);
+	p+=12;
+	DEC_AND_CHECK_LEN(len,12);
 	
 	for( j=1 ; j < dlg->legs_no[DLG_LEGS_USED] ; j++  ) {
 		if (j != 1) {
@@ -2133,17 +1865,20 @@ static char *dlg_get_json_out(struct dlg_cell *dlg,int ctx,int *out_len)
 		dlg->legs[j].contact.len,dlg->legs[j].contact.s,
 		dlg->legs[j].r_cseq.len,dlg->legs[j].r_cseq.s,
 		dlg->legs[j].route_set.len,dlg->legs[j].route_set.s,
-		dlg->legs[j].bind_addr->sock_str.len,dlg->legs[j].bind_addr->sock_str.s,
-		dlg->legs[j].adv_sdp.len,dlg->legs[j].adv_sdp.s);
+		dlg->legs[j].bind_addr?dlg->legs[j].bind_addr->sock_str.len:0,
+		dlg->legs[j].bind_addr?dlg->legs[j].bind_addr->sock_str.s:NULL,
+		dlg->legs[j].out_sdp.len,dlg->legs[j].out_sdp.s);
 
 		if (i<0) {
-			LM_ERR("Failed to print dlg json \n");		
+			LM_ERR("Failed to print dlg json \n");
 			return NULL;
 		}
 		
 		p+=i;
 		DEC_AND_CHECK_LEN(len,i);
 	}
+	*p++=']';
+	DEC_AND_CHECK_LEN(len,1);
 
 	if (ctx && dlg->vals) {
 		memcpy(p,",\"values\":{",11);
@@ -2187,6 +1922,77 @@ next_val:
 		DEC_AND_CHECK_LEN(len,1);
 	}
 
+	if (ctx && dlg->profile_links) {
+		memcpy(p,",\"profiles\":{",13);
+		p+=13;
+		DEC_AND_CHECK_LEN(len,13);
+		for (dl=dlg->profile_links ; dl ; dl=dl->next)
+			dl->it_marker= 0;
+
+		for( dl=dlg->profile_links ; dl ; dl=dl->next) {
+			if (dl->it_marker != 0)
+				continue;
+
+			dl->it_marker=1;
+
+			if (dl!=dlg->profile_links) {
+				*p++ = ','; 
+				DEC_AND_CHECK_LEN(len,1);
+			}
+
+			*p++='\"';
+			DEC_AND_CHECK_LEN(len,1);
+			memcpy(p,dl->profile->name.s,dl->profile->name.len);
+			p+=dl->profile->name.len;
+			DEC_AND_CHECK_LEN(len,dl->profile->name.len);
+
+			*p++='\"';
+			DEC_AND_CHECK_LEN(len,1);
+			*p++=':';	
+			DEC_AND_CHECK_LEN(len,1);
+
+			*p++='[';
+			DEC_AND_CHECK_LEN(len,1);
+
+			*p++='\"';
+			DEC_AND_CHECK_LEN(len,1);
+			memcpy(p,ZSW(dl->value.s),dl->value.len);
+			p+=dl->value.len;
+			DEC_AND_CHECK_LEN(len,dl->value.len);
+			*p++='\"';
+			DEC_AND_CHECK_LEN(len,1);
+
+			for (dl2=dlg->profile_links; dl2; dl2=dl2->next) {
+				if (dl2->it_marker != 0)
+					continue;
+
+				if (dl->profile->name.len == dl2->profile->name.len &&
+				memcmp(dl->profile->name.s,dl2->profile->name.s,dl->profile->name.len) == 0) {
+					/* found another member of the same profile */
+
+					*p++=',';
+					DEC_AND_CHECK_LEN(len,1);
+					*p++='\"';
+					DEC_AND_CHECK_LEN(len,1);
+					
+					memcpy(p,ZSW(dl2->value.s),dl2->value.len);
+					p+=dl2->value.len;
+					DEC_AND_CHECK_LEN(len,dl2->value.len);
+					*p++='\"';
+					DEC_AND_CHECK_LEN(len,1);
+
+					dl2->it_marker=1;
+				}
+			}
+
+			*p++=']';
+			DEC_AND_CHECK_LEN(len,1);
+		}
+
+		*p++='}';
+		DEC_AND_CHECK_LEN(len,1);
+	}
+
 	*p++='}';
 	DEC_AND_CHECK_LEN(len,1);
 
@@ -2206,11 +2012,16 @@ int pv_get_dlg_json(struct sip_msg *msg, pv_param_t *param,
 
 	if ( (dlg=get_current_dialog())==NULL )
 		return pv_get_null( msg, param, res);
+	
+	dlg_lock_dlg(dlg);
 
 	if ((out = dlg_get_json_out(dlg,0,&len)) == NULL) {
 		LM_ERR("Failed to build pvar content \n");
+		dlg_unlock_dlg(dlg);
 		return pv_get_null( msg, param, res);
 	}
+
+	dlg_unlock_dlg(dlg);
 
 	res->rs.s=out;
 	res->rs.len=len;
@@ -2232,10 +2043,15 @@ int pv_get_dlg_ctx_json(struct sip_msg *msg, pv_param_t *param,
 	if ( (dlg=get_current_dialog())==NULL )
 		return pv_get_null( msg, param, res);
 
+	dlg_lock_dlg(dlg);
+
 	if ((out = dlg_get_json_out(dlg,1,&len)) == NULL) {
 		LM_ERR("Failed to build pvar content \n");
+		dlg_unlock_dlg(dlg);
 		return pv_get_null( msg, param, res);
 	}
+
+	dlg_unlock_dlg(dlg);
 
 	res->rs.s=out;
 	res->rs.len=len;
@@ -2244,26 +2060,16 @@ int pv_get_dlg_ctx_json(struct sip_msg *msg, pv_param_t *param,
 	return 0;
 }
 
-static int w_get_dlg_jsons_by_val(struct sip_msg *msg, char *attr, char *attr_val,
-			char *out, char *number_val)
+static int w_get_dlg_jsons_by_val(struct sip_msg *msg, str *attr, str *attr_val,
+			pv_spec_t *out, pv_spec_t *number_val)
 {
 	struct dlg_cell *dlg;
 	struct dlg_entry *d_entry;
-	pv_elem_t *pve = (pv_elem_t *)attr_val;
-	pv_spec_t *dst = (pv_spec_t *)out;
-	pv_spec_t *no_dlgs = (pv_spec_t *)number_val;
 	pv_value_t val;
-	str val_s;
 	int n;
 	unsigned int h;
 	char *out_json;
 	int out_len;
-
-	if ( pve==NULL || pv_printf_s(msg, pve, &val_s)!=0 ||
-	val_s.len == 0 || val_s.s == NULL) {
-		LM_WARN("cannot get string for value\n");
-		return -1;
-	}
 
 	/* go through all hash entries (entire table) */
 
@@ -2280,7 +2086,7 @@ static int w_get_dlg_jsons_by_val(struct sip_msg *msg, char *attr, char *attr_va
 			if ( dlg->state>DLG_STATE_CONFIRMED )
 				continue;
 
-			if (check_dlg_value_unsafe( dlg, (str*)attr, &val_s)==0) {
+			if (check_dlg_value_unsafe( dlg, attr, attr_val)==0) {
 				LM_DBG("dialog found, fetching variable\n");
 
 				if ((out_json = dlg_get_json_out(dlg,1,&out_len)) == NULL) {
@@ -2292,7 +2098,7 @@ static int w_get_dlg_jsons_by_val(struct sip_msg *msg, char *attr, char *attr_va
 					val.rs.len=out_len;
 					val.flags = PV_VAL_STR;
 
-					if (dst->setf( msg, &dst->pvp, 0, &val )!=0) {
+					if (out->setf( msg, &out->pvp, 0, &val )!=0) {
 						LM_ERR("Failed to set out pvar \n");
 						dlg_unlock( d_table, d_entry);
 						return -1;
@@ -2306,7 +2112,7 @@ static int w_get_dlg_jsons_by_val(struct sip_msg *msg, char *attr, char *attr_va
 	}
 
 	if (n==0) {
-		LM_ERR("No matched dialogs \n");
+		LM_DBG("No matched dialogs\n");
 		return -1;
 	}
 
@@ -2315,7 +2121,7 @@ static int w_get_dlg_jsons_by_val(struct sip_msg *msg, char *attr, char *attr_va
 	val.rs.len=0;
 	val.rs.s=NULL;
 
-	if (no_dlgs->setf( msg, &no_dlgs->pvp, 0, &val )!=0) {
+	if (number_val->setf( msg, &number_val->pvp, 0, &val )!=0) {
 		LM_ERR("Failed to set dlg_no pvar to %d \n",n);
 		return -1;
 	}
@@ -2323,34 +2129,22 @@ static int w_get_dlg_jsons_by_val(struct sip_msg *msg, char *attr, char *attr_va
 	return n;
 }
 
-static int w_get_dlg_jsons_by_profile(struct sip_msg *msg, char *attr, char *attr_val,
-			char *out, char *number_val)
+static int w_get_dlg_jsons_by_profile(struct sip_msg *msg, str *attr, str *attr_val,
+				pv_spec_t *out, pv_spec_t *number_val)
 {
 	struct dlg_cell *dlg;
 	struct dlg_entry *d_entry;
-	pv_elem_t *pve = (pv_elem_t *)attr_val;
-	pv_spec_t *dst = (pv_spec_t *)out;
-	pv_spec_t *no_dlgs = (pv_spec_t *)number_val;
 	pv_value_t val;
-	str val_s;
 	int n,out_len,found;
 	unsigned int h;
 	char *out_json;
 	struct dlg_profile_table *profile;
 	struct dlg_profile_link *cur_link;
 
-	if ( pve==NULL || pv_printf_s(msg, pve, &val_s)!=0 ||
-	val_s.len == 0 || val_s.s == NULL) {
-		LM_DBG("cannot get string for value\n");
-
-		/* no value enforcing */
-		val_s.s = NULL;
-	}
-
 	/* search for the profile */
-	profile = search_dlg_profile((str*)attr);
+	profile = search_dlg_profile(attr);
 	if (profile==NULL) {
-		LM_ERR("NO such profile <%.*s> \n",((str*)attr)->len,((str*)attr)->s);
+		LM_ERR("NO such profile <%.*s> \n",attr->len,attr->s);
 		return -1;
 	}
 	
@@ -2375,9 +2169,9 @@ static int w_get_dlg_jsons_by_profile(struct sip_msg *msg, char *attr, char *att
 
 			while(cur_link) {
 				if (cur_link->profile == profile &&
-				( val_s.s == NULL ||
-				( val_s.len == cur_link->value.len && 
-				!strncmp(val_s.s,cur_link->value.s, val_s.len)))) {
+				( !attr_val || !profile->has_value ||
+				( attr_val->len == cur_link->value.len && 
+				!strncmp(attr_val->s,cur_link->value.s, attr_val->len)))) {
 					found = 1;
 					break;
 				}
@@ -2394,7 +2188,7 @@ static int w_get_dlg_jsons_by_profile(struct sip_msg *msg, char *attr, char *att
 					val.rs.len=out_len;
 					val.flags = PV_VAL_STR;
 
-					if (dst->setf( msg, &dst->pvp, 0, &val )!=0) {
+					if (out->setf( msg, &out->pvp, 0, &val )!=0) {
 						LM_ERR("Failed to set out pvar \n");
 						dlg_unlock( d_table, d_entry);
 						return -1;
@@ -2408,7 +2202,7 @@ static int w_get_dlg_jsons_by_profile(struct sip_msg *msg, char *attr, char *att
 	}
 
 	if (n==0) {
-		LM_ERR("No matched dialogs \n");
+		LM_DBG("No matched dialogs\n");
 		return -1;
 	}
 
@@ -2417,7 +2211,7 @@ static int w_get_dlg_jsons_by_profile(struct sip_msg *msg, char *attr, char *att
 	val.rs.len=0;
 	val.rs.s=NULL;
 
-	if (no_dlgs->setf( msg, &no_dlgs->pvp, 0, &val )!=0) {
+	if (number_val->setf( msg, &number_val->pvp, 0, &val )!=0) {
 		LM_ERR("Failed to set dlg_no pvar to %d \n",n);
 		return -1;
 	}
@@ -2426,26 +2220,75 @@ static int w_get_dlg_jsons_by_profile(struct sip_msg *msg, char *attr, char *att
 }
 
 
+#define DLG_CTX_LOAD_BY_CALLID  0
+#define DLG_CTX_LOAD_BY_DID     1
+
 static struct dlg_cell *load_ctx_backup = NULL;
 static int dlg_ctx_loaded = 0;
 
-static int load_dlg_ctx(struct sip_msg *msg, char *callid)
+static int fixup_lmode(void **param)
 {
-	struct dlg_cell *dlg;
-	str callid_s;
+	str *s = (str*)*param;
+
+	if (s->len==6 && strncasecmp( s->s, "callid", 6)==0) {
+		*param = (void*)(unsigned long)DLG_CTX_LOAD_BY_CALLID;
+	} else
+	if (s->len==3 && strncasecmp( s->s, "did", 3)==0) {
+		*param = (void*)(unsigned long)DLG_CTX_LOAD_BY_DID;
+	} else {
+		LM_ERR("unsupported dialog indetifier <%.*s>\n",
+			s->len, s->s);
+		return -1;
+	}
+
+	return 0;
+}
+
+static int fixup_leg(void **param)
+{
+	str *s = (str*)*param;
+	if (s->len == 6) {
+		if (strncasecmp(s->s, "caller", 6) == 0) {
+			*param = (void*)(unsigned long)DLG_CALLER_LEG;
+			return 0;
+		} else if (strncasecmp(s->s, "callee", 6) == 0) {
+			*param = (void*)(unsigned long)DLG_FIRST_CALLEE_LEG;
+			return 0;
+		}
+	}
+
+	LM_ERR("unsupported dialog indetifier <%.*s>\n",
+		s->len, s->s);
+	return -1;
+}
+
+
+static int load_dlg_ctx(struct sip_msg *msg, str *callid, void *lmode)
+{
+	struct dlg_cell *dlg = NULL;
+	int mode;
+
+	if (lmode)
+		mode = (int)(long)lmode;
+	else
+		mode = DLG_CTX_LOAD_BY_CALLID;
 
 	if (dlg_ctx_loaded) {
 		LM_ERR("nested call of load dlg ctx\n");
 		return -1;
 	}
 
-	if (fixup_get_svalue(msg, (gparam_p)callid, &callid_s)!=0 ||
-	callid_s.len == 0 || callid_s.s == NULL) {
-		LM_WARN("cannot get string for dialog callid\n");
-		return -1;
-	}
+	switch (mode) {
+		case DLG_CTX_LOAD_BY_CALLID:
+			/* callid */
+			dlg = get_dlg_by_callid( callid, 0 );
+			break;
 
-	dlg = get_dlg_by_callid( &callid_s, 0 );
+		case DLG_CTX_LOAD_BY_DID:
+			/* did */
+			dlg = get_dlg_by_did( callid, 0);
+			break;
+	}
 
 	if (dlg==NULL) {
 		/* nothing found */
@@ -2481,3 +2324,106 @@ static int unload_dlg_ctx(struct sip_msg *msg)
 	return 1;
 }
 
+
+static int dlg_on_timeout(struct sip_msg* msg, void *route_id)
+{
+	struct dlg_cell *dlg;
+
+	if ( (dlg=get_current_dialog())==NULL ) {
+		LM_WARN("no current dialog found. Have you created one?\n");
+		return -1;
+	}
+
+	dlg_lock_dlg(dlg);
+
+	if (dlg->state > DLG_STATE_EARLY) {
+		LM_WARN("too late to set the route, dialog already established\n");
+		dlg_unlock_dlg(dlg);
+		return -1;
+	}
+
+	/* if the parameter was missing, we get a NULL route_id, which
+	 * translate into a 0 rt_on_timeout, which translates into a reset */
+
+	dlg->rt_on_timeout = (unsigned int)(unsigned long)route_id;
+
+	dlg_unlock_dlg(dlg);
+	return 1;
+}
+
+
+static int dlg_on_answer(struct sip_msg* msg, void *route_id)
+{
+	struct dlg_cell *dlg;
+
+	if ( (dlg=get_current_dialog())==NULL ) {
+		LM_WARN("no current dialog found. Have you created one?\n");
+		return -1;
+	}
+
+	dlg_lock_dlg(dlg);
+
+	if (dlg->state > DLG_STATE_EARLY) {
+		LM_WARN("too late to set the route, dialog already established\n");
+		dlg_unlock_dlg(dlg);
+		return -1;
+	}
+
+	/* if the parameter was missing, we get a NULL route_id, which
+	 * translate into a 0 rt_on_timeout, which translates into a reset */
+
+	dlg->rt_on_answer = (unsigned int)(unsigned long)route_id;
+
+	dlg_unlock_dlg(dlg);
+	return 1;
+}
+
+
+static int dlg_on_hangup(struct sip_msg* msg, void *route_id)
+{
+	struct dlg_cell *dlg;
+
+	if ( (dlg=get_current_dialog())==NULL ) {
+		LM_WARN("no current dialog found. Have you created one?\n");
+		return -1;
+	}
+
+	dlg_lock_dlg(dlg);
+
+	if (dlg->state > DLG_STATE_EARLY) {
+		LM_WARN("too late to set the route, dialog already established\n");
+		dlg_unlock_dlg(dlg);
+		return -1;
+	}
+
+	/* if the parameter was missing, we get a NULL route_id, which
+	 * translate into a 0 rt_on_timeout, which translates into a reset */
+
+	dlg->rt_on_hangup = (unsigned int)(unsigned long)route_id;
+
+	dlg_unlock_dlg(dlg);
+	return 1;
+}
+
+
+static int dlg_send_sequential(struct sip_msg* msg, str *method, int leg,
+		str *body, str *ct, str *headers)
+{
+	struct dlg_cell *dlg = get_current_dialog();
+	str invite = str_init("INVITE");
+
+	if (!dlg) {
+		LM_WARN("no current dialog found. Make sure you call this "
+				"function inside a dialog  context\n");
+		return -1;
+	}
+	if (!method)
+		method = &invite;
+
+	if (body && !ct)
+		LM_WARN("body without content type! This request might be rejected by uac!\n");
+
+	return send_indialog_request(dlg, method, (leg == DLG_CALLER_LEG?leg:callee_idx(dlg)),
+			body, ct, headers, NULL, NULL) == 0?1:-1;
+
+}

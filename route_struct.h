@@ -57,39 +57,17 @@ enum { EQUAL_OP=20, MATCH_OP, NOTMATCH_OP, MATCHD_OP, NOTMATCHD_OP,
 	GT_OP, LT_OP, GTE_OP, LTE_OP, DIFF_OP, VALUE_OP, NO_OP };
 enum { DEFAULT_O=1, ACTION_O, EXPR_O, NUMBER_O, NUMBERV_O, STRINGV_O, SCRIPTVAR_O};
 
-enum { FORWARD_T=1, SEND_T, ASSERT_T, DROP_T, LOG_T, ERROR_T, ROUTE_T, EXEC_T,
-		SET_HOST_T, SET_HOSTPORT_T, SET_USER_T, SET_USERPASS_T,
-		SET_PORT_T, SET_URI_T, IF_T, MODULE_T, AMODULE_T,
-		SETFLAG_T, RESETFLAG_T, ISFLAGSET_T ,
-		SETBFLAG_T, RESETBFLAG_T, ISBFLAGSET_T ,
-		LEN_GT_T, PREFIX_T, STRIP_T,STRIP_TAIL_T,
-		APPEND_BRANCH_T,
-		REMOVE_BRANCH_T,
-		REVERT_URI_T,
-		FORCE_RPORT_T,
-		FORCE_LOCAL_RPORT_T,
-		SET_ADV_ADDR_T,
-		SET_ADV_PORT_T,
-		FORCE_TCP_ALIAS_T,
-		FORCE_SEND_SOCKET_T,
-		SERIALIZE_BRANCHES_T,
-		NEXT_BRANCHES_T,
+enum {  ASSERT_T, DROP_T, LOG_T, ERROR_T, ROUTE_T, EXEC_T,
+		IF_T, CMD_T, AMODULE_T,
+		LEN_GT_T,
 		RETURN_T,
 		EXIT_T,
-		SWITCH_T, CASE_T, DEFAULT_T, SBREAK_T,
+		SWITCH_T, CASE_T, DEFAULT_T, BREAK_T,
 		WHILE_T, FOR_EACH_T,
-		SET_DSTURI_T, SET_DSTHOST_T, SET_DSTPORT_T, RESET_DSTURI_T, ISDSTURISET_T,
 		EQ_T, COLONEQ_T, PLUSEQ_T, MINUSEQ_T, DIVEQ_T, MULTEQ_T, MODULOEQ_T,
-		BANDEQ_T, BOREQ_T, BXOREQ_T, USE_BLACKLIST_T, UNUSE_BLACKLIST_T,
-		SET_TIME_STAMP_T,RESET_TIME_STAMP_T, DIFF_TIME_STAMP_T,
-		PV_PRINTF_T,
-		CACHE_STORE_T, CACHE_FETCH_T, CACHE_COUNTER_FETCH_T, CACHE_REMOVE_T,
-		CACHE_ADD_T,CACHE_SUB_T,CACHE_RAW_QUERY_T,
+		BANDEQ_T, BOREQ_T, BXOREQ_T,
 		XDBG_T, XLOG_T,
-		RAISE_EVENT_T, SUBSCRIBE_EVENT_T,
-		CONSTRUCT_URI_T,
-		GET_TIMESTAMP_T, SCRIPT_TRACE_T, ASYNC_T, LAUNCH_T,
-		IS_MYSELF_T
+		ASYNC_T, LAUNCH_T,
 };
 enum { NOSUBTYPE=0, STRING_ST, NET_ST, NUMBER_ST, IP_ST, RE_ST, PROXY_ST,
 		EXPR_ST, ACTIONS_ST, CMD_ST, ACMD_ST, MODFIXUP_ST,
@@ -130,10 +108,8 @@ typedef struct action_elem_ {
 } action_elem_t, *action_elem_p;
 
 /*! \brief increase MAX_ACTION_ELEMS to support more module function parameters
-   if you change this define, you need also to change the assignment in
-   the action.c file
  */
-#define MAX_ACTION_ELEMS	7
+#define MAX_ACTION_ELEMS	9
 struct action{
 	int type;  /* forward, drop, log, send ...*/
 	action_elem_t elem[MAX_ACTION_ELEMS];
@@ -142,13 +118,24 @@ struct action{
 	struct action* next;
 };
 
-
+#define assignop_str(op) ( \
+	(op) == EQ_T ?       "=" : \
+	(op) == COLONEQ_T ?  ":=" : \
+	(op) == PLUSEQ_T ?   "+=" : \
+	(op) == MINUSEQ_T ?  "-=" : \
+	(op) == DIVEQ_T ?    "/=" : \
+	(op) == MULTEQ_T ?   "*=" : \
+	(op) == MODULOEQ_T ? "%=" : \
+	(op) == BANDEQ_T ?   "&=" : \
+	(op) == BOREQ_T ?    "|=" : \
+	(op) == BXOREQ_T ?   "^=" : "unknown")
 
 struct expr* mk_exp(int op, struct expr* left, struct expr* right);
 struct expr* mk_elem(int op, int leftt, void *leftd, int rightt, void *rightd);
 struct action* mk_action(int type, int n, action_elem_t *elem,
 		int line, char *file);
 struct action* append_action(struct action* a, struct action* b);
+void free_action_list( struct action *a);
 
 
 void print_action(struct action* a);
@@ -157,8 +144,4 @@ void print_actions(struct action* a);
 int is_mod_func_used(struct action *a, char *name, int param_no);
 int is_mod_async_func_used(struct action *a, char *name, int param_no);
 
-
-
-
 #endif
-

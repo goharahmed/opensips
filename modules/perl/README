@@ -333,6 +333,10 @@ modparam("perl", "modpath", "/usr/local/lib/opensips/perl/")
    The first parameter is the function to be called. An arbitrary
    string may optionally be passed as a parameter.
 
+   The function returns 1 if the perl function was successfully
+   called or -1 if an internal error occured. Note that it does
+   not propagate the return value of the perl function.
+
    This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
    ONREPLY_ROUTE and BRANCH_ROUTE.
 
@@ -352,6 +356,10 @@ if ($rm=="INVITE") {
 
    The first parameter is the function to be called. An arbitrary
    string may be passed as a parameter.
+
+   The function returns back to the OpenSIPS script the value
+   returned by the perl function. Note that if this value is 0 the
+   script execution will be stoped, similarly to calling exit.
 
    This function can be used from REQUEST_ROUTE, FAILURE_ROUTE,
    ONREPLY_ROUTE and BRANCH_ROUTE.
@@ -555,7 +563,6 @@ $m->xlog("L_INFO", "foo");
 * load_rr
 * sip_trace
 * sl_reply_error
-* sms_send_msg
 * sd_lookup
 * sstCheckMin
 * append_time
@@ -1016,7 +1023,7 @@ reworks,ou=de");
 
 2.12. OpenSIPS::VDB::Adapter::AccountingSIPtrace
 
-   This package is an Adapter for the acc and siptrace modules,
+   This package is an Adapter for the acc and tracer modules,
    featuring only an insert operation.
 
 2.13. OpenSIPS::VDB::Adapter::Describe
@@ -1314,53 +1321,53 @@ Chapter 4. Frequently Asked Questions
 
    4.1.
 
-       Are there known bugs in the Perl module?
+   Are there known bugs in the Perl module?
 
-       The Perl module does have a few shortcomings that may be
-       regarded as bugs.
-         * Missing module functions. Not all functions of other
-           modules are available for Perl access. The reason for this
-           is a design property of OpenSIPS. Making available more
-           functions is work in progress.
-         * Perl and threads. Perl itself is, when compiled with the
-           correct parameters, thread safe; unfortunately, not all
-           Perl modules are. The DBI modules, especially (but not
-           restricted to) DBI::ODBC are known NOT to be thread safe.
-           Using DBI::ODBC -- and possibly other non-thread-safe Perl
-           extensions -- may result in erroneous behavior of OpenSIPS,
-           including (but not restricted to) server crashes and wrong
-           routing.
+   The Perl module does have a few shortcomings that may be
+   regarded as bugs.
+     * Missing module functions. Not all functions of other
+       modules are available for Perl access. The reason for this
+       is a design property of OpenSIPS. Making available more
+       functions is work in progress.
+     * Perl and threads. Perl itself is, when compiled with the
+       correct parameters, thread safe; unfortunately, not all
+       Perl modules are. The DBI modules, especially (but not
+       restricted to) DBI::ODBC are known NOT to be thread safe.
+       Using DBI::ODBC -- and possibly other non-thread-safe Perl
+       extensions -- may result in erroneous behavior of OpenSIPS,
+       including (but not restricted to) server crashes and wrong
+       routing.
 
    4.2.
 
-       Where can I find more about OpenSIPS?
+   Where can I find more about OpenSIPS?
 
-       Take a look at http://www.opensips.org/.
+   Take a look at https://opensips.org/.
 
    4.3.
 
-       Where can I post a question about this module?
+   Where can I post a question about this module?
 
-       First at all check if your question was already answered on one
-       of our mailing lists:
-         * User Mailing List -
-           http://lists.opensips.org/cgi-bin/mailman/listinfo/users
-         * Developer Mailing List -
-           http://lists.opensips.org/cgi-bin/mailman/listinfo/devel
+   First at all check if your question was already answered on one
+   of our mailing lists:
+     * User Mailing List -
+       http://lists.opensips.org/cgi-bin/mailman/listinfo/users
+     * Developer Mailing List -
+       http://lists.opensips.org/cgi-bin/mailman/listinfo/devel
 
-       E-mails regarding any stable OpenSIPS release should be sent to
-       <users@lists.opensips.org> and e-mails regarding development
-       versions should be sent to <devel@lists.opensips.org>.
+   E-mails regarding any stable OpenSIPS release should be sent to
+   <users@lists.opensips.org> and e-mails regarding development
+   versions should be sent to <devel@lists.opensips.org>.
 
-       If you want to keep the mail private, send it to
-       <users@lists.opensips.org>.
+   If you want to keep the mail private, send it to
+   <users@lists.opensips.org>.
 
    4.4.
 
-       How can I report a bug?
+   How can I report a bug?
 
-       Please follow the guidelines provided at:
-       https://github.com/OpenSIPS/opensips/issues.
+   Please follow the guidelines provided at:
+   https://github.com/OpenSIPS/opensips/issues.
 
 Chapter 5. Contributors
 
@@ -1369,20 +1376,21 @@ Chapter 5. Contributors
    Table 5.1. Top contributors by DevScore^(1), authored
    commits^(2) and lines added/removed^(3)
      Name DevScore Commits Lines ++ Lines --
-   1. Bastian Friedrich 112 38 8597 284
-   2. Bogdan-Andrei Iancu (@bogdan-iancu) 46 27 700 680
-   3. Daniel-Constantin Mierla (@miconda) 19 14 164 125
-   4. Razvan Crainea (@razvancrainea) 17 14 89 56
-   5. Liviu Chircu (@liviuchircu) 16 13 54 67
-   6. Vlad Patrascu (@rvlad-patrascu) 5 3 14 9
+   1. Bastian Friedrich 113 38 8597 284
+   2. Bogdan-Andrei Iancu (@bogdan-iancu) 47 29 702 682
+   3. Razvan Crainea (@razvancrainea) 23 21 99 60
+   4. Vlad Patrascu (@rvlad-patrascu) 20 10 264 408
+   5. Daniel-Constantin Mierla (@miconda) 19 14 164 125
+   6. Liviu Chircu (@liviuchircu) 16 13 54 67
    7. Julien Blache 4 1 80 64
    8. Edson Gellert Schubert 4 1 0 141
    9. Ionut Ionita (@ionutrazvanionita) 3 1 100 7
    10. Ancuta Onofrei 3 1 27 40
 
    All remaining contributors: Konstantin Bokarius, Boris Ratner,
-   Julián Moreno Patiño, Klaus Darilion, Peter Lemenkov
-   (@lemenkov), Ovidiu Sas (@ovidiusas), Dan Pascu (@danpascu).
+   Julián Moreno Patiño, Klaus Darilion, Fabian Gast (@fgast),
+   Peter Lemenkov (@lemenkov), Ovidiu Sas (@ovidiusas), Dan Pascu
+   (@danpascu).
 
    (1) DevScore = author_commits + author_lines_added /
    (project_lines_added / project_commits) + author_lines_deleted
@@ -1404,20 +1412,21 @@ Chapter 5. Contributors
 
    Table 5.2. Most recently active contributors^(1) to this module
                       Name                   Commit Activity
-   1.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - Jan 2019
-   2.  Liviu Chircu (@liviuchircu)         Mar 2014 - Nov 2018
-   3.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
-   4.  Razvan Crainea (@razvancrainea)     Jun 2011 - Jan 2018
-   5.  Julián Moreno Patiño                Feb 2016 - Feb 2016
-   6.  Ionut Ionita (@ionutrazvanionita)   Oct 2015 - Oct 2015
-   7.  Bogdan-Andrei Iancu (@bogdan-iancu) Dec 2006 - Nov 2014
-   8.  Boris Ratner                        Jan 2013 - Jan 2013
-   9.  Ovidiu Sas (@ovidiusas)             Oct 2010 - Oct 2010
-   10. Dan Pascu (@danpascu)               Aug 2008 - Aug 2008
+   1.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - Jan 2020
+   2.  Fabian Gast (@fgast)                Jan 2020 - Jan 2020
+   3.  Razvan Crainea (@razvancrainea)     Jun 2011 - Sep 2019
+   4.  Bogdan-Andrei Iancu (@bogdan-iancu) Dec 2006 - Jun 2019
+   5.  Liviu Chircu (@liviuchircu)         Mar 2014 - Nov 2018
+   6.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
+   7.  Julián Moreno Patiño                Feb 2016 - Feb 2016
+   8.  Ionut Ionita (@ionutrazvanionita)   Oct 2015 - Oct 2015
+   9.  Boris Ratner                        Jan 2013 - Jan 2013
+   10. Ovidiu Sas (@ovidiusas)             Oct 2010 - Oct 2010
 
-   All remaining contributors: Klaus Darilion, Daniel-Constantin
-   Mierla (@miconda), Konstantin Bokarius, Edson Gellert Schubert,
-   Bastian Friedrich, Ancuta Onofrei, Julien Blache.
+   All remaining contributors: Dan Pascu (@danpascu), Klaus
+   Darilion, Daniel-Constantin Mierla (@miconda), Konstantin
+   Bokarius, Edson Gellert Schubert, Bastian Friedrich, Ancuta
+   Onofrei, Julien Blache.
 
    (1) including any documentation-related commits, excluding
    merge commits
@@ -1426,11 +1435,12 @@ Chapter 6. Documentation
 
 6.1. Contributors
 
-   Last edited by: Peter Lemenkov (@lemenkov), Liviu Chircu
-   (@liviuchircu), Vlad Patrascu (@rvlad-patrascu), Bogdan-Andrei
-   Iancu (@bogdan-iancu), Ovidiu Sas (@ovidiusas), Klaus Darilion,
-   Daniel-Constantin Mierla (@miconda), Konstantin Bokarius, Edson
-   Gellert Schubert, Bastian Friedrich.
+   Last edited by: Vlad Patrascu (@rvlad-patrascu), Bogdan-Andrei
+   Iancu (@bogdan-iancu), Razvan Crainea (@razvancrainea), Peter
+   Lemenkov (@lemenkov), Liviu Chircu (@liviuchircu), Ovidiu Sas
+   (@ovidiusas), Klaus Darilion, Daniel-Constantin Mierla
+   (@miconda), Konstantin Bokarius, Edson Gellert Schubert,
+   Bastian Friedrich.
 
    Documentation Copyrights:
 

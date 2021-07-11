@@ -7,8 +7,15 @@
 		<column><field>priority</field><type>DB_INT</type></column>
 		<column><field>skill</field><type>DB_STR</type></column>
 		<column><field>prependcid</field><type>DB_STR</type></column>
+		<column><field>max_wrapup_time</field><type>DB_INT</type></column>
+		<column><field>dissuading_hangup</field><type>DB_INT</type></column>
+		<column><field>dissuading_onhold_th</field><type>DB_INT</type></column>
+		<column><field>dissuading_ewt_th</field><type>DB_INT</type></column>
+		<column><field>dissuading_qsize_th</field><type>DB_INT</type></column>
 		<column><field>message_welcome</field><type>DB_STR</type></column>
 		<column><field>message_queue</field><type>DB_STR</type></column>
+		<column><field>message_dissuading</field><type>DB_STR</type></column>
+		<column><field>message_flow_id</field><type>DB_STR</type></column>
 	</db_table>
 	<!-- Declaration of cc_agents table-->
 	<db_table id="cc_agents">
@@ -19,7 +26,8 @@
 		<column><field>location</field><type>DB_STR</type></column>
 		<column><field>logstate</field><type>DB_INT</type></column>
 		<column><field>skills</field><type>DB_STR</type></column>
-		<column><field>last_call_end</field><type>DB_INT</type></column>
+		<column><field>wrapup_end_time</field><type>DB_INT</type></column>
+		<column><field>wrapup_time</field><type>DB_INT</type></column>
 	</db_table>
 	<!-- Declaration of cc_cdrs table-->
 	<db_table id="cc_cdrs">
@@ -55,4 +63,5 @@
 		<column><field>b2buaid</field><type>DB_STR</type></column>
 		<column><field>flow</field><type>DB_STR</type></column>
 		<column><field>agent</field><type>DB_STR</type></column>
+		<column><field>script_param</field><type>DB_STR</type></column>
 	</db_table>

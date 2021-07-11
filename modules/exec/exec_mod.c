@@ -33,7 +33,6 @@
 #include "../../parser/msg_parser.h"
 #include "../../str.h"
 #include "../../dprint.h"
-#include "../../mod_fix.h"
 #include "../../parser/parse_uri.h"
 #include "../../ut.h"
 #include <sys/wait.h>
@@ -49,56 +48,40 @@ unsigned int time_to_kill=0;
 
 static int mod_init( void );
 
-inline static int w_exec_dset(struct sip_msg* msg, char* cmd, char* foo);
-inline static int w_exec_msg(struct sip_msg* msg, char* cmd, char* foo);
-inline static int w_exec_avp(struct sip_msg* msg, char* cmd, char* avpl);
-inline static int w_exec_getenv(struct sip_msg* msg, char* cmd, char* avpl);
-inline static int w_exec(struct sip_msg* msg, char* cmd, char* in,
-		char* out, char* err, char* avp_env);
+inline static int w_exec(struct sip_msg* msg, str* cmd, str* in,
+		pv_spec_t* out, pv_spec_t* err, pv_spec_t* avp_env);
 inline static int w_async_exec(struct sip_msg* msg, async_ctx *ctx,
-		char *cmd, char* out, char* in, char* err, char* avp_env );
+		str* cmd, str* in, pv_spec_t* out, pv_spec_t* err, pv_spec_t* avp_env);
 
-static int exec_avp_fixup(void** param, int param_no);
-static int exec_fixup(void** param, int param_no);
+static int fixup_check_avp(void** param);
+static int fixup_check_var_setf(void** param);
 
 inline static void exec_shutdown(void);
 
 /*
  * Exported functions
  */
+
 static acmd_export_t acmds[] = {
-	{"exec",  (acmd_function)w_async_exec,  5, exec_fixup },
-	{"exec",  (acmd_function)w_async_exec,  4, exec_fixup },
-	{"exec",  (acmd_function)w_async_exec,  3, exec_fixup },
-	{"exec",  (acmd_function)w_async_exec,  2, exec_fixup },
-	{"exec",  (acmd_function)w_async_exec,  1, exec_fixup },
-	{0, 0, 0, 0}
+	{"exec", (acmd_function)w_async_exec, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_VAR|CMD_PARAM_OPT, fixup_check_var_setf, 0},
+		{CMD_PARAM_VAR|CMD_PARAM_OPT, fixup_check_var_setf, 0},
+		{CMD_PARAM_VAR|CMD_PARAM_OPT, fixup_check_avp, 0}, {0,0,0}}},
+	{0,0,{{0,0,0}}}
 };
 
 static cmd_export_t cmds[] = {
-	{"exec",         (cmd_function)w_exec,         5, exec_fixup, 0,
+	{"exec", (cmd_function)w_exec, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_VAR|CMD_PARAM_OPT, fixup_check_var_setf, 0},
+		{CMD_PARAM_VAR|CMD_PARAM_OPT, fixup_check_var_setf, 0},
+		{CMD_PARAM_VAR|CMD_PARAM_OPT, fixup_check_avp, 0}, {0,0,0}},
 		REQUEST_ROUTE|FAILURE_ROUTE|LOCAL_ROUTE|STARTUP_ROUTE|TIMER_ROUTE|EVENT_ROUTE|ONREPLY_ROUTE},
-	{"exec",         (cmd_function)w_exec,         4, exec_fixup, 0,
-		REQUEST_ROUTE|FAILURE_ROUTE|LOCAL_ROUTE|STARTUP_ROUTE|TIMER_ROUTE|EVENT_ROUTE|ONREPLY_ROUTE},
-	{"exec",         (cmd_function)w_exec,         3, exec_fixup, 0,
-		REQUEST_ROUTE|FAILURE_ROUTE|LOCAL_ROUTE|STARTUP_ROUTE|TIMER_ROUTE|EVENT_ROUTE|ONREPLY_ROUTE},
-	{"exec",         (cmd_function)w_exec,         2, exec_fixup, 0,
-		REQUEST_ROUTE|FAILURE_ROUTE|LOCAL_ROUTE|STARTUP_ROUTE|TIMER_ROUTE|EVENT_ROUTE|ONREPLY_ROUTE},
-	{"exec",         (cmd_function)w_exec,         1, exec_fixup, 0,
-		REQUEST_ROUTE|FAILURE_ROUTE|LOCAL_ROUTE|STARTUP_ROUTE|TIMER_ROUTE|EVENT_ROUTE|ONREPLY_ROUTE},
-	{"exec_dset",    (cmd_function)w_exec_dset,    1, exec_avp_fixup,  0,
-		REQUEST_ROUTE|FAILURE_ROUTE},
-	{"exec_msg",     (cmd_function)w_exec_msg,     1, exec_avp_fixup,  0,
-		REQUEST_ROUTE|FAILURE_ROUTE|LOCAL_ROUTE|TIMER_ROUTE|EVENT_ROUTE|ONREPLY_ROUTE},
-	{"exec_avp",     (cmd_function)w_exec_avp,     1, exec_avp_fixup,  0,
-		REQUEST_ROUTE|FAILURE_ROUTE|LOCAL_ROUTE|STARTUP_ROUTE|TIMER_ROUTE|EVENT_ROUTE|ONREPLY_ROUTE},
-	{"exec_avp",     (cmd_function)w_exec_avp,     2, exec_avp_fixup, 0,
-		REQUEST_ROUTE|FAILURE_ROUTE|LOCAL_ROUTE|STARTUP_ROUTE|TIMER_ROUTE|EVENT_ROUTE|ONREPLY_ROUTE},
-	{"exec_getenv",  (cmd_function)w_exec_getenv,  2, exec_avp_fixup, 0,
-		REQUEST_ROUTE|FAILURE_ROUTE|LOCAL_ROUTE|STARTUP_ROUTE|TIMER_ROUTE|EVENT_ROUTE|ONREPLY_ROUTE},
-	{0, 0, 0, 0, 0, 0}
+	{0,0,{{0,0,0}},0}
 };
-
 
 /*
  * Exported parameters
@@ -119,6 +102,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,/* dlopen flags */
+	0,				/* load function */
 	NULL,           /* OpenSIPS module dependencies */
 	cmds,           /* Exported functions */
 	acmds,          /* Exported async functions */
@@ -128,10 +112,12 @@ struct module_exports exports= {
 	0,              /* exported pseudo-variables */
 	0,			 	/* exported transformations */
 	0,              /* extra processes */
+	0,              /* pre-initialization module */
 	mod_init,       /* initialization module */
 	0,              /* response function */
 	exec_shutdown,  /* destroy function */
-	0               /* per-child init function */
+	0,              /* per-child init function */
+	0               /* reload confirm function */
 };
 
 void exec_shutdown(void)
@@ -151,231 +137,26 @@ static int mod_init( void )
 	return 0;
 }
 
-inline static int w_exec_dset(struct sip_msg* msg, char* cmd, char* foo)
+
+static int fixup_check_var_setf(void** param)
 {
-	str *uri;
-	environment_t *backup;
-	int ret;
-	str command;
-
-	if(msg==0 || cmd==0)
+	if (((pv_spec_t*)*param)->setf == NULL) {
+		LM_ERR("output var must be writable\n");
 		return -1;
-
-	backup=0;
-	if (setvars) {
-		backup=set_env(msg);
-		if (!backup) {
-			LM_ERR("no env created\n");
-			return -1;
-		}
-	}
-
-	if (msg->new_uri.s && msg->new_uri.len)
-		uri=&msg->new_uri;
-	else
-		uri=&msg->first_line.u.request.uri;
-
-	if(fixup_get_svalue(msg, (gparam_p)cmd, &command)!=0)
-	{
-		LM_ERR("invalid command parameter\n");
-		return -1;
-	}
-
-	LM_DBG("executing [%s]\n", command.s);
-
-	ret=exec_str(msg, command.s, uri->s, uri->len);
-	if (setvars) {
-		unset_env(backup);
-	}
-	return ret;
-}
-
-
-inline static int w_exec_msg(struct sip_msg* msg, char* cmd, char* foo)
-{
-	environment_t *backup;
-	int ret;
-	str command;
-
-	if(msg==0 || cmd==0)
-		return -1;
-
-	backup=0;
-	if (setvars) {
-		backup=set_env(msg);
-		if (!backup) {
-			LM_ERR("no env created\n");
-			return -1;
-		}
-	}
-
-	if(fixup_get_svalue(msg, (gparam_p)cmd, &command)!=0)
-	{
-		LM_ERR("invalid command parameter\n");
-		return -1;
-	}
-
-	LM_DBG("executing [%s]\n", command.s);
-
-	ret=exec_msg(msg, command.s);
-	if (setvars) {
-		unset_env(backup);
-	}
-	return ret;
-}
-
-inline static int w_exec_avp(struct sip_msg* msg, char* cmd, char* avpl)
-{
-	environment_t *backup;
-	int ret;
-	str command;
-
-	if(msg==0 || cmd==0)
-		return -1;
-
-	backup=0;
-	if (setvars) {
-		backup=set_env(msg);
-		if (!backup) {
-			LM_ERR("no env created\n");
-			return -1;
-		}
-	}
-
-	if(fixup_get_svalue(msg, (gparam_p)cmd, &command)!=0)
-	{
-		LM_ERR("invalid command parameter\n");
-		return -1;
-	}
-
-	LM_DBG("executing [%s]\n", command.s);
-
-	ret=exec_avp(msg, command.s, (pvname_list_p)avpl);
-	if (setvars) {
-		unset_env(backup);
-	}
-	return ret;
-}
-
-inline static int w_exec_getenv(struct sip_msg* msg, char* cmd, char* avpl)
-{
-	str command;
-
-	if(msg==0 || cmd==0)
-		return -1;
-
-	if(fixup_get_svalue(msg, (gparam_p)cmd, &command)!=0)
-	{
-		LM_ERR("invalid command parameter\n");
-		return -1;
-	}
-
-	LM_DBG("executing getenv [%s]\n", command.s);
-
-	return exec_getenv(msg, command.s, (pvname_list_p)avpl);
-}
-
-
-static int exec_avp_fixup(void** param, int param_no)
-{
-	pvname_list_t *anlist = NULL;
-	str s;
-
-	s.s = (char*)(*param);
-	if (param_no==1)
-	{
-		LM_WARN("You are using an obosolete function from the EXEC module!"
-			"Please switch to the new exec() function\n");
-		if(s.s==NULL)
-		{
-			LM_ERR("null format in P%d\n", param_no);
-			return E_UNSPEC;
-		}
-		return fixup_spve_null(param, 1);
-	} else if(param_no==2) {
-		if(s.s==NULL)
-		{
-			LM_ERR("null format in P%d\n", param_no);
-			return E_UNSPEC;
-		}
-		s.len =  strlen(s.s);
-		anlist = parse_pvname_list(&s, PVT_AVP);
-		if(anlist==NULL)
-		{
-			LM_ERR("bad format in P%d [%s]\n", param_no, s.s);
-			return E_UNSPEC;
-		}
-		*param = (void*)anlist;
-		return 0;
-	}
-
-	return 0;
-}
-
-static int exec_fixup(void** param, int param_no)
-{
-	gparam_p out_var;
-	pv_spec_p env_avp;
-	pv_elem_t* model;
-	str s;
-
-	if (*param)
-	switch (param_no) {
-		case 1: /* cmd */
-			return fixup_spve(param);
-		case 2: /* input vars */
-			s.s = *param;
-			s.len = strlen(s.s);
-			if (pv_parse_format(&s, &model)) {
-				LM_ERR("wrong format [%s] for param no %d!\n",
-						(char*)*param, param_no);
-				pkg_free(s.s);
-				return E_UNSPEC;
-			}
-			*param = (void *)model;
-
-			return 0;
-		case 3: /* output var */
-		case 4: /* error  var */
-			if (fixup_spve(param)) {
-				LM_ERR("cannot fix output var\n");
-				return -1;
-			}
-
-			out_var = *param;
-			if (out_var->type != GPARAM_TYPE_PVS) {
-				LM_ERR("output var must be A varible\n");
-				return -1;
-			}
-
-			if (out_var->v.pvs->setf == NULL) {
-				LM_ERR("output var must be writable\n");
-				return -1;
-			}
-
-			return 0;
-		case 5: /* environment avp */
-			if (fixup_pvar(param)) {
-				LM_ERR("cannot fix env avp\n");
-				return -1;
-			}
-			env_avp = *param;
-
-			if (env_avp->type != PVT_AVP) {
-				LM_ERR("environment var must be an AVP (%d)\n", env_avp->type);
-				return -1;
-			}
-
-			return 0;
-		default:
-			LM_ERR("Invalid parameter number %d\n", param_no);
-			return -1;
 	}
 	return 0;
 }
 
+static int fixup_check_avp(void** param)
+{
+	if (((pv_spec_t*)*param)->type != PVT_AVP) {
+		LM_ERR("environment var must be an AVP\n");
+		return -1;
+	}
+	return 0;
+}
 
-static inline int setenvvar(struct hf_wrapper** hf, int_str* value, int idx)
+static inline int setenvvar(struct hf_wrapper** hf, int_str* value, int isstr, int idx)
 {
 	#define OSIPS_EXEC "OSIPS_EXEC_"
 
@@ -386,7 +167,7 @@ static inline int setenvvar(struct hf_wrapper** hf, int_str* value, int idx)
 	sidx.s = int2str((unsigned long)idx, &sidx.len);
 
 	(*hf)->envvar=pkg_malloc(strlen(OSIPS_EXEC) + sidx.len + 1/*=*/
-					+ (*value).s.len + 1/*\0*/);
+					+ (isstr?(*value).s.len:INT2STR_MAX_LEN) + 1/*\0*/);
 	if ((*hf)->envvar==0) {
 		LM_ERR("no more pkg mem\n");
 		return -1;
@@ -400,9 +181,14 @@ static inline int setenvvar(struct hf_wrapper** hf, int_str* value, int idx)
 
 	(*hf)->envvar[len++] = '=';
 
-	memcpy((*hf)->envvar+len, value->s.s, value->s.len);
-
-	(*hf)->envvar[len+ value->s.len] = '\0';
+	if (isstr) {
+		memcpy((*hf)->envvar+len, value->s.s, value->s.len);
+		(*hf)->envvar[len+ value->s.len] = '\0';
+	} else {
+		sidx.s = int2str((unsigned long)value->n, &sidx.len);
+		memcpy((*hf)->envvar+len, sidx.s, sidx.len);
+		(*hf)->envvar[len+ sidx.len] = '\0';
+	}
 
 	(*hf)->next_other=(*hf)->next_same=NULL;
 
@@ -435,21 +221,17 @@ static struct hf_wrapper* get_avp_values_list(struct sip_msg* msg, pv_param_p av
 	if (!hf)
 		goto memerr;
 
-	setenvvar(&hf, &value, idx++);
+	setenvvar(&hf, &value, (avp_ptr->flags & AVP_VAL_STR), idx++);
 	hf_head=hf;
 
-	while (search_next_avp( avp_ptr, &value) != 0) {
+	while ((avp_ptr = search_next_avp( avp_ptr, &value)) != 0) {
 		hf->next_other=pkg_malloc(sizeof(struct hf_wrapper));
+		hf=hf->next_other;
+
 		if (!hf)
 			goto memerr;
 
-		hf=hf->next_other;
-
-		setenvvar(&hf, &value, idx++);
-
-		avp_ptr = avp_ptr->next;
-		if (avp_ptr->id > avp_name)
-			break;
+		setenvvar(&hf, &value, (avp_ptr->flags & AVP_VAL_STR), idx++);
 	}
 
 	return hf_head;
@@ -459,34 +241,18 @@ memerr:
 }
 
 
-inline static int w_exec(struct sip_msg* msg, char* cmd, char* in,
-		char* out, char* err ,char* avp_env)
+inline static int w_exec(struct sip_msg* msg, str* cmd, str* in,
+		pv_spec_t* out, pv_spec_t* err, pv_spec_t* avp_env)
 {
-	str command;
-	str input = {NULL, 0};
 	int ret;
 	struct hf_wrapper *hf=0;
 	environment_t* backup_env=0;
-	gparam_p outvar = (gparam_p)out;
-	gparam_p errvar = (gparam_p)err;
 
 	if (msg == 0 || cmd == 0)
 		return -1;
 
-	/* fetch command */
-	if(fixup_get_svalue(msg, (gparam_p)cmd, &command)!=0) {
-		LM_ERR("invalid command parameter\n");
-		return -1;
-	}
-
-	/* fetch input */
-	if (in != NULL) {
-		if (pv_printf_s(msg, (pv_elem_p)in, &input)!=0)
-			return -1;
-	}
-
 	if (avp_env != NULL) {
-		if ((hf=get_avp_values_list(msg, &((pv_spec_p)avp_env)->pvp)) == 0)
+		if ((hf=get_avp_values_list(msg, &(avp_env->pvp))) == 0)
 			return -1;
 		backup_env=replace_env(hf);
 		if (!backup_env) {
@@ -498,7 +264,7 @@ inline static int w_exec(struct sip_msg* msg, char* cmd, char* in,
 		release_hf_struct(hf);
 	}
 
-	ret = exec_sync(msg, &command, &input, outvar, errvar);
+	ret = exec_sync(msg, cmd, in, out, err);
 
 	if (backup_env)
 		unset_env(backup_env);
@@ -508,33 +274,18 @@ inline static int w_exec(struct sip_msg* msg, char* cmd, char* in,
 
 
 inline static int w_async_exec(struct sip_msg* msg, async_ctx *ctx,
-					char* cmd, char* in, char* out, char* err, char* avp_env)
+		str* cmd, str* in, pv_spec_t* out, pv_spec_t* err, pv_spec_t* avp_env)
 {
-	str command;
-	str input = {NULL, 0};
 	struct hf_wrapper *hf=0;
 	environment_t* backup_env=0;
-	gparam_p outvar = (gparam_p)out;
 	exec_async_param *param;
 	int ret, fd;
 
 	if (msg == 0 || cmd == 0)
 		return -1;
 
-	/* fetch command */
-	if(fixup_get_svalue(msg, (gparam_p)cmd, &command)!=0) {
-		LM_ERR("invalid command parameter\n");
-		return -1;
-	}
-
-	/* fetch input */
-	if (in != NULL) {
-		if (pv_printf_s(msg, (pv_elem_p)in, &input)!=0)
-			return -1;
-	}
-
 	if (avp_env != NULL) {
-		if ((hf=get_avp_values_list(msg, &((pv_spec_p)avp_env)->pvp)) == 0)
+		if ((hf=get_avp_values_list(msg, &(avp_env->pvp))) == 0)
 			return -1;
 		backup_env=replace_env(hf);
 		if (!backup_env) {
@@ -556,14 +307,14 @@ inline static int w_async_exec(struct sip_msg* msg, async_ctx *ctx,
 		return -1;
 	}
 
-	ret = start_async_exec(msg, &command, in?&input:NULL, outvar, &fd);
+	ret = start_async_exec(msg, cmd, in, out, &fd);
 
 	if (backup_env)
 		unset_env(backup_env);
 
 	/* populate resume point (if async started) */
 	if (ret==1) {
-		param->outvar = outvar;
+		param->outvar = out;
 		/* that ^^^^ is save as "out" is a in private mem, but in all
 		 * processes (set before forking) */
 		param->buf = NULL;

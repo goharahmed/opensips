@@ -17,7 +17,8 @@ mysql Module
               1.3.2. timeout_interval (integer)
               1.3.3. max_db_queries (integer)
               1.3.4. max_db_retries (integer)
-              1.3.5. use_tls (integer)
+              1.3.5. ps_max_col_size (integer)
+              1.3.6. use_tls (integer)
 
         1.4. Exported Functions
         1.5. Installation
@@ -47,7 +48,8 @@ mysql Module
    1.2. Set timeout_interval parameter
    1.3. Set max_db_queries parameter
    1.4. Set max_db_retries parameter
-   1.5. Set the use_tls parameter
+   1.5. Set ps_max_col_size parameter
+   1.6. Set the use_tls parameter
 
 Chapter 1. Admin Guide
 
@@ -129,7 +131,24 @@ modparam("db_mysql", "max_db_queries", 2)
 modparam("db_mysql", "max_db_retries", 2)
 ...
 
-1.3.5. use_tls (integer)
+1.3.5. ps_max_col_size (integer)
+
+   The maximum size of a column's data, when fetched using
+   prepared statements. Particularly relevant for variable-length
+   data, such as CHAR, BLOB, etc.
+
+   NOTE: Should a column's data exceed this limit, the value will
+   be silently truncated to fit the buffer, without reporting any
+   errors!
+
+   Default value is 1024 (bytes).
+
+   Example 1.5. Set ps_max_col_size parameter
+...
+modparam("db_mysql", "ps_max_col_size", 4096)
+...
+
+1.3.6. use_tls (integer)
 
    Setting this parameter will allow you to use TLS for MySQL
    connections. In order to enable TLS for a specific connection,
@@ -152,7 +171,7 @@ modparam("db_mysql", "max_db_retries", 2)
 
    Default value is 0 (not enabled)
 
-   Example 1.5. Set the use_tls parameter
+   Example 1.6. Set the use_tls parameter
 ...
 modparam("tls_mgm", "client_domain", "dom1")
 modparam("tls_mgm", "certificate", "[dom1]/etc/pki/tls/certs/opensips.pe
@@ -161,7 +180,7 @@ modparam("tls_mgm", "private_key", "[dom1]/etc/pki/tls/private/opensips.
 key")
 modparam("tls_mgm", "ca_list",     "[dom1]/etc/pki/tls/certs/ca.pem")
 ...
-modparam("db_mysql", "use_tls", "dom1")
+modparam("db_mysql", "use_tls", 1)
 ...
 modparam("usrloc", "db_url", "mysql://root:1234@localhost/opensips?tls_d
 omain=dom1")
@@ -203,16 +222,16 @@ Chapter 2. Contributors
    Table 2.1. Top contributors by DevScore^(1), authored
    commits^(2) and lines added/removed^(3)
      Name DevScore Commits Lines ++ Lines --
-   1. Jan Janak (@janakj) 153 53 5336 3190
-   2. Bogdan-Andrei Iancu (@bogdan-iancu) 98 70 1571 791
-   3. Henning Westerholt (@henningw) 59 30 693 1239
-   4. Liviu Chircu (@liviuchircu) 28 21 392 129
+   1. Jan Janak (@janakj) 150 53 5336 3190
+   2. Bogdan-Andrei Iancu (@bogdan-iancu) 97 71 1573 792
+   3. Henning Westerholt (@henningw) 57 30 693 1239
+   4. Liviu Chircu (@liviuchircu) 36 29 479 176
    5. Daniel-Constantin Mierla (@miconda) 28 20 571 154
-   6. Andrei Pelinescu-Onciul 16 14 52 49
-   7. Razvan Crainea (@razvancrainea) 14 11 214 44
-   8. Vlad Paiu (@vladpaiu) 11 9 124 15
-   9. Jiri Kuthan (@jiriatipteldotorg) 11 6 393 2
-   10. Vlad Patrascu (@rvlad-patrascu) 8 5 120 73
+   6. Razvan Crainea (@razvancrainea) 19 16 231 59
+   7. Andrei Pelinescu-Onciul 16 14 52 49
+   8. Vlad Paiu (@vladpaiu) 13 10 139 25
+   9. Vlad Patrascu (@rvlad-patrascu) 12 8 179 78
+   10. Jiri Kuthan (@jiriatipteldotorg) 11 6 393 2
 
    All remaining contributors: Nils Ohlmeier, Norman Brandinger
    (@NormB), Peter Lemenkov (@lemenkov), Eseanu Marius Cristian
@@ -241,17 +260,18 @@ Chapter 2. Contributors
 2.2. By Commit Activity
 
    Table 2.2. Most recently active contributors^(1) to this module
-                         Name                     Commit Activity
-   1.  Razvan Crainea (@razvancrainea)          Oct 2011 - Sep 2018
-   2.  Vlad Paiu (@vladpaiu)                    Feb 2011 - Sep 2018
-   3.  Liviu Chircu (@liviuchircu)              Mar 2014 - Aug 2018
-   4.  Vlad Patrascu (@rvlad-patrascu)          Apr 2017 - Jul 2018
-   5.  Peter Lemenkov (@lemenkov)               Nov 2017 - Jun 2018
-   6.  Augusto Caringi                          Jul 2017 - Jul 2017
-   7.  Ovidiu Sas (@ovidiusas)                  Mar 2017 - Mar 2017
-   8.  Ionut Ionita (@ionutrazvanionita)        Feb 2016 - Feb 2016
-   9.  Eseanu Marius Cristian (@eseanucristian) Jul 2015 - Jul 2015
-   10. Bogdan-Andrei Iancu (@bogdan-iancu)      Aug 2002 - Oct 2014
+     Name Commit Activity
+   1. Vlad Patrascu (@rvlad-patrascu) Apr 2017 - May 2021
+   2. Liviu Chircu (@liviuchircu) Mar 2014 - Apr 2021
+   3. Razvan Crainea (@razvancrainea) Oct 2011 - Jan 2021
+   4. Vlad Paiu (@vladpaiu) Feb 2011 - Dec 2019
+   5. Bogdan-Andrei Iancu (@bogdan-iancu) Aug 2002 - Apr 2019
+   6. Peter Lemenkov (@lemenkov) Nov 2017 - Jun 2018
+   7. Augusto Caringi Jul 2017 - Jul 2017
+   8. Ovidiu Sas (@ovidiusas) Mar 2017 - Mar 2017
+   9. Ionut Ionita (@ionutrazvanionita) Feb 2016 - Feb 2016
+   10. Eseanu Marius Cristian (@eseanucristian) Jul 2015 - Jul
+   2015
 
    All remaining contributors: Saúl Ibarra Corretgé (@saghul),
    Razvan Pistolea, Norman Brandinger (@NormB), Sergio Gutierrez,

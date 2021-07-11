@@ -37,6 +37,8 @@
 typedef enum {
 	AUDIO_WELCOME,
 	AUDIO_QUEUE,
+	AUDIO_DISSUADING,
+	AUDIO_FLOW_ID,
 	MAX_AUDIO
 } audio_files;
 
@@ -47,6 +49,11 @@ struct cc_flow {
 	/* configuration data */
 	unsigned int priority;
 	unsigned int skill;
+	unsigned int max_wrapup;
+	unsigned int diss_hangup;
+	unsigned int diss_ewt_th;
+	unsigned int diss_qsize_th;
+	unsigned int diss_onhold_th;
 	str recordings[MAX_AUDIO];
 	str cid;
 	/* runtime data */
@@ -84,13 +91,15 @@ struct cc_agent {
 	/* configuration data */
 	str location; /* sip address*/
 	str did;  /* shorcut for username in sips address */
+	unsigned int wrapup_time;
 	unsigned int no_skills;
 	unsigned int skills[MAX_SKILLS_PER_AGENT];
 	/* runtime data */
 	int ref_cnt;
 	agent_state state;
 	unsigned int loged_in;
-	int last_call_end;
+	/* seconds to the end of wrap up (relative to internal time)*/
+	int wrapup_end_time;
 	/* statistics */
 	stat_var *st_dist_incalls;
 	stat_var *st_answ_incalls;
@@ -150,10 +159,31 @@ struct cc_data {
 typedef enum {
 	CC_CALL_NONE,
 	CC_CALL_WELCOME,
+	CC_CALL_DISSUADING1,
+	CC_CALL_DISSUADING2,
 	CC_CALL_QUEUED,
+	CC_CALL_PRE_TOAGENT,
 	CC_CALL_TOAGENT,
 	CC_CALL_ENDED
 } call_state;
+
+static inline str *call_state_str(call_state state)
+{
+	static str call_state_s[] = {
+		str_init("none"),
+		str_init("welcome"),
+		str_init("dissuading1"),
+		str_init("dissuading2"),
+		str_init("queued"),
+		str_init("preagent"),
+		str_init("toagent"),
+		str_init("ended"),
+		/* unused */
+		str_init("unknown"),
+	};
+	int size = (sizeof(call_state_s)/sizeof(call_state_s[0]));
+	return &call_state_s[(state < size - 1)?state:size - 1];
+}
 
 #define FSTAT_INCALL  (1<<0)
 #define FSTAT_DIST    (1<<1)
@@ -176,8 +206,11 @@ struct cc_call {
 	unsigned int recv_time;
 	str caller_dn;
 	str caller_un;
+	str script_param;
 	/* b2b id */
 	str b2bua_id;
+	/* b2b agent id */
+	str b2bua_agent_id;
 	/* flow the call belong to */
 	struct cc_flow *flow;
 	/* agent taking this call  */
@@ -199,21 +232,24 @@ void free_cc_data(struct cc_data *data);
 str* get_skill_by_id(struct cc_data *data, unsigned int id);
 
 int add_cc_flow( struct cc_data *data, str *id, int priority, str *skill,
-		str *cid, str *recordings );
+		str *cid, int max_wrapup, int diss_hangup, int diss_ewt_th,
+		int diss_qsize_th, int diss_onhold_th, str *recordings );
 
 void update_cc_agent_att(struct cc_agent *agent, unsigned long duration);
 
 int add_cc_agent( struct cc_data *data, str *id, str *location,
-		str *skills, unsigned int logstate, unsigned int last_call_end);
+		str *skills, unsigned int logstate, unsigned int wrapup_time,
+		unsigned int wrapup_end_time);
 
 void update_cc_flow_awt(struct cc_flow *flow, unsigned long duration);
 
-struct cc_agent* get_agent_by_name(struct cc_data *data, str *name, struct cc_agent **prev_agent);
+struct cc_agent* get_agent_by_name(struct cc_data *data, str *name,
+		struct cc_agent **prev_agent);
 
 struct cc_flow *get_flow_by_name(struct cc_data *data, str *name);
 
 struct cc_call* new_cc_call(struct cc_data *data, struct cc_flow *flow,
-		str *dn, str *un);
+		str *dn, str *un, str *param);
 
 void free_cc_call(struct cc_data *data, struct cc_call *call);
 
@@ -222,6 +258,8 @@ struct cc_agent* get_free_agent_by_skill(struct cc_data *data,
 
 void log_agent_to_flows(struct cc_data *data, struct cc_agent *agent,
 		int login);
+
+void agent_raise_event(struct cc_agent *agent, struct cc_call *call);
 
 void clean_cc_old_data(struct cc_data *data);
 
@@ -275,8 +313,8 @@ static inline void agent_switch_login(struct cc_data* data,
 	/* take out of the current list */
 	remove_cc_agent(data, agent, prev_agent);
 	agent->loged_in ^= 1;
+	agent_raise_event( agent, NULL);
 	/* add on top of the new one */
 	add_cc_agent_top(data, agent);
 }
-
 #endif

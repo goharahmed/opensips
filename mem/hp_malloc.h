@@ -55,7 +55,7 @@ extern stat_var *rpm_frags;
 #undef ROUNDTO
 #undef UN_HASH
 
-#define ROUNDTO 8UL
+#define ROUNDTO 8UL /* address alignment, in bytes */
 
 #define HP_MALLOC_OPTIMIZE_FACTOR 14UL /*used below */
 #define HP_MALLOC_OPTIMIZE  (1UL << HP_MALLOC_OPTIMIZE_FACTOR)
@@ -73,7 +73,7 @@ extern stat_var *rpm_frags;
 
 /* get the fragment which corresponds to a pointer */
 #define HP_FRAG(p) \
-	((struct hp_frag *)((char *)(p) - sizeof(struct hp_frag)))
+	((struct hp_frag *)(p) - 1)
 
 #define UN_HASH(h)	(((unsigned long)(h) <= (HP_MALLOC_OPTIMIZE/ROUNDTO)) ?\
 						(unsigned long)(h)*ROUNDTO: \
@@ -99,11 +99,10 @@ extern stat_var *rpm_frags;
 
 struct hp_frag {
 	unsigned long size;
-	union {
-		struct hp_frag *nxt_free;
-		long reserved;
-	} u;
+
 	struct hp_frag **prev;
+	struct hp_frag *nxt_free;
+
 #ifdef DBG_MALLOC
 	const char *file;
 	const char *func;
@@ -113,7 +112,7 @@ struct hp_frag {
 #ifdef SHM_EXTRA_STATS
 	unsigned long statistic_index;
 #endif
-};
+} __attribute__ ((aligned (ROUNDTO)));
 
 #define HP_FRAG_OVERHEAD (sizeof(struct hp_frag))
 
@@ -140,9 +139,6 @@ struct hp_block {
 	char *name; /* purpose of this memory block */
 
 	unsigned long size; /* total size */
-	unsigned long large_space;
-	unsigned long large_limit;
-
 	unsigned long used; /* alloc'ed size */
 	unsigned long real_used; /* used+malloc overhead */
 	unsigned long max_real_used;
@@ -158,7 +154,7 @@ struct hp_block {
 	 * in order to achieve an even finer-grained locking
 	 */
 	struct hp_frag_lnk free_hash[HP_HASH_SIZE + HP_EXTRA_HASH_SIZE];
-};
+} __attribute__ ((aligned (ROUNDTO)));
 
 struct hp_block *hp_pkg_malloc_init(char *addr, unsigned long size, char *name);
 struct hp_block *hp_shm_malloc_init(char *addr, unsigned long size, char *name);

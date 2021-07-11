@@ -28,14 +28,20 @@
 #include "cachedb_redis_utils.h"
 #include "../../mem/mem.h"
 #include "../../ut.h"
+#include "../../pt.h"
 #include "../../cachedb/cachedb.h"
 
 #include <string.h>
 #include <hiredis/hiredis.h>
 
+#define QUERY_ATTEMPTS 2
+
 int redis_query_tout = CACHEDB_REDIS_DEFAULT_TIMEOUT;
 int redis_connnection_tout = CACHEDB_REDIS_DEFAULT_TIMEOUT;
 int shutdown_on_error = 0;
+int use_tls = 0;
+
+struct tls_mgm_binds tls_api;
 
 redisContext *redis_get_ctx(char *ip, int port)
 {
@@ -69,6 +75,69 @@ redisContext *redis_get_ctx(char *ip, int port)
 	return ctx;
 }
 
+#ifdef HAVE_REDIS_SSL
+static void tls_print_errstack(void)
+{
+	int code;
+
+	while ((code = ERR_get_error())) {
+		LM_ERR("TLS errstack: %s\n", ERR_error_string(code, 0));
+	}
+}
+
+static int redis_init_ssl(char *url_extra_opts, redisContext *ctx,
+	struct tls_domain **tls_dom)
+{
+	str tls_dom_name;
+	SSL *ssl;
+	struct tls_domain *d;
+
+	if (tls_dom == NULL) {
+		if (strncmp(url_extra_opts, CACHEDB_TLS_DOM_PARAM,
+				CACHEDB_TLS_DOM_PARAM_LEN)) {
+			LM_ERR("Invalid Redis URL parameter: %s\n", url_extra_opts);
+			return -1;
+		}
+
+		tls_dom_name.s = url_extra_opts + CACHEDB_TLS_DOM_PARAM_LEN;
+		tls_dom_name.len = strlen(tls_dom_name.s);
+		if (!tls_dom_name.len) {
+			LM_ERR("Empty TLS domain name in Redis URL\n");
+			return -1;
+		}
+
+		d = tls_api.find_client_domain_name(&tls_dom_name);
+		if (d == NULL) {
+			LM_ERR("TLS domain: %.*s not found\n",
+				tls_dom_name.len, tls_dom_name.s);
+			return -1;
+		}
+
+		*tls_dom = d;
+	} else {
+		d = *tls_dom;
+	}
+
+	ssl = SSL_new(((void**)d->ctx)[process_no]);
+	if (!ssl) {
+		LM_ERR("failed to create SSL structure (%d:%s)\n", errno, strerror(errno));
+		tls_print_errstack();
+		tls_api.release_domain(*tls_dom);
+		return -1;
+	}
+
+	if (redisInitiateSSL(ctx, ssl) != REDIS_OK) {
+		printf("Failed to init Redis SSL: %s\n", ctx->errstr);
+		tls_api.release_domain(*tls_dom);
+		return -1;
+	}
+
+	LM_DBG("TLS enabled for this connection\n");
+
+	return 0;
+}
+#endif
+
 int redis_connect_node(redis_con *con,cluster_node *node)
 {
 	redisReply *rpl;
@@ -77,16 +146,24 @@ int redis_connect_node(redis_con *con,cluster_node *node)
 	if (!node->context)
 		return -1;
 
+#ifdef HAVE_REDIS_SSL
+	if (use_tls && con->id->extra_options &&
+		redis_init_ssl(con->id->extra_options, node->context,
+			&node->tls_dom) < 0) {
+		redisFree(node->context);
+		return -1;
+	}
+#endif
+
 	if (con->id->password) {
 		rpl = redisCommand(node->context,"AUTH %s",con->id->password);
 		if (rpl == NULL || rpl->type == REDIS_REPLY_ERROR) {
 			LM_ERR("failed to auth to redis - %.*s\n",
-				rpl?rpl->len:7,rpl?rpl->str:"FAILURE");
+				rpl?(unsigned)rpl->len:7,rpl?rpl->str:"FAILURE");
 			freeReplyObject(rpl);
-			redisFree(node->context);
-			return -1;
+			goto error;
 		}
-		LM_DBG("AUTH [password] -  %.*s\n",rpl->len,rpl->str);
+		LM_DBG("AUTH [password] -  %.*s\n",(unsigned)rpl->len,rpl->str);
 		freeReplyObject(rpl);
 	}
 
@@ -94,17 +171,24 @@ int redis_connect_node(redis_con *con,cluster_node *node)
 		rpl = redisCommand(node->context,"SELECT %s",con->id->database);
 		if (rpl == NULL || rpl->type == REDIS_REPLY_ERROR) {
 			LM_ERR("failed to select database %s - %.*s\n",con->id->database,
-				rpl?rpl->len:7,rpl?rpl->str:"FAILURE");
+				rpl?(unsigned)rpl->len:7,rpl?rpl->str:"FAILURE");
 			freeReplyObject(rpl);
-			redisFree(node->context);
-			return -1;
+			goto error;
 		}
 
-		LM_DBG("SELECT [%s] - %.*s\n",con->id->database,rpl->len,rpl->str);
+		LM_DBG("SELECT [%s] - %.*s\n",con->id->database,(unsigned)rpl->len,rpl->str);
 		freeReplyObject(rpl);
 	}
 
 	return 0;
+
+error:
+	redisFree(node->context);
+	if (use_tls && node->tls_dom) {
+		tls_api.release_domain(node->tls_dom);
+		node->tls_dom = NULL;
+	}
+	return -1;
 }
 
 int redis_reconnect_node(redis_con *con,cluster_node *node)
@@ -118,31 +202,38 @@ int redis_reconnect_node(redis_con *con,cluster_node *node)
 	return redis_connect_node(con,node);
 }
 
-
 int redis_connect(redis_con *con)
 {
 	redisContext *ctx;
 	redisReply *rpl;
 	cluster_node *it;
 	int len;
+	struct tls_domain *tls_dom = NULL;
 
 	/* connect to redis DB */
 	ctx = redis_get_ctx(con->id->host,con->id->port);
 	if (!ctx)
 		return -1;
 
+#ifdef HAVE_REDIS_SSL
+	if (use_tls && con->id->extra_options &&
+		redis_init_ssl(con->id->extra_options, ctx, &tls_dom) < 0) {
+		redisFree(ctx);
+		return -1;
+	}
+#endif
+
 	/* auth using password, if any */
 	if (con->id->password) {
 		rpl = redisCommand(ctx,"AUTH %s",con->id->password);
 		if (rpl == NULL || rpl->type == REDIS_REPLY_ERROR) {
 			LM_ERR("failed to auth to redis - %.*s\n",
-				rpl?rpl->len:7,rpl?rpl->str:"FAILURE");
+				rpl?(unsigned)rpl->len:7,rpl?rpl->str:"FAILURE");
 			if (rpl!=NULL)
 				freeReplyObject(rpl);
-			redisFree(ctx);
-			return -1;
+			goto error;
 		}
-		LM_DBG("AUTH [password] -  %.*s\n",rpl->len,rpl->str);
+		LM_DBG("AUTH [password] -  %.*s\n",(unsigned)rpl->len,rpl->str);
 		freeReplyObject(rpl);
 	}
 
@@ -156,8 +247,7 @@ int redis_connect(redis_con *con)
 			LM_ERR("no more pkg\n");
 			if (rpl!=NULL)
 				freeReplyObject(rpl);
-			redisFree(ctx);
-			return -1;
+			goto error;
 		}
 		con->nodes->ip = (char *)(con->nodes + 1);
 
@@ -176,14 +266,16 @@ int redis_connect(redis_con *con)
 		if (build_cluster_nodes(con,rpl->str,rpl->len) < 0) {
 			LM_ERR("failed to parse Redis cluster info\n");
 			freeReplyObject(rpl);
-			redisFree(ctx);
-			return -1;
+			goto error;
 		}
 	}
 
 	if (rpl!=NULL)
 		freeReplyObject(rpl);
 	redisFree(ctx);
+
+	if (use_tls && tls_dom)
+		tls_api.release_domain(tls_dom);
 
 	con->flags |= REDIS_INIT_NODES;
 
@@ -199,6 +291,12 @@ int redis_connect(redis_con *con)
 	}
 
 	return 0;
+
+error:
+	redisFree(ctx);
+	if (use_tls && tls_dom)
+		tls_api.release_domain(tls_dom);
+	return -1;
 }
 
 redis_con* redis_new_connection(struct cachedb_id* id)
@@ -275,11 +373,11 @@ void redis_destroy(cachedb_con *con) {
 				return -1; \
 			} \
 		} \
-		for (i=2;i;i--) { \
+		for (i = QUERY_ATTEMPTS; i; i--) { \
 			reply = redisCommand(node->context,fmt,##args); \
 			if (reply == NULL || reply->type == REDIS_REPLY_ERROR) { \
-				LM_ERR("Redis operation failure - %p %.*s\n",\
-					reply,reply?reply->len:7,reply?reply->str:"FAILURE"); \
+				LM_INFO("Redis query failed: %p %.*s\n",\
+					reply,reply?(unsigned)reply->len:7,reply?reply->str:"FAILURE"); \
 				if (reply) \
 					freeReplyObject(reply); \
 				if (node->context->err == REDIS_OK || redis_reconnect_node(con,node) < 0) { \
@@ -291,6 +389,9 @@ void redis_destroy(cachedb_con *con) {
 			LM_ERR("giving up on query\n"); \
 			return -1; \
 		} \
+		if (i != QUERY_ATTEMPTS) \
+			LM_INFO("successfully ran query after %d failed attempt(s)\n", \
+			        QUERY_ATTEMPTS - i); \
 	} while (0)
 
 int redis_get(cachedb_con *connection,str *attr,str *val)
@@ -316,7 +417,7 @@ int redis_get(cachedb_con *connection,str *attr,str *val)
 		return -2;
 	}
 
-	LM_DBG("GET %.*s  - %.*s\n",attr->len,attr->s,reply->len,reply->str);
+	LM_DBG("GET %.*s  - %.*s\n",attr->len,attr->s,(unsigned)reply->len,reply->str);
 
 	val->s = pkg_malloc(reply->len);
 	if (val->s == NULL) {
@@ -346,7 +447,7 @@ int redis_set(cachedb_con *connection,str *attr,str *val,int expires)
 	redis_run_command(con,attr,"SET %b %b",attr->s,attr->len,val->s,val->len);
 
 	LM_DBG("set %.*s to %.*s - status = %d - %.*s\n",attr->len,attr->s,val->len,
-			val->s,reply->type,reply->len,reply->str);
+			val->s,reply->type,(unsigned)reply->len,reply->str);
 
 	freeReplyObject(reply);
 
@@ -354,7 +455,7 @@ int redis_set(cachedb_con *connection,str *attr,str *val,int expires)
 		redis_run_command(con,attr,"EXPIRE %b %d",attr->s,attr->len,expires);
 
 		LM_DBG("set %.*s to expire in %d s - %.*s\n",attr->len,attr->s,expires,
-				reply->len,reply->str);
+				(unsigned)reply->len,reply->str);
 
 		freeReplyObject(reply);
 	}
@@ -412,7 +513,7 @@ int redis_add(cachedb_con *connection,str *attr,int val,int expires,int *new_val
 		redis_run_command(con,attr,"EXPIRE %b %d",attr->s,attr->len,expires);
 
 		LM_DBG("set %.*s to expire in %d s - %.*s\n",attr->len,attr->s,expires,
-				reply->len,reply->str);
+				(unsigned)reply->len,reply->str);
 
 		freeReplyObject(reply);
 	}
@@ -442,7 +543,7 @@ int redis_sub(cachedb_con *connection,str *attr,int val,int expires,int *new_val
 		redis_run_command(con,attr,"EXPIRE %b %d",attr->s,attr->len,expires);
 
 		LM_DBG("set %.*s to expire in %d s - %.*s\n",attr->len,attr->s,expires,
-				reply->len,reply->str);
+				(unsigned)reply->len,reply->str);
 
 		freeReplyObject(reply);
 	}
@@ -471,7 +572,7 @@ int redis_get_counter(cachedb_con *connection,str *attr,int *val)
 		return -2;
 	}
 
-	LM_DBG("GET %.*s  - %.*s\n",attr->len,attr->s,reply->len,reply->str);
+	LM_DBG("GET %.*s  - %.*s\n",attr->len,attr->s,(unsigned)reply->len,reply->str);
 
 	response.s=reply->str;
 	response.len=reply->len;
@@ -555,14 +656,14 @@ int redis_raw_query_handle_reply(redisReply *reply,cdb_raw_entry ***ret,
 						if (reply->element[i]->type == REDIS_REPLY_INTEGER) {
 							(*ret)[current_size][0].val.n = reply->element[i]->integer;
 							(*ret)[current_size][0].type = CDB_INT32;
-                                                } else if (reply->element[i]->type == REDIS_REPLY_NIL) {
+						} else if (reply->element[i]->type == REDIS_REPLY_NIL) {
 							(*ret)[current_size][0].val.s.s = NULL;
 							(*ret)[current_size][0].val.s.len = 0;
 							(*ret)[current_size][0].type = CDB_NULL;
-							
 						} else {
 							(*ret)[current_size][0].val.s.s = pkg_malloc(reply->element[i]->len);
 							if (! (*ret)[current_size][0].val.s.s ) {
+								pkg_free((*ret)[current_size]);
 								LM_ERR("No more pkg \n");
 								goto error;
 							}
@@ -579,20 +680,29 @@ int redis_raw_query_handle_reply(redisReply *reply,cdb_raw_entry ***ret,
 				}
 			}
 			break;
+		default:
+			LM_ERR("unhandled Redis datatype %d\n", reply->type);
+			goto error;
 	}
+
+	if (current_size == 0)
+		pkg_free((*ret)[0]);
 
 	*reply_no = current_size;
 	freeReplyObject(reply);
 	return 1;
 
 error:
+	if (current_size == 0 && *ret)
+		pkg_free((*ret)[0]);
+
 	if (*ret) {
-		pkg_free(*ret);
 		for (len = 0;len<current_size;len++) {
 			if ( (*ret)[len][0].type == CDB_STR)
 				pkg_free((*ret)[len][0].val.s.s);
 			pkg_free((*ret)[len]);
 		}
+		pkg_free(*ret);
 	}
 
 	*ret = NULL;
@@ -666,11 +776,11 @@ int redis_raw_query_send(cachedb_con *connection,redisReply **reply,cdb_raw_entr
 	end = attr->s[attr->len];
 	attr->s[attr->len] = 0;
 
-	for (i=2;i;i--) {
+	for (i = QUERY_ATTEMPTS; i; i--) {
 		*reply = redisvCommand(node->context,attr->s,ap);
 		if (*reply == NULL || (*reply)->type == REDIS_REPLY_ERROR) {
-			LM_ERR("Redis operation failure - %.*s\n",
-				*reply?(*reply)->len:7,*reply?(*reply)->str:"FAILURE");
+			LM_INFO("Redis query failed: %.*s\n",
+				*reply?(unsigned)((*reply)->len):7,*reply?(*reply)->str:"FAILURE");
 			if (*reply)
 				freeReplyObject(*reply);
 			if (node->context->err == REDIS_OK || redis_reconnect_node(con,node) < 0) {
@@ -686,6 +796,10 @@ int redis_raw_query_send(cachedb_con *connection,redisReply **reply,cdb_raw_entr
 		LM_ERR("giving up on query\n");
 		return -1;
 	}
+
+	if (i != QUERY_ATTEMPTS)
+		LM_INFO("successfully ran query after %d failed attempt(s)\n",
+		        QUERY_ATTEMPTS - i);
 
 	return 0;
 }
@@ -715,7 +829,7 @@ int redis_raw_query(cachedb_con *connection,str *attr,cdb_raw_entry ***rpl,int e
 			freeReplyObject(reply);
 			return -2;
 		case REDIS_REPLY_STATUS:
-			LM_DBG("Received a status of %.*s from Redis \n",reply->len,reply->str);
+			LM_DBG("Received a status of %.*s from Redis \n",(unsigned)reply->len,reply->str);
 			if (reply_no)
 				*reply_no = 0;
 			freeReplyObject(reply);

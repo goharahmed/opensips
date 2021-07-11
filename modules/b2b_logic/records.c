@@ -30,9 +30,29 @@
 
 #include "../../mem/shm_mem.h"
 #include "../../ut.h"
+#include "../../parser/parse_uri.h"
+#include "../../pt.h"
 #include "../presence/hash.h"
 #include "../presence/utils_func.h"
 #include "records.h"
+#include "entity_storage.h"
+
+static b2bl_set_tracer_f set_tracer_func = NULL;
+static unsigned int tracer_msg_flag_filter = -1;
+
+int b2bl_register_set_tracer_cb( b2bl_set_tracer_f f,
+												unsigned int msg_flag_filter )
+{
+	if (set_tracer_func!=NULL) {
+		LM_BUG("b2bl tracing function registered more than once\n");
+		return -1;
+	}
+	set_tracer_func = f;
+	tracer_msg_flag_filter = msg_flag_filter;
+
+	return 0;
+}
+
 
 static void _print_entity(int index, b2bl_entity_id_t* e, int level)
 {
@@ -88,24 +108,26 @@ void b2bl_print_tuple(b2bl_tuple_t* tuple, int level)
 }
 
 /* Function that inserts a new b2b_logic record - the lock remains taken */
-b2bl_tuple_t* b2bl_insert_new(struct sip_msg* msg,
-		unsigned int hash_index, b2b_scenario_t* scenario,
-		str* args[], str* body, str* custom_hdrs, int local_index,
-		str** b2bl_key_s, int db_flag)
+b2bl_tuple_t* b2bl_insert_new(struct sip_msg* msg, unsigned int hash_index,
+	struct b2b_params *init_params, str* body, str* custom_hdrs, int local_index,
+	str** b2bl_key_s, int db_flag, int repl_flag)
 {
 	b2bl_tuple_t *it, *prev_it;
 	b2bl_tuple_t* tuple = NULL;
 	str* b2bl_key;
-	int i;
-	static char buf[256];
-	int buf_len= 255;
 	int size;
 	str extra_headers={0, 0};
 	str local_contact= server_address;
+	struct sip_uri *ct_uri = NULL;
+	str *ct_user = NULL;
 
 	if(msg)
 	{
-		if(get_local_contact(msg->rcv.bind_address, &local_contact)< 0)
+		if (contact_user && msg->to) {
+			ct_uri = parse_to_uri(msg);
+			ct_user = &ct_uri->user;
+		}
+		if (get_local_contact(msg->rcv.bind_address, ct_user, &local_contact) < 0)
 		{
 			LM_ERR("Failed to get received address\n");
 			local_contact= server_address;
@@ -125,7 +147,19 @@ b2bl_tuple_t* b2bl_insert_new(struct sip_msg* msg,
 	memcpy(tuple->local_contact.s, local_contact.s, local_contact.len);
 	tuple->local_contact.len = local_contact.len;
 
-	tuple->scenario = scenario;
+	if (init_params->id == B2B_TOP_HIDING_ID_PTR ||
+		init_params->id == B2B_INTERNAL_ID_PTR) {
+		tuple->scenario_id = init_params->id;
+	} else {
+		tuple->scenario_id = shm_malloc(sizeof(str) + init_params->id->len);
+		if (!tuple->scenario_id) {
+			LM_ERR("Out of shm memory!\n");
+			goto error;
+		}
+		tuple->scenario_id->s = (char*)(tuple->scenario_id + 1);
+		memcpy(tuple->scenario_id->s, init_params->id->s, init_params->id->len);
+		tuple->scenario_id->len = init_params->id->len;
+	}
 
 	if(msg)
 	{
@@ -147,18 +181,40 @@ b2bl_tuple_t* b2bl_insert_new(struct sip_msg* msg,
 			tuple->extra_headers->len = extra_headers.len;
 			pkg_free(extra_headers.s);
 		}
+	} else if (repl_flag == TUPLE_REPL_RECV && custom_hdrs->s) {
+		/* all extra headers are received for replicated tuples */
+		tuple->extra_headers = shm_malloc(sizeof(str) + custom_hdrs->len);
+		if(tuple->extra_headers == NULL)
+		{
+			LM_ERR("No more shared memory\n");
+			goto error;
+		}
+		tuple->extra_headers->s = (char*)tuple->extra_headers + sizeof(str);
+		memcpy(tuple->extra_headers->s, custom_hdrs->s, custom_hdrs->len);
+		tuple->extra_headers->len = custom_hdrs->len;
 	}
 
-	if(use_init_sdp || (scenario && scenario->use_init_sdp))
+	if(use_init_sdp || init_params->flags & B2BL_FLAG_USE_INIT_SDP)
 	{
-		if (!body && scenario && scenario->body.len)
+		if (init_params->init_body) {
+			tuple->init_sdp.s = shm_malloc(init_params->init_body->len);
+			if (!tuple->init_sdp.s) {
+				LM_ERR("no more shm memory!\n");
+				goto error;
+			}
+			memcpy(tuple->init_sdp.s, init_params->init_body->s,
+				init_params->init_body->len);
+			tuple->init_sdp.len = init_params->init_body->len;
+		}
+
+		if (!body && init_params->init_body)
 		{
-			body = &scenario->body;
+			body = init_params->init_body;
 			/* we also have to add the content type here */
 			tuple->extra_headers = (str *)shm_realloc(tuple->extra_headers,
 					sizeof(str) + extra_headers.len +
 					14/* "Content-Type: " */ + 2/* "\r\n\" */ +
-					scenario->body_type.len);
+					init_params->init_body_type->len);
 			if (!tuple->extra_headers)
 			{
 				LM_ERR("cannot add extra headers\n");
@@ -171,8 +227,8 @@ b2bl_tuple_t* b2bl_insert_new(struct sip_msg* msg,
 					"Content-Type: ", 14);
 			tuple->extra_headers->len += 14;
 			memcpy(tuple->extra_headers->s + tuple->extra_headers->len,
-					scenario->body_type.s, scenario->body_type.len);
-			tuple->extra_headers->len += scenario->body_type.len;
+					init_params->init_body_type->s, init_params->init_body_type->len);
+			tuple->extra_headers->len += init_params->init_body_type->len;
 			memcpy(tuple->extra_headers->s + tuple->extra_headers->len, "\r\n", 2);
 			tuple->extra_headers->len += 2;
 		}
@@ -188,62 +244,10 @@ b2bl_tuple_t* b2bl_insert_new(struct sip_msg* msg,
 		}
 	}
 
+	tuple->state = B2B_NOTDEF_STATE;
 
-	/* copy the function parameters that customize the scenario */
-	memset(tuple->scenario_params, 0, MAX_SCENARIO_PARAMS* sizeof(str));
-	if(scenario && args)
-	{
-		for(i = 0; i< scenario->param_no; i++)
-		{
-			if(args[i]==NULL)
-			{
-				LM_DBG("Fewer parameters, expected [%d] received [%d]\n",
-						scenario->param_no, i);
-				break;
-			}
-			/* must print the value of the argument */
-			if(msg && b2bl_caller != CALLER_MODULE)
-			{
-				buf_len= 255;
-				if(pv_printf(msg, (pv_elem_t*)args[i], buf, &buf_len)<0)
-				{
-					LM_ERR("cannot print the format\n");
-					goto error;
-				}
-
-				tuple->scenario_params[i].s = (char*)shm_malloc(buf_len);
-				if(tuple->scenario_params[i].s == NULL)
-				{
-					LM_ERR("No more shared memory\n");
-					goto error;
-				}
-				memcpy(tuple->scenario_params[i].s, buf, buf_len);
-				tuple->scenario_params[i].len = buf_len;
-				LM_DBG("Printed parameter [%.*s]\n", buf_len, buf);
-			}
-			else
-			{
-				if(args[i]->s==NULL || args[i]->len==0)
-				{
-					LM_DBG("Fewer parameters, expected [%d] received [%d]\n",
-							scenario->param_no, i);
-					break;
-				}
-
-				tuple->scenario_params[i].s = (char*)shm_malloc(args[i]->len);
-				if(tuple->scenario_params[i].s == NULL)
-				{
-					LM_ERR("No more shared memory\n");
-					goto error;
-				}
-				memcpy(tuple->scenario_params[i].s, args[i]->s, args[i]->len);
-				tuple->scenario_params[i].len = args[i]->len;
-			}
-		}
-	}
-	tuple->scenario_state = B2B_NOTDEF_STATE;
-
-	lock_get(&b2bl_htable[hash_index].lock);
+	if (repl_flag != TUPLE_REPL_RECV)
+		lock_get(&b2bl_htable[hash_index].lock);
 
 	if(local_index>= 0) /* a local index specified */
 	{
@@ -303,7 +307,7 @@ b2bl_tuple_t* b2bl_insert_new(struct sip_msg* msg,
 	LM_DBG("hash index [%d]:\n", hash_index);
 	for(it = b2bl_htable[hash_index].first; it; it=it->next)
 	{
-		LM_DBG("id [%d]", it->id);
+		LM_DBG("id [%d]\n", it->id);
 	}
 
 	b2bl_key = b2bl_generate_key(hash_index, tuple->id);
@@ -315,21 +319,72 @@ b2bl_tuple_t* b2bl_insert_new(struct sip_msg* msg,
 	tuple->key = b2bl_key;
 
 	*b2bl_key_s = b2bl_key;
+
 	tuple->db_flag = db_flag;
+	tuple->repl_flag = repl_flag;
+
+	tuple->hash_index = hash_index;
+
+	tuple->req_routeid = init_params->req_routeid;
+	tuple->reply_routeid = init_params->reply_routeid;
+
+	if (set_tracer_func && msg->msg_flags&tracer_msg_flag_filter)
+		tuple->tracer = *set_tracer_func();
 
 	LM_DBG("new tuple [%p]->[%.*s]\n", tuple, b2bl_key->len, b2bl_key->s);
 
 	return tuple;
 error:
 	if (tuple) {
+		if (tuple->init_sdp.s)
+			shm_free(tuple->init_sdp.s);
 		if (tuple->sdp.s)
 			shm_free(tuple->sdp.s);
 		shm_free(tuple);
 	}
-	lock_release(&b2bl_htable[hash_index].lock);
+	if (repl_flag != TUPLE_REPL_RECV)
+		lock_release(&b2bl_htable[hash_index].lock);
 	return 0;
 }
 
+b2bl_entity_id_t* b2bl_search_entity(b2bl_tuple_t* tuple, str* key, int src,
+	b2bl_entity_id_t*** head)
+{
+	int index;
+	b2bl_entity_id_t* e;
+
+	/* search the entity */
+	if(src == B2B_SERVER)
+		for (index = 0; index < MAX_B2BL_ENT; index++)
+		{
+			*head = &tuple->servers[index];
+			e= tuple->servers[index];
+			while (e)
+			{
+				LM_DBG("Key [%.*s]\n",e->key.len,e->key.s);
+				if (e->key.len == key->len &&
+					strncmp(e->key.s, key->s, key->len) == 0)
+					return e;
+				e = e->next;
+			}
+		}
+	else
+		for (index = 0; index < MAX_B2BL_ENT; index++)
+		{
+			*head = &tuple->clients[index];
+			e = tuple->clients[index];
+			while (e)
+			{
+				LM_DBG("Key [%.*s]\n",e->key.len,e->key.s);
+				if (e->key.len == key->len &&
+					strncmp(e->key.s, key->s, key->len) == 0)
+					return e;
+				e = e->next;
+			}
+		}
+
+	return e;
+}
 
 void unchain_ent(b2bl_entity_id_t *ent, b2bl_entity_id_t **first_ent)
 {
@@ -368,12 +423,14 @@ int b2bl_drop_entity(b2bl_entity_id_t* entity, b2bl_tuple_t* tuple)
 			{
 				case 0:
 					tuple->servers[0] = tuple->servers[1];
+					/* fall through */
 				case 1:
 					tuple->servers[1] = tuple->servers[2];
+					/* fall through */
 				case 2:
 					tuple->servers[2] = NULL;
 					for ( i=0 ; i<index ; i++ ) {
-						if (tuple->servers[index] == NULL)
+						if (tuple->servers[i] == NULL)
 							LM_ERR("inconsistent tuple [%p]->[%.*s]\n",
 							tuple, tuple->key->len, tuple->key->s);
 					}
@@ -391,12 +448,14 @@ int b2bl_drop_entity(b2bl_entity_id_t* entity, b2bl_tuple_t* tuple)
 			{
 				case 0:
 					tuple->clients[0] = tuple->clients[1];
+					/* fall through */
 				case 1:
 					tuple->clients[1] = tuple->clients[2];
+					/* fall through */
 				case 2:
 					tuple->clients[2] = NULL;
 					for ( i=0 ; i<index ; i++ ) {
-						if (tuple->clients[index] == NULL)
+						if (tuple->clients[i] == NULL)
 							LM_ERR("inconsistent tuple [%p]->[%.*s]\n",
 							tuple, tuple->key->len, tuple->key->s);
 					}
@@ -410,10 +469,13 @@ int b2bl_drop_entity(b2bl_entity_id_t* entity, b2bl_tuple_t* tuple)
 	return found;
 }
 
-void b2bl_remove_single_entity(b2bl_entity_id_t *entity, b2bl_entity_id_t **head)
+void b2bl_remove_single_entity(b2bl_entity_id_t *entity, b2bl_entity_id_t **head,
+	unsigned int hash_index)
 {
 	unchain_ent(entity, head);
-	b2b_api.entity_delete(entity->type, &entity->key, entity->dlginfo, 0);
+	b2bl_htable[hash_index].locked_by = process_no;
+	b2b_api.entity_delete(entity->type, &entity->key, entity->dlginfo, 0, 1);
+	b2bl_htable[hash_index].locked_by = -1;
 	LM_DBG("destroying dlginfo=[%p]\n", entity->dlginfo);
 	if(entity->dlginfo)
 		shm_free(entity->dlginfo);
@@ -422,7 +484,8 @@ void b2bl_remove_single_entity(b2bl_entity_id_t *entity, b2bl_entity_id_t **head
 	return;
 }
 
-void b2bl_delete_entity(b2bl_entity_id_t* entity, b2bl_tuple_t* tuple)
+void b2bl_delete_entity(b2bl_entity_id_t* entity, b2bl_tuple_t* tuple,
+	unsigned int hash_index, int b2be_del)
 {
 	unsigned int i;
 	int found = 0;
@@ -440,9 +503,13 @@ void b2bl_delete_entity(b2bl_entity_id_t* entity, b2bl_tuple_t* tuple)
 	{
 		LM_DBG("delete entity [%p]->[%.*s] from tuple [%.*s]\n",
 			entity, entity->key.len, entity->key.s, tuple->key->len, tuple->key->s);
-		b2b_api.entity_delete(entity->type, &entity->key, entity->dlginfo, 1);
+		if (b2be_del) {
+			b2bl_htable[hash_index].locked_by = process_no;
+			b2b_api.entity_delete(entity->type, &entity->key, entity->dlginfo, 1, 1);
+			b2bl_htable[hash_index].locked_by = -1;
+		}
 	}
-	else
+	else if (entity->key.len)
 	{
 		LM_WARN("entity [%p]->[%.*s] not found for tuple [%.*s]\n",
 			entity, entity->key.len, entity->key.s, tuple->key->len, tuple->key->s);
@@ -454,6 +521,9 @@ void b2bl_delete_entity(b2bl_entity_id_t* entity, b2bl_tuple_t* tuple)
 	for(i = 0; i< MAX_BRIDGE_ENT; i++)
 		if(tuple->bridge_entities[i] == entity)
 			tuple->bridge_entities[i] = NULL;
+
+	if (tuple->bridge_initiator == entity)
+		tuple->bridge_initiator = NULL;
 
 /*	if(entity->peer && entity->peer->peer==entity)
 		entity->peer->peer = NULL;
@@ -539,12 +609,12 @@ int b2bl_add_server(b2bl_tuple_t* tuple, b2bl_entity_id_t* entity)
 
 
 void b2bl_delete(b2bl_tuple_t* tuple, unsigned int hash_index,
-		int not_del_b2be)
+		int db_del, int del_entities)
 {
 	b2bl_entity_id_t *e;
-	int i;
 	int index;
 	b2bl_cb_params_t cb_params;
+	struct b2b_ctx_val *v;
 
 	LM_DBG("Delete record [%p]->[%.*s], hash_index=[%d], local_index=[%d]\n",
 			tuple, tuple->key->len, tuple->key->s, hash_index, tuple->id);
@@ -553,7 +623,7 @@ void b2bl_delete(b2bl_tuple_t* tuple, unsigned int hash_index,
 	 * razvanc: if the tuple is not actually deleted, we do not have to call
 	 * the DESTROY callback
 	 */
-	if(!not_del_b2be && tuple->cbf && tuple->cb_mask&B2B_DESTROY_CB)
+	if(db_del && tuple->cbf && tuple->cb_mask&B2B_DESTROY_CB)
 	{
 		memset(&cb_params, 0, sizeof(b2bl_cb_params_t));
 		cb_params.param = tuple->cb_param;
@@ -563,7 +633,7 @@ void b2bl_delete(b2bl_tuple_t* tuple, unsigned int hash_index,
 		cb_params.entity = 0;
 		tuple->cbf(&cb_params, B2B_DESTROY_CB);
 	}
-	if(!not_del_b2be)
+	if(db_del)
 		b2bl_db_delete(tuple);
 	if(b2bl_htable[hash_index].first == tuple)
 	{
@@ -584,8 +654,11 @@ void b2bl_delete(b2bl_tuple_t* tuple, unsigned int hash_index,
 		e = tuple->servers[index];
 		if (e)
 		{
-			if (e->key.s && e->key.len && !not_del_b2be)
-				b2b_api.entity_delete(e->type, &e->key, e->dlginfo, 0);
+			if (e->key.s && e->key.len && del_entities) {
+				b2bl_htable[hash_index].locked_by = process_no;
+				b2b_api.entity_delete(e->type, &e->key, e->dlginfo, 0, 1);
+				b2bl_htable[hash_index].locked_by = -1;
+			}
 			if(e->dlginfo)
 				shm_free(e->dlginfo);
 			shm_free(e);
@@ -593,25 +666,26 @@ void b2bl_delete(b2bl_tuple_t* tuple, unsigned int hash_index,
 		e = tuple->clients[index];
 		if (e)
 		{
-			if (e->key.s && e->key.len && !not_del_b2be)
-				b2b_api.entity_delete(e->type, &e->key, e->dlginfo, 0);
+			if (e->key.s && e->key.len && del_entities) {
+				b2bl_htable[hash_index].locked_by = process_no;
+				b2b_api.entity_delete(e->type, &e->key, e->dlginfo, 0, 1);
+				b2bl_htable[hash_index].locked_by = -1;
+			}
 			if(e->dlginfo)
 				shm_free(e->dlginfo);
 			shm_free(e);
 		}
 	}
 	/* clean up all entities in b2b_entities from db */
-	if(!not_del_b2be)
+	if(del_entities)
 		b2b_api.entities_db_delete(*tuple->key);
 
 //	if(tuple->bridge_entities[1] && tuple->bridge_entities[1]->key.s != NULL)
 //		shm_free(tuple->bridge_entities[1]->key.s);
 
-	for(i = 0; i< MAX_SCENARIO_PARAMS; i++)
-	{
-		if(tuple->scenario_params[i].s)
-			shm_free(tuple->scenario_params[i].s);
-	}
+	if(tuple->scenario_id != B2B_TOP_HIDING_ID_PTR &&
+		tuple->scenario_id != B2B_INTERNAL_ID_PTR)
+		shm_free(tuple->scenario_id);
 
 	if(tuple->key)
 		shm_free(tuple->key);
@@ -624,6 +698,15 @@ void b2bl_delete(b2bl_tuple_t* tuple, unsigned int hash_index,
 
 	if (tuple->sdp.s && tuple->sdp.s != tuple->b1_sdp.s)
 		shm_free(tuple->sdp.s);
+
+	while (tuple->vals) {
+		v = tuple->vals;
+		tuple->vals = tuple->vals->next;
+		shm_free(v);
+	}
+
+	if (tuple->tracer.param && tuple->tracer.f_freep)
+		tuple->tracer.f_freep( tuple->tracer.param );
 
 	shm_free(tuple);
 }
@@ -733,7 +816,7 @@ void destroy_b2bl_htable(void)
 
 		while(tuple)
 		{
-			b2bl_delete(tuple, i, 1);
+			b2bl_delete(tuple, i, 0, 0);
 			tuple = b2bl_htable[i].first;
 		}
 	}
@@ -833,7 +916,7 @@ int b2b_extra_headers(struct sip_msg* msg, str* b2bl_key, str* custom_hdrs,
 	for(i = 0; i< hdrs_no; i++)
 		len += hdrs[i]->len;
 
-	if(init_callid_hdr.len && msg && msg->callid)
+	if(init_callid_hdr.len && msg->callid)
 		len+= init_callid_hdr.len + msg->callid->len;
 
 	if(custom_hdrs && custom_hdrs->s && custom_hdrs->len)
@@ -865,7 +948,7 @@ int b2b_extra_headers(struct sip_msg* msg, str* b2bl_key, str* custom_hdrs,
 		p += custom_hdrs_len;
 	}
 
-	if(init_callid_hdr.s && msg && msg->callid)
+	if(init_callid_hdr.s && msg->callid)
 	{
 		memcpy(p, init_callid_hdr.s, init_callid_hdr.len);
 		p += init_callid_hdr.len;

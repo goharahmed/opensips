@@ -45,18 +45,31 @@ struct sl_binds slb;
 int sl_loaded = 0;
 int tm_loaded = 0;
 
-int sig_send_reply(struct sip_msg* msg, char* str1, char* str2);
-int sig_send_reply_mod(struct sip_msg* msg, int code, str* reason, str* to_tag);
-static int fixup_sig_send_reply(void** param, int param_no);
+int sig_send_reply(struct sip_msg* msg, int* code_i, const str* code_s);
+int sig_send_reply_mod(struct sip_msg* msg, int code, const str* reason,
+    str* to_tag);
+static int fixup_sig_send_reply(void** param);
 static int mod_init(void);
 
+static int pv_get_local_totag(struct sip_msg *msg, pv_param_t *param,
+		pv_value_t *val);
+
+
 /** exported commands */
-static cmd_export_t cmds[]=
-{
-	{"send_reply",(cmd_function)sig_send_reply,	2,	fixup_sig_send_reply,
-		0, REQUEST_ROUTE | ERROR_ROUTE | FAILURE_ROUTE},
-	{"load_sig",	(cmd_function)load_sig,				1,	0,	0,			0},
-	{0,						0,	0,						0,	0,				0}
+static cmd_export_t cmds[]={
+	{"send_reply",(cmd_function)sig_send_reply, {	
+		{CMD_PARAM_INT,fixup_sig_send_reply,0},
+		{CMD_PARAM_STR,0,0}, {0,0,0}},
+		REQUEST_ROUTE | ERROR_ROUTE | FAILURE_ROUTE},
+	{"load_sig", (cmd_function)load_sig, {{0,0,0}},0},
+	{0,0,{{0,0,0}},0}
+};
+
+/** pseudo-variables exported by the module */
+static pv_export_t mod_pvars[] = {
+	{ {"sig_local_totag", sizeof("sig_local_totag") - 1}, 5003,
+		pv_get_local_totag, 0, 0, 0, 0, 0},
+	{ {0, 0}, 0, 0, 0, 0, 0, 0, 0 }
 };
 
 static dep_export_t deps = {
@@ -76,19 +89,22 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,           /* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,			/* dlopen flags */
+	0,							/* load function */
 	&deps,                      /* OpenSIPS module dependencies */
 	cmds,						/* exported functions */
 	0,							/* exported async functions */
 	0,							/* exported parameters */
 	0,							/* exported statistics */
 	0,							/* exported MI functions */
-	0,							/* exported pseudo-variables */
+	mod_pvars,					/* exported pseudo-variables */
 	0,							/* exported transformations */
 	0,							/* extra processes */
+	0,							/* module pre-initialization function */
 	mod_init,					/* module initialization function */
 	(response_function) 0,      /* response handling function */
 	(destroy_function)  0,      /* destroy function */
-	0                           /* per-child init function */
+	0,                          /* per-child init function */
+	0                           /* reload confirm function */
 };
 
 /**
@@ -101,7 +117,7 @@ static int mod_init(void)
 	LM_NOTICE("initializing module ...\n");
 
 	/* load TM API*/
-	if ( (load_tm=(load_tm_f)find_export("load_tm", 0, 0)))
+	if ( (load_tm=(load_tm_f)find_export("load_tm", 0)))
 	{
 		if (load_tm( &tmb )==-1)
 		{
@@ -112,7 +128,7 @@ static int mod_init(void)
 	}
 
 	/* load SL API */
-	if ((load_sl=(load_sl_f)find_export("load_sl", 0, 0)))
+	if ((load_sl=(load_sl_f)find_export("load_sl", 0)))
 	{
 		if (load_sl( &slb )==-1)
 		{
@@ -136,37 +152,17 @@ static int mod_init(void)
  * sig_send_reply - function to be called from script to send appropiate
  * replies (statefull or stateless)
  * */
-int sig_send_reply(struct sip_msg* msg, char* str1, char* str2)
+int sig_send_reply(struct sip_msg* msg, int* code_i, const str* code_s)
 {
-	str code_s;
-	unsigned int code_i;
-
-	if(((pv_elem_p)str1)->spec.getf!=NULL)
-	{
-		if(pv_printf_s(msg, (pv_elem_p)str1, &code_s)!=0)
-			return -1;
-		if(str2int(&code_s, &code_i)!=0 || code_i<100 || code_i>699)
-			return -1;
-	} else {
-		code_i = ((pv_elem_p)str1)->spec.pvp.pvn.u.isname.name.n;
-	}
-
-	if(((pv_elem_p)str2)->spec.getf!=NULL)
-	{
-		if(pv_printf_s(msg, (pv_elem_p)str2, &code_s)!=0 || code_s.len <=0)
-			return -1;
-	} else {
-		code_s = ((pv_elem_p)str2)->text;
-	}
-
-	return sig_send_reply_mod(msg, code_i, &code_s, 0);
+	return sig_send_reply_mod(msg, *code_i, code_s, 0);
 }
 
 /*
  * sig_send_reply_mod function - sends stateless or staefull reply depending on
  * whether a transaction was created and on which modules are loaded( tm, sl).
  * */
-int sig_send_reply_mod(struct sip_msg* msg, int code, str* reason, str* to_tag)
+int sig_send_reply_mod(struct sip_msg* msg, int code,
+    const str* reason, str* to_tag)
 {
 	struct cell * t;
 
@@ -202,66 +198,63 @@ int sig_send_reply_mod(struct sip_msg* msg, int code, str* reason, str* to_tag)
 
 sl_reply:
 
-	if(slb.reply(msg, code, reason)< 0)
+	if(slb.reply(msg, code, reason, to_tag)< 0)
 	{
 		LM_ERR("failed to send reply with sl module\n");
 		return -1;
-	}
-	if(to_tag)
-	{
-		if(slb.get_totag(msg, to_tag)< 0)
-		{
-			LM_ERR("failed to get to_tag from sl\n");
-			return -1;
-		}
 	}
 
 	return 1;
 }
 
+
+/*
+ * sig_gen_totag_mod function - generates the To-tag for the given request,
+ * according to the underlaying signaling module( tm or sl).
+ * */
+static int sig_gen_totag_mod(struct sip_msg* msg, str* to_tag)
+{
+	struct cell * t;
+
+	/* search transaction */
+	if (tm_loaded) {
+		t = tmb.t_gett();
+		if (t==NULL || t==T_UNDEFINED) {
+			if (!sl_loaded) {
+				LM_ERR("sl module not loaded and no transaction found for the"
+						" message. Can not generate totag!\n");
+				return -1;
+			}
+			/* fallback to stateless */
+		} else {
+			/* do it statefull */
+			if (tmb.t_gen_totag(msg, to_tag)< 0) {
+				LM_ERR("failed to generate totag with tm module\n");
+				return -1;
+			}
+			return 1;
+		}
+	}
+
+	/* do it stateless */
+	if (slb.gen_totag(msg, to_tag)< 0) {
+		LM_ERR("failed to generate totag with sl module\n");
+		return -1;
+	}
+
+	return 1;
+}
+
+
 /* *
  * fixup_sig_send_reply
  */
-static int fixup_sig_send_reply(void** param, int param_no)
+static int fixup_sig_send_reply(void** param)
 {
-	pv_elem_t *model=NULL;
-	str s;
-
-	/* convert to str */
-	s.s = (char*)*param;
-	s.len = strlen(s.s);
-
-	model=NULL;
-	if (param_no==1 || param_no==2)
-	{
-		if(s.len==0)
-		{
-			LM_ERR("no param %d!\n", param_no);
-			return E_UNSPEC;
-		}
-
-		if(pv_parse_format(&s ,&model) || model==NULL)
-		{
-			LM_ERR("wrong format [%s] for param no %d!\n", s.s, param_no);
-			return E_UNSPEC;
-		}
-		if(model->spec.getf==NULL)
-		{
-			if(param_no==1)
-			{
-				if(str2int(&s,
-					(unsigned int*)&model->spec.pvp.pvn.u.isname.name.n)!=0
-					   || model->spec.pvp.pvn.u.isname.name.n<100
-					   || model->spec.pvp.pvn.u.isname.name.n>699)
-				{
-					LM_ERR("wrong value [%s] for param no %d!\n",
-						s.s, param_no);
-					LM_ERR("allowed values: 1xx - 6xx only!\n");
-					return E_UNSPEC;
-				}
-			}
-		}
-		*param = (void*)model;
+	if (*(int*)*param < 100 || *(int*)*param > 699) {
+		LM_ERR("wrong code: %d, allowed values: 1xx - 6xx only!\n",
+			*(int*)*param);
+		return E_UNSPEC;
 	}
 
 	return 0;
@@ -273,7 +266,36 @@ int load_sig( struct sig_binds *sigb)
 		return -1;
 
 	sigb->reply = sig_send_reply_mod;
+	sigb->gen_totag = sig_gen_totag_mod;
 
 	return 1;
 }
+
+
+static int pv_get_local_totag(struct sip_msg *msg, pv_param_t *param,
+															pv_value_t *val)
+{
+	str ttag;
+
+	if (param == NULL || val == NULL) {
+		LM_ERR("bad input params!\n");
+		return -1;
+	}
+
+	if (msg->first_line.type!=SIP_REQUEST) {
+		LM_ERR("SIP message is not a request\n");
+		return -1;
+	}
+
+	if (sig_gen_totag_mod(msg, &ttag)!=1) {
+		LM_ERR("failed to generated local to-tag\n");
+		return -1;
+	}
+
+	val->rs = ttag;
+	val->flags = PV_VAL_STR;
+
+	return 0;
+}
+
 

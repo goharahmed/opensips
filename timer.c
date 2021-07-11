@@ -53,6 +53,7 @@
 #include "config.h"
 #include "sr_module.h"
 #include "daemonize.h"
+#include "cfg_reload.h"
 #include "mem/mem.h"
 #include "mem/shm_mem.h"
 
@@ -230,36 +231,29 @@ int register_utimer(char *label, utimer_function f, void* param,
 
 void route_timer_f(unsigned int ticks, void* param)
 {
-	struct action* a = (struct action*)param;
-	static struct sip_msg* req= NULL;
+	struct script_timer_route *tr = (struct script_timer_route *)param;
+	struct script_route sr = {tr->name, tr->a};
+	struct sip_msg *req;
+	int old_route_type;
 
-	if(req == NULL)
-	{
-		req = (struct sip_msg*)pkg_malloc(sizeof(struct sip_msg));
-		if(req == NULL)
-		{
-			LM_ERR("No more memory\n");
-			return;
-		}
-		memset(req, 0, sizeof(struct sip_msg));
-		req->first_line.type = SIP_REQUEST;
-		req->first_line.u.request.method.s= "DUMMY";
-		req->first_line.u.request.method.len= 5;
-		req->first_line.u.request.uri.s= "sip:user@domain.com";
-		req->first_line.u.request.uri.len= 19;
-		req->rcv.src_ip.af = AF_INET;
-		req->rcv.dst_ip.af = AF_INET;
-	}
-
-	if(a == NULL) {
-		LM_ERR("NULL action\n");
+	if(sr.a == NULL) {
+		LM_ERR("NULL actions for timer_route '%s'\n", sr.name);
 		return;
 	}
 
-	run_top_route(a, req);
+	req = get_dummy_sip_msg();
+	if(req == NULL) {
+		LM_ERR("No more memory\n");
+		return;
+	}
+
+	swap_route_type(old_route_type, TIMER_ROUTE);
+	run_top_route(sr, req);
+	set_route_type(old_route_type);
 
 	/* clean whatever extra structures were added by script functions */
-	free_sip_msg(req);
+	release_dummy_sip_msg(req);
+
 	/* remove all added AVP - here we use all the time the default AVP list */
 	reset_avps( );
 }
@@ -270,16 +264,16 @@ int register_route_timers(void)
 	struct os_timer* t;
 	int i;
 
-	if(timer_rlist[0].a == NULL)
+	if(sroutes->timer[0].a == NULL)
 		return 0;
 
 	/* register the routes */
 	for(i = 0; i< TIMER_RT_NO; i++)
 	{
-		if(timer_rlist[i].a == NULL)
+		if(sroutes->timer[i].a == NULL)
 			return 0;
-		t = new_os_timer( "timer_route", 0, route_timer_f, timer_rlist[i].a,
-				timer_rlist[i].interval);
+		t = new_os_timer( "timer_route", 0, route_timer_f, &sroutes->timer[i],
+				sroutes->timer[i].interval);
 		if (t==NULL)
 			return E_OUT_OF_MEM;
 
@@ -313,7 +307,7 @@ utime_t get_uticks(void)
 
 
 
-static inline void timer_ticker(struct os_timer *timer_list)
+static inline void timer_ticker(struct os_timer *tlist)
 {
 	struct os_timer* t;
 	unsigned int j;
@@ -325,7 +319,7 @@ static inline void timer_ticker(struct os_timer *timer_list)
 	   taken to run handlers) -bogdan */
 	j = *jiffies;
 
-	for (t=timer_list;t; t=t->next){
+	for (t=tlist;t; t=t->next){
 		if (j < t->expires)
 			continue;
 
@@ -367,7 +361,7 @@ again:
 
 
 
-static inline void utimer_ticker(struct os_timer *utimer_list)
+static inline void utimer_ticker(struct os_timer *utlist)
 {
 	struct os_timer* t;
 	utime_t uj;
@@ -376,7 +370,7 @@ static inline void utimer_ticker(struct os_timer *utimer_list)
 	/* see comment on timer_ticket */
 	uj = *ujiffies;
 
-	for ( t=utimer_list ; t ; t=t->next){
+	for ( t=utlist ; t ; t=t->next){
 		if (uj < t->expires)
 			continue;
 
@@ -651,12 +645,16 @@ inline static int handle_io(struct fd_map* fm, int idx,int event_type)
 	int n=0;
 
 	pt_become_active();
+
+	pre_run_handle_script_reload(fm->app_flags);
+
 	switch(fm->type){
 		case F_TIMER_JOB:
 			handle_timer_job();
 			break;
 		case F_SCRIPT_ASYNC:
-			async_script_resume_f( fm->fd, fm->data);
+			async_script_resume_f( fm->fd, fm->data,
+				(event_type==IO_WATCH_TIMEOUT)?1:0 );
 			break;
 		case F_FD_ASYNC:
 			async_fd_resume( fm->fd, fm->data);
@@ -679,6 +677,8 @@ inline static int handle_io(struct fd_map* fm, int idx,int event_type)
 		if (reactor_is_empty())
 			dynamic_process_final_exit();
 	}
+
+	post_run_handle_script_reload();
 
 	pt_become_idle();
 	return n;
@@ -716,7 +716,8 @@ static int fork_dynamic_timer_process(void *si_filter)
 {
 	int p_id;
 
-	if ((p_id=internal_fork( "Timer handler", OSS_PROC_DYNAMIC,TYPE_TIMER))<0){
+	if ((p_id=internal_fork( "Timer handler",
+	OSS_PROC_DYNAMIC|OSS_PROC_NEEDS_SCRIPT, TYPE_TIMER))<0){
 		LM_CRIT("cannot fork Timer handler process\n");
 		return -1;
 	} else if (p_id==0) {
@@ -791,7 +792,8 @@ int start_timer_extra_processes(int *chd_rank)
 	for( i=0 ; i<timer_workers_no ; i++ ) {
 
 		(*chd_rank)++;
-		if ( (p_id=internal_fork( "Timer handler", 0, TYPE_TIMER))<0 ) {
+		if ( (p_id=internal_fork( "Timer handler", OSS_PROC_NEEDS_SCRIPT,
+		TYPE_TIMER))<0 ) {
 			LM_CRIT("cannot fork Timer handler process\n");
 			return -1;
 		} else if (p_id==0) {
@@ -804,7 +806,7 @@ int start_timer_extra_processes(int *chd_rank)
 					goto error;
 				}
 
-				report_conditional_status( 1, 0);
+				report_conditional_status( (!no_daemon_mode), 0);
 
 				/* launch the reactor */
 				reactor_main_loop( 1/*timeout in sec*/, error , );

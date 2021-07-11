@@ -118,7 +118,7 @@ static struct dlg_binds dlg_binds;
 /* module specific functions */
 static int sngtc_offer(struct sip_msg *msg);
 static int w_sngtc_callee_answer(struct sip_msg *msg,
-                                 char *gp_ip_a, char *gp_ip_b);
+                                 str *gp_ip_a, str *gp_ip_b);
 static int sngtc_callee_answer(struct sip_msg *msg);
 static int sngtc_caller_answer(struct sip_msg *msg);
 
@@ -134,17 +134,15 @@ static param_export_t params[] = {
 };
 
 static cmd_export_t cmds[] = {
-	{ "sngtc_offer",         (cmd_function)sngtc_offer, 0, 0, 0,
-		REQUEST_ROUTE|ONREPLY_ROUTE },
-	{ "sngtc_callee_answer", (cmd_function)w_sngtc_callee_answer, 0, 0, 0,
-		REQUEST_ROUTE|ONREPLY_ROUTE },
-	{ "sngtc_callee_answer", (cmd_function)w_sngtc_callee_answer, 1,
-	    fixup_sgp_null, 0, REQUEST_ROUTE|ONREPLY_ROUTE },
-	{ "sngtc_callee_answer", (cmd_function)w_sngtc_callee_answer, 2,
-	    fixup_sgp_sgp, 0, REQUEST_ROUTE|ONREPLY_ROUTE },
-	{ "sngtc_caller_answer", (cmd_function)sngtc_caller_answer, 0, 0, 0,
-		REQUEST_ROUTE|ONREPLY_ROUTE },
-	{ 0, 0, 0, 0, 0, 0 }
+	{"sngtc_offer", (cmd_function)sngtc_offer, {{0,0,0}},
+		REQUEST_ROUTE|ONREPLY_ROUTE},
+	{"sngtc_caller_answer", (cmd_function)sngtc_caller_answer, {{0,0,0}},
+		REQUEST_ROUTE|ONREPLY_ROUTE},
+	{"sngtc_callee_answer", (cmd_function)w_sngtc_callee_answer, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR,0,0}, {0,0,0}},
+		REQUEST_ROUTE|ONREPLY_ROUTE},
+	{0,0,{{0,0,0}},0}
 };
 
 static dep_export_t deps = {
@@ -162,6 +160,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,
+	0,
 	&deps,           /* OpenSIPS module dependencies */
 	cmds,
 	0,
@@ -171,10 +170,12 @@ struct module_exports exports= {
 	0,
 	0,				/* exported transformations */
 	procs,
+	0,
 	mod_init,
 	(response_function) 0,
 	(destroy_function)mod_destroy,
-	child_init
+	child_init,
+	0               /* reload confirm function */
 };
 
 int sng_create_rtp(void * usr_priv, sngtc_codec_request_leg_t *codec_reg_leg,
@@ -294,6 +295,7 @@ void sngtc_dlg_terminated(struct dlg_cell *dlg, int type,
 static int mod_init(void)
 {
 	int i;
+	int max_processes = count_child_processes();
 
 	LM_INFO("initializing module\n");
 
@@ -309,9 +311,9 @@ static int mod_init(void)
 		return -1;
 	}
 
-	LM_DBG("Children: %d\n", counted_max_processes);
+	LM_DBG("Children: %d\n", max_processes);
 
-    sip_workers_pipes = pkg_malloc(2 * counted_max_processes *
+    sip_workers_pipes = pkg_malloc(2 * max_processes *
 	                                sizeof(*sip_workers_pipes));
     if (!sip_workers_pipes) {
         LM_ERR("Not enough pkg mem\n");
@@ -325,7 +327,7 @@ static int mod_init(void)
 
 	LM_DBG("Sangoma pipe: [%d %d]\n", sangoma_pipe[0], sangoma_pipe[1]);
 
-	for (i = 0; i < counted_max_processes; i++) {
+	for (i = 0; i < max_processes; i++) {
 		if (pipe(sip_workers_pipes + 2 * i) != 0) {
 			LM_ERR("Failed to create pipe for UDP receiver %d\n", i);
 			return -1;
@@ -363,7 +365,7 @@ static int child_init(int rank)
 {
 	LM_DBG("init child\n");
 
-	if (rank <= PROC_MAIN)
+	if (rank < 1 )
 		return 0;
 
 	pipe_index = 2 * (process_no);
@@ -435,14 +437,14 @@ int store_sngtc_info(struct dlg_cell *dlg, str *body)
 	memset(info, 0, sizeof(*info));
 
 	lock_init(&info->lock);
-	info->caller_sdp.s = shm_malloc(body->len + 2);
+	info->caller_sdp.s = shm_malloc(body->len);
 	if (!info->caller_sdp.s) {
 		LM_ERR("no more shm\n");
 		goto exit;
 	}
 
-	info->caller_sdp.len = body->len + 2; /* SDP parser needs starting CRLF */
-	memcpy(info->caller_sdp.s, body->s - 2, info->caller_sdp.len);
+	info->caller_sdp.len = body->len; /* SDP parser needs starting CRLF */
+	memcpy(info->caller_sdp.s, body->s, info->caller_sdp.len);
 
 	st.s   = (void *)&info;
 	st.len = sizeof(void *);
@@ -1202,27 +1204,21 @@ out:
 }
 
 static int w_sngtc_callee_answer(struct sip_msg *msg,
-                                 char *gp_ip_a, char *gp_ip_b)
+                                 str *gp_ip_a, str *gp_ip_b)
 {
 	if (!gp_ip_a) {
 		card_ip_a.s = card_ip_b.s = NULL;
 		goto out;
 	}
 
-	if (fixup_get_svalue(msg, (gparam_p)gp_ip_a, &card_ip_a) != 0) {
-		LM_ERR("failed to get fixup value for caller: bad pvar\n");
-		return SNGTC_ERR;
-	}
+	card_ip_a = *gp_ip_a;
 
 	if (!gp_ip_b) {
 		card_ip_b.s = NULL;
 		goto out;
 	}
 
-	if (fixup_get_svalue(msg, (gparam_p)gp_ip_b, &card_ip_b) != 0) {
-		LM_ERR("failed to get fixup value for callee: bad pvar\n");
-		return SNGTC_ERR;
-	}
+	card_ip_b = *gp_ip_b;
 
 out:
 	return sngtc_callee_answer(msg);

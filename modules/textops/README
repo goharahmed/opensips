@@ -103,7 +103,7 @@ From: medabeda
    Searches for the re in the message.
 
    Meaning of the parameters is as follows:
-     * re - Regular expression.
+     * re (string) - Regular expression.
 
    This function can be used from REQUEST_ROUTE, ONREPLY_ROUTE,
    FAILURE_ROUTE, BRANCH_ROUTE.
@@ -118,7 +118,7 @@ if ( search("[Ss][Ii][Pp]") ) { /*....*/ };
    Searches for the re in the body of the message.
 
    Meaning of the parameters is as follows:
-     * re - Regular expression.
+     * re (string) - Regular expression.
 
    This function can be used from REQUEST_ROUTE, ONREPLY_ROUTE,
    FAILURE_ROUTE, BRANCH_ROUTE.
@@ -133,8 +133,8 @@ if ( search_body("[Ss][Ii][Pp]") ) { /*....*/ };
    Searches for the first match of re and appends txt after it.
 
    Meaning of the parameters is as follows:
-     * re - Regular expression.
-     * txt - String to be appended.
+     * re (string) - Regular expression.
+     * txt (string) - String to be appended.
 
    This function can be used from REQUEST_ROUTE, ONREPLY_ROUTE,
    FAILURE_ROUTE, BRANCH_ROUTE.
@@ -150,8 +150,8 @@ search_append("[Oo]pen[Ss]er", " SIP Proxy");
    and appends txt after it.
 
    Meaning of the parameters is as follows:
-     * re - Regular expression.
-     * txt - String to be appended.
+     * re (string) - Regular expression.
+     * txt (string) - String to be appended.
 
    This function can be used from REQUEST_ROUTE, ONREPLY_ROUTE,
    FAILURE_ROUTE, BRANCH_ROUTE.
@@ -166,8 +166,8 @@ search_append_body("[Oo]pen[Ss]er", " SIP Proxy");
    Replaces the first occurrence of re with txt.
 
    Meaning of the parameters is as follows:
-     * re - Regular expression.
-     * txt - String.
+     * re (string) - Regular expression.
+     * txt (string)
 
    This function can be used from REQUEST_ROUTE, ONREPLY_ROUTE,
    FAILURE_ROUTE, BRANCH_ROUTE.
@@ -183,8 +183,8 @@ replace("opensips", "Open SIP Server");
    with txt.
 
    Meaning of the parameters is as follows:
-     * re - Regular expression.
-     * txt - String.
+     * re (string) - Regular expression.
+     * txt (string)
 
    This function can be used from REQUEST_ROUTE, ONREPLY_ROUTE,
    FAILURE_ROUTE, BRANCH_ROUTE.
@@ -199,8 +199,8 @@ replace_body("opensips", "Open SIP Server");
    Replaces all occurrence of re with txt.
 
    Meaning of the parameters is as follows:
-     * re - Regular expression.
-     * txt - String.
+     * re - (string) Regular expression.
+     * txt (string)
 
    This function can be used from REQUEST_ROUTE, ONREPLY_ROUTE,
    FAILURE_ROUTE, BRANCH_ROUTE.
@@ -216,8 +216,8 @@ replace_all("opensips", "Open SIP Server");
    txt. Matching is done on a per-line basis.
 
    Meaning of the parameters is as follows:
-     * re - Regular expression.
-     * txt - String.
+     * re (string) - Regular expression.
+     * txt (string)
 
    This function can be used from REQUEST_ROUTE, ONREPLY_ROUTE,
    FAILURE_ROUTE, BRANCH_ROUTE.
@@ -233,8 +233,8 @@ replace_body_all("opensips", "Open SIP Server");
    txt. Matching is done over the whole body.
 
    Meaning of the parameters is as follows:
-     * re - Regular expression.
-     * txt - String.
+     * re (string) - Regular expression.
+     * txt (string)
 
    This function can be used from REQUEST_ROUTE, ONREPLY_ROUTE,
    FAILURE_ROUTE, BRANCH_ROUTE.
@@ -251,9 +251,10 @@ if(has_body() && replace_body_atonce("^.+$", ""))
    Replaces re with repl (sed or perl like).
 
    Meaning of the parameters is as follows:
-     * '/re/repl/flags' - sed like regular expression. flags can
-       be a combination of i (case insensitive), g (global) or s
-       (match newline don't treat it as end of line).
+     * '/re/repl/flags' (string) - sed like regular expression.
+       flags can be a combination of i (case insensitive), g
+       (global) or s (match newline don't treat it as end of
+       line).
        're' - is regular expression
        'repl' - is replacement string - may contain
        pseudo-variables
@@ -280,9 +281,10 @@ if ( subst('/^To:(.*)sip:[^@]*@[a-zA-Z0-9.]+(.*)$/t:\1$avp(sip_address)\
    works only on the uri)
 
    Meaning of the parameters is as follows:
-     * '/re/repl/flags' - sed like regular expression. flags can
-       be a combination of i (case insensitive), g (global) or s
-       (match newline don't treat it as end of line).
+     * '/re/repl/flags' (string) - sed like regular expression.
+       flags can be a combination of i (case insensitive), g
+       (global) or s (match newline don't treat it as end of
+       line).
        're' - is regular expression
        'repl' - is replacement string - may contain
        pseudo-variables
@@ -311,9 +313,10 @@ if (subst_uri('/^sip:([0-9]+)@(.*)$/sip:$avp(uri_prefix)\1@\2;orig_uri=\
    works only on the user portion of the uri)
 
    Meaning of the parameters is as follows:
-     * '/re/repl/flags' - sed like regular expression. flags can
-       be a combination of i (case insensitive), g (global) or s
-       (match newline don't treat it as end of line).
+     * '/re/repl/flags' (string) - sed like regular expression.
+       flags can be a combination of i (case insensitive), g
+       (global) or s (match newline don't treat it as end of
+       line).
        're' - is regular expression
        'repl' - is replacement string - may contain
        pseudo-variables
@@ -339,9 +342,10 @@ if (subst_user('/(.*)3642$/$avp(user_prefix)\13642/')){$
    message.
 
    Meaning of the parameters is as follows:
-     * '/re/repl/flags' - sed like regular expression. flags can
-       be a combination of i (case insensitive), g (global) or s
-       (match newline don't treat it as end of line).
+     * '/re/repl/flags' (string) - sed like regular expression.
+       flags can be a combination of i (case insensitive), g
+       (global) or s (match newline don't treat it as end of
+       line).
        're' - is regular expression
        'repl' - is replacement string - may contain
        pseudo-variables
@@ -352,7 +356,8 @@ if (subst_user('/(.*)3642$/$avp(user_prefix)\13642/')){$
 
    Example 1.13. subst_body usage
 ...
-if ( subst_body('/^o=(.*) /o=$fU ') ) {};
+if (subst_body("/^o=([^ ]*) /o=$fU /"))
+        xlog("successfully prepared an "o" line update!\n");
 
 ...
 
@@ -363,24 +368,24 @@ Chapter 2. Contributors
    Table 2.1. Top contributors by DevScore^(1), authored
    commits^(2) and lines added/removed^(3)
      Name DevScore Commits Lines ++ Lines --
-   1. Bogdan-Andrei Iancu (@bogdan-iancu) 55 42 439 475
+   1. Bogdan-Andrei Iancu (@bogdan-iancu) 55 43 440 475
    2. Daniel-Constantin Mierla (@miconda) 40 28 938 201
-   3. Razvan Crainea (@razvancrainea) 39 3 13 1951
+   3. Razvan Crainea (@razvancrainea) 39 6 16 1952
    4. Andrei Dragus 32 15 1540 196
    5. Andrei Pelinescu-Onciul 28 21 446 134
    6. Jiri Kuthan (@jiriatipteldotorg) 18 14 293 45
-   7. Liviu Chircu (@liviuchircu) 11 8 30 57
-   8. Jan Janak (@janakj) 11 6 496 27
-   9. Juha Heinanen (@juha-h) 8 5 210 8
-   10. Elena-Ramona Modroiu 6 3 197 6
+   7. Jan Janak (@janakj) 12 6 496 27
+   8. Liviu Chircu (@liviuchircu) 11 9 32 58
+   9. Vlad Patrascu (@rvlad-patrascu) 10 5 129 147
+   10. Juha Heinanen (@juha-h) 8 5 210 8
 
-   All remaining contributors: Henning Westerholt (@henningw),
-   Ovidiu Sas (@ovidiusas), Anca Vamanu, Marc Haisenko, Andreas
-   Heise, Klaus Darilion, Vlad Paiu (@vladpaiu), Andreas Granig,
-   Hugues Mitonneau, Konstantin Bokarius, Saúl Ibarra Corretgé
-   (@saghul), Peter Lemenkov (@lemenkov), Edson Gellert Schubert,
-   Maksym Sobolyev (@sobomax), Christophe Sollet (@csollet), Vlad
-   Patrascu (@rvlad-patrascu).
+   All remaining contributors: Elena-Ramona Modroiu, Henning
+   Westerholt (@henningw), Ovidiu Sas (@ovidiusas), Anca Vamanu,
+   Marc Haisenko, Andreas Heise, Klaus Darilion, Vlad Paiu
+   (@vladpaiu), Andreas Granig, Hugues Mitonneau, Konstantin
+   Bokarius, Saúl Ibarra Corretgé (@saghul), Peter Lemenkov
+   (@lemenkov), Edson Gellert Schubert, Maksym Sobolyev
+   (@sobomax), Christophe Sollet (@csollet).
 
    (1) DevScore = author_commits + author_lines_added /
    (project_lines_added / project_commits) + author_lines_deleted
@@ -402,11 +407,11 @@ Chapter 2. Contributors
 
    Table 2.2. Most recently active contributors^(1) to this module
                       Name                   Commit Activity
-   1.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
-   2.  Liviu Chircu (@liviuchircu)         Oct 2013 - Jun 2018
-   3.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - May 2017
-   4.  Razvan Crainea (@razvancrainea)     Feb 2012 - Aug 2015
-   5.  Bogdan-Andrei Iancu (@bogdan-iancu) Feb 2002 - Oct 2014
+   1.  Razvan Crainea (@razvancrainea)     Feb 2012 - Sep 2019
+   2.  Liviu Chircu (@liviuchircu)         Oct 2013 - Sep 2019
+   3.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - Jul 2019
+   4.  Bogdan-Andrei Iancu (@bogdan-iancu) Feb 2002 - Apr 2019
+   5.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
    6.  Anca Vamanu                         Oct 2008 - May 2011
    7.  Ovidiu Sas (@ovidiusas)             Dec 2010 - Jan 2011
    8.  Christophe Sollet (@csollet)        Dec 2010 - Dec 2010
@@ -428,14 +433,15 @@ Chapter 3. Documentation
 
 3.1. Contributors
 
-   Last edited by: Peter Lemenkov (@lemenkov), Liviu Chircu
-   (@liviuchircu), Razvan Crainea (@razvancrainea), Bogdan-Andrei
-   Iancu (@bogdan-iancu), Ovidiu Sas (@ovidiusas), Andrei Dragus,
-   Anca Vamanu, Andreas Granig, Daniel-Constantin Mierla
-   (@miconda), Konstantin Bokarius, Edson Gellert Schubert, Juha
-   Heinanen (@juha-h), Klaus Darilion, Marc Haisenko, Elena-Ramona
-   Modroiu, Jan Janak (@janakj), Maksym Sobolyev (@sobomax), Jiri
-   Kuthan (@jiriatipteldotorg), Andrei Pelinescu-Onciul.
+   Last edited by: Liviu Chircu (@liviuchircu), Vlad Patrascu
+   (@rvlad-patrascu), Peter Lemenkov (@lemenkov), Razvan Crainea
+   (@razvancrainea), Bogdan-Andrei Iancu (@bogdan-iancu), Ovidiu
+   Sas (@ovidiusas), Andrei Dragus, Anca Vamanu, Andreas Granig,
+   Daniel-Constantin Mierla (@miconda), Konstantin Bokarius, Edson
+   Gellert Schubert, Juha Heinanen (@juha-h), Klaus Darilion, Marc
+   Haisenko, Elena-Ramona Modroiu, Jan Janak (@janakj), Maksym
+   Sobolyev (@sobomax), Jiri Kuthan (@jiriatipteldotorg), Andrei
+   Pelinescu-Onciul.
 
    Documentation Copyrights:
 

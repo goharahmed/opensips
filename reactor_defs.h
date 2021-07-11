@@ -65,8 +65,8 @@ enum fd_types { F_NONE=0,
 		F_TCPMAIN, F_TCPCONN,
 		/* fd types for TCP management process (TCP main process) */
 		F_TCP_LISTENER, F_TCP_TCPWORKER, F_TCP_WORKER,
-		/* fd type specific to FreeSWITCH ESL traffic (FS worker process) */
-		F_FS_CONN,
+		/* generic fd type specific to the custome processes (like MI) */
+		F_GEN_PROC,
 		};
 
 extern io_wait_h _worker_io;
@@ -78,10 +78,13 @@ int init_reactor_size(void);
 	init_io_wait(&_worker_io, _name, reactor_size, io_poll_method, _prio_max)
 
 #define reactor_add_reader( _fd, _type, _prio, _data) \
-	io_watch_add(&_worker_io, _fd, _type, _data, _prio, IO_WATCH_READ)
+	io_watch_add(&_worker_io, _fd, _type, _data, _prio, 0, IO_WATCH_READ)
+
+#define reactor_add_reader_with_timeout( _fd, _type, _prio, _t, _data) \
+	io_watch_add(&_worker_io, _fd, _type, _data, _prio, _t, IO_WATCH_READ)
 
 #define reactor_add_writer( _fd, _type, _prio, _data) \
-	io_watch_add(&_worker_io, _fd, _type, _data, _prio, IO_WATCH_WRITE)
+	io_watch_add(&_worker_io, _fd, _type, _data, _prio, 0, IO_WATCH_WRITE)
 
 #define reactor_del_reader( _fd, _idx, _io_flags) \
 	io_watch_del(&_worker_io, _fd, _idx, _io_flags, IO_WATCH_READ)
@@ -100,6 +103,15 @@ int init_reactor_size(void);
 
 #define reactor_is_empty() \
 	(_worker_io.fd_no==0)
+
+#define reactor_name() \
+	(_worker_io.name)
+
+#define reactor_set_app_flag( _type, _app_flag) \
+	io_set_app_flag( &_worker_io , _type, _app_flag)
+
+#define reactor_check_app_flag(_app_flag) \
+	io_check_app_flag( &_worker_io , _app_flag)
 
 #endif
 

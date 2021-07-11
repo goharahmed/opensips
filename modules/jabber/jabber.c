@@ -125,13 +125,13 @@ static int xj_send_message(struct sip_msg*, char*, char*);
 static int xj_join_jconf(struct sip_msg*, char*, char*);
 static int xj_exit_jconf(struct sip_msg*, char*, char*);
 static int xj_go_online(struct sip_msg*, char*, char*);
-static int xj_go_offline(struct sip_msg*, char*, char*);
 
 void destroy(void);
 
 /*
  * Exported functions
  */
+/*
 static cmd_export_t cmds[] = {
 	{"jab_send_message",       (cmd_function)xj_send_message,
 			0, 0, 0, REQUEST_ROUTE},
@@ -145,13 +145,33 @@ static cmd_export_t cmds[] = {
 			0, 0, 0, REQUEST_ROUTE},
 	{"jab_register_watcher",   (cmd_function)xj_register_watcher,
 			XJ_NO_SCRIPT_F, 0, 0, 0            },
-	{"jab_unregister_watcher", (cmd_function)xj_unregister_watcher,
+	{"jab_unregister_watcher", (cmd_function),
 			XJ_NO_SCRIPT_F, 0, 0, 0            },
 	{"load_xjab",              (cmd_function)load_xjab,
 			XJ_NO_SCRIPT_F, 0, 0, 0            },
 	{0, 0, 0, 0, 0, 0}
 };
+*/
 
+static cmd_export_t cmds[] = {
+	{"jab_send_message",(cmd_function)xj_send_message, {{0,0,0}},
+		REQUEST_ROUTE},
+	{"jab_join_jconf",(cmd_function)xj_join_jconf, {{0,0,0}},
+		REQUEST_ROUTE},
+	{"jab_exit_jconf",(cmd_function)xj_exit_jconf, {{0,0,0}},
+		REQUEST_ROUTE},
+	{"jab_go_online",(cmd_function)xj_go_online, {{0,0,0}},
+		REQUEST_ROUTE},
+	{"jab_go_offline",(cmd_function)xj_go_online, {{0,0,0}},
+		REQUEST_ROUTE},
+	{"jab_register_watcher",(cmd_function)xj_register_watcher, {{0,0,0}},
+		0},
+	{"jab_unregister_watcher",(cmd_function)xj_unregister_watcher, {{0,0,0}},
+		0},
+	{"load_xjab",(cmd_function)load_xjab, {{0,0,0}},
+		0},
+	{0,0,{{0,0,0}},0}
+};
 
 /*
  * Exported parameters
@@ -190,6 +210,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	&deps,           /* OpenSIPS module dependencies */
 	cmds,       /* Exported functions */
 	0,          /* Exported async functions */
@@ -199,10 +220,12 @@ struct module_exports exports= {
 	0,          /* exported pseudo-variables */
 	0,			/* exported transformations */
 	0,          /* extra processes */
+	0,          /* module pre-initialization function */
 	mod_init,   /* module initialization function */
 	(response_function) 0,
 	(destroy_function) destroy,
-	child_init  /* per-child init function */
+	child_init, /* per-child init function */
+	0           /* reload confirm function */
 };
 
 /**
@@ -427,15 +450,6 @@ static int xj_go_online(struct sip_msg *msg, char* foo1, char * foo2)
 }
 
 /**
- * go offline in Jabber network
- */
-static int xj_go_offline(struct sip_msg *msg, char* foo1, char * foo2)
-{
-	LM_DBG("go offline in Jabber network\n");
-	return xjab_manage_sipmsg(msg, XJ_GO_OFFLINE);
-}
-
-/**
  * manage SIP message
  */
 int xjab_manage_sipmsg(struct sip_msg *msg, int type)
@@ -608,6 +622,7 @@ prepare_job:
 		case XJ_GO_OFFLINE:
 			dst.len = 0;
 			dst.s = 0;
+			/* fall through */
 		case XJ_JOIN_JCONF:
 		case XJ_EXIT_JCONF:
 			jsmsg->msg.len = 0;
@@ -680,13 +695,9 @@ void destroy(void)
 		}
 		pkg_free(pipes);
 	}
-	// cleaning MySQL connections
+
 	if(db_con != NULL)
-	{
-		for(i = 0; i<nrw; i++)
-			jabber_dbf.close(db_con[i]);
 		shm_free(db_con);
-	}
 
 	xj_wlist_free(jwl);
 	LM_DBG("unloaded ...\n");

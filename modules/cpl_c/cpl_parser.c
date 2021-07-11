@@ -123,8 +123,7 @@ static inline char *decode_mail_url(char *p, char *p_end, char *url,
 														unsigned char *nr_attr)
 {
 	static char buf[ MAX_EMAIL_HDR_SIZE ];
-	char c;
-	char foo;
+	int c, foo;
 	unsigned short hdr_len;
 	unsigned short *len;
 	int max_len;
@@ -157,7 +156,7 @@ static inline char *decode_mail_url(char *p, char *p_end, char *url,
 					"character in mail url [%.*s]\n", 3, url);
 				goto error;
 			}
-			c = c<<4 | foo;
+			c = (char)(c<<4 | foo);
 			url += 3;
 		} else {
 			/* normal character - just copy it without changing */
@@ -217,6 +216,7 @@ static inline char *decode_mail_url(char *p, char *p_end, char *url,
 					case EMAIL_KNOWN_HDR_BODY:
 						if (((*len)&0x0001)==1) p++;
 						*len = htons(*len);
+						/* fall through */
 					case EMAIL_UNKNOWN_HDR_BODY:
 						hdr_len = 0;
 						status = EMAIL_HDR_NAME;
@@ -232,6 +232,7 @@ static inline char *decode_mail_url(char *p, char *p_end, char *url,
 								"address found in MAIL node!\n");
 							goto error;
 						}
+						/* fall through */
 					case EMAIL_KNOWN_HDR_BODY:
 						if (((*len)&0x0001)==1) p++;
 						*len = htons(*len);

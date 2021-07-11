@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2017 OpenSIPS Project
+ * Copyright (C) 2018-2020 OpenSIPS Solutions
  *
  * This file is part of opensips, a free SIP server.
  *
@@ -16,7 +17,6 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- *
  */
 
 #ifndef _DROUTING_CLUSTERING_H_
@@ -39,5 +39,8 @@ void replicate_dr_gw_status_event(struct head_db *p, pgw_t *gw);
 
 /* replicate the Carrier status via BIN */
 void replicate_dr_carrier_status_event(struct head_db *p, pcr_t *cr);
+
+/* request sync of carrier and gateway states from cluster */
+int dr_cluster_sync(void);
 
 #endif

@@ -44,7 +44,7 @@ extern enum ul_sql_write_mode sql_wmode;
 extern enum ul_pinging_mode pinging_mode;
 
 /* manner in which node data should be restored (or not) following a restart */
-enum ul_rr_persist {
+typedef enum ul_rr_persist {
 	RRP_NONE,
 	RRP_LOAD_FROM_SQL,
 	RRP_SYNC_FROM_CLUSTER,
@@ -53,14 +53,14 @@ enum ul_rr_persist {
 
 /* if using SQL for restart persistency,
  * should runtime SQL blocking writes be performed eagerly or lazily? */
-enum ul_sql_write_mode {
+typedef enum ul_sql_write_mode {
 	SQL_NO_WRITE,
 	SQL_WRITE_THROUGH,
 	SQL_WRITE_BACK,
 } ul_sql_write_mode_t;
 #define bad_sql_write_mode(wm) ((wm) < SQL_NO_WRITE || (wm) > SQL_WRITE_BACK)
 
-enum ul_pinging_mode {
+typedef enum ul_pinging_mode {
 	PMD_OWNERSHIP,
 	PMD_COOPERATION,
 } ul_pinging_mode_t;
@@ -69,17 +69,16 @@ enum ul_pinging_mode {
 #define bad_cluster_mode(mode) ((mode) < CM_NONE || (mode) > CM_SQL_ONLY)
 
 /* TODO: rewrite/optimize these 4 checks at mod init */
-#define have_db_conns() \
+#define have_sql_con() \
 	(cluster_mode == CM_SQL_ONLY || rr_persist == RRP_LOAD_FROM_SQL)
 
-#define have_cdb_conns() \
+#define have_cdb_con() \
 	(cluster_mode == CM_FEDERATION_CACHEDB || \
 	 cluster_mode == CM_FULL_SHARING_CACHEDB)
 
 static inline int have_mem_storage(void)
 {
 	return cluster_mode == CM_NONE ||
-	       cluster_mode == CM_FEDERATION ||
 	       cluster_mode == CM_FEDERATION_CACHEDB ||
 	       cluster_mode == CM_FULL_SHARING;
 }
@@ -91,7 +90,6 @@ static inline int tags_in_use(void)
 
 #define have_data_replication() \
 	(cluster_mode == CM_FEDERATION_CACHEDB || \
-	 cluster_mode == CM_FEDERATION || \
 	 cluster_mode == CM_FULL_SHARING)
 
 /*
@@ -123,7 +121,6 @@ extern str last_mod_col;
 extern str sip_instance_col;
 
 extern str db_url;
-extern int timer_interval;
 extern enum usrloc_modes db_mode;
 extern int skip_replicated_db_ops;
 extern int use_domain;
@@ -139,18 +136,6 @@ extern db_func_t ul_dbf;
 extern cachedb_funcs cdbf;
 extern cachedb_con *cdbc;
 
-/*
- * Matching algorithms
- */
-#define CONTACT_ONLY            (0)
-#define CONTACT_CALLID          (1)
-
 extern int matching_mode;
-
-
-/*! \brief
- * Initialize event structures
- */
-int ul_event_init(void);
 
 #endif /* UL_MOD_H */

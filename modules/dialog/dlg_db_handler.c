@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2014 OpenSIPS Solutions
+ * Copyright (C) 2009-2020 OpenSIPS Solutions
  * Copyright (C) 2007-2009 Voice System SRL
  *
  * This file is part of opensips, a free SIP server.
@@ -16,15 +16,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
- *
- * History:
- * --------
- * 2007-05-10  initial version (ancuta)
- * 2007-07-06 additional information saved in the database: cseq, contact,
- *            route set and socket_info for both caller and callee (ancuta)
- * 2009-09-09 support for early dialogs added; proper handling of cseq
- *            while PRACK is used (bogdan)
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <stdlib.h>
@@ -71,22 +63,20 @@ str profiles_column			=	str_init(PROFILES_COL);
 str sflags_column			=	str_init(SFLAGS_COL);
 str mflags_column			=	str_init(MFLAGS_COL);
 str flags_column			=	str_init(FLAGS_COL);
+str rt_on_answer_column		=	str_init(RT_ON_ANSWER_COL);
+str rt_on_timeout_column	=	str_init(RT_ON_TIMEOUT_COL);
+str rt_on_hangup_column		=	str_init(RT_ON_HANGUP_COL);
 str dialog_table_name		=	str_init(DIALOG_TABLE_NAME);
 int dlg_db_mode				=	DB_MODE_NONE;
 
 static db_con_t* dialog_db_handle    = 0; /* database connection handle */
 static db_func_t dialog_dbf;
 
-extern int dlg_enable_stats;
 extern int active_dlgs_cnt;
 extern int early_dlgs_cnt;
-extern stat_var *active_dlgs;
-extern stat_var *early_dlgs;
 extern int dlg_bulk_del_no;
 
 static inline void set_final_update_cols(db_val_t *, struct dlg_cell *, int);
-static int persist_reinvite_pinging(struct dlg_cell *dlg);
-static int restore_reinvite_pinging(struct dlg_cell *dlg);
 
 #define SET_BIGINT_VALUE(_val, _bigint)\
 	do{\
@@ -113,6 +103,17 @@ static int restore_reinvite_pinging(struct dlg_cell *dlg);
 		}\
 	}while(0);
 
+#define SET_ROUTE_VALUE(_val, _idx) \
+	do {\
+		if (_idx) { \
+			VAL_STRING((_val)) = sroutes->request[_idx].name;\
+			VAL_NULL((_val)) = 0;\
+		} else {\
+			VAL_STRING((_val)) = NULL;\
+			VAL_NULL((_val)) = 1;\
+		}\
+	}while(0)
+
 #define GET_STR_VALUE(_res, _values, _index, _not_null, _unref)\
 	do{\
 		if (VAL_NULL((_values)+ (_index))) { \
@@ -128,6 +129,24 @@ static int restore_reinvite_pinging(struct dlg_cell *dlg);
 			(_res).len = strlen(VAL_STR((_values)+ (_index)).s);\
 		} \
 	}while(0);
+
+#define GET_ROUTE_VALUE(_res, _values, _index) \
+	do { \
+		if (VAL_NULL((_values)+ (_index))) { \
+			(_res) = 0; \
+		} else { \
+			str __s;\
+			__s.s = VAL_STR((_values)+ (_index)).s;\
+			__s.len = strlen(VAL_STR((_values)+ (_index)).s);\
+			(_res) =  get_script_route_ID_by_name_str( &__s, \
+				sroutes->request, RT_NO);\
+			if ((_res)==-1) { \
+				LM_WARN("loaded <%.*s> route not found " \
+				"in the script\n", __s.len, __s.s); \
+				(_res) = 0; \
+			}\
+		}\
+	} while(0)
 
 
 static int load_dialog_info_from_db(int dlg_hash_size);
@@ -235,11 +254,12 @@ static int select_entire_dialog_table(db_res_t ** res, int *no_rows)
 			&from_tag_column,	&to_uri_column,		&to_tag_column,
 			&start_time_column,	&state_column,		&timeout_column,
 			&from_cseq_column,	&to_cseq_column,	&from_route_column,
-			&to_route_column, 	&from_contact_column, &to_contact_column,
+			&to_route_column,	&from_contact_column,&to_contact_column,
 			&from_sock_column,	&to_sock_column,	&vars_column,
 			&profiles_column,	&sflags_column,		&from_ping_cseq_column,
-			&to_ping_cseq_column,&flags_column, &mangled_fu_column,&mangled_tu_column,
-			&mflags_column};
+			&to_ping_cseq_column,&flags_column,		&mangled_fu_column,
+			&mangled_tu_column,	&mflags_column,		&rt_on_answer_column,
+			&rt_on_timeout_column,&rt_on_hangup_column};
 
 	if(use_dialog_table() != 0){
 		return -1;
@@ -253,7 +273,8 @@ static int select_entire_dialog_table(db_res_t ** res, int *no_rows)
 			return -1;
 		}
 		*no_rows = estimate_available_rows( 4+255+128+64+128+64+64+64+11+11+4+4
-				+512+512+128+128+64+64+4+4+4+4096+512+4+4+4 ,DIALOG_TABLE_TOTAL_COL_NO );
+				+512+512+128+128+64+64+4+4+4+4096+512+4+4+4+16+16+16,
+				DIALOG_TABLE_TOTAL_COL_NO );
 
 		if (*no_rows==0) *no_rows = 10;
 		if(dialog_dbf.fetch_result(dialog_db_handle,res,*no_rows)<0){
@@ -307,7 +328,7 @@ static inline void strip_esc(str *s)
 	int len = s->len;
 
 	for ( ; len > 0; len--, c++) {
-		if (*c == '\\' && len > 0 &&
+		if (*c == '\\' &&
 				(*(c+1)=='\\' || *(c+1)=='#' || *(c+1)=='|')) {
 			memmove(c, c + 1, len - 1);
 			s->len--;
@@ -433,15 +454,23 @@ void read_dialog_profiles(char *b, int l, struct dlg_cell *dlg,int double_check,
 				repl_type = REPL_PROTOBIN;
 			}
 
+			if (dlg->locked_by != process_no)
+				dlg_lock_dlg(dlg);
+
 			for (it=dlg->profile_links;it;it=it->next) {
 				if (it->profile->repl_type == repl_type &&
 					it->profile->name.len == double_check_name.len &&
 					memcmp(it->profile->name.s,double_check_name.s,
 						   double_check_name.len) == 0) {
+					if (dlg->locked_by != process_no)
+						dlg_unlock_dlg(dlg);
 					LM_DBG("Profile is already linked into the dlg\n");
 					goto next;
 				}
 			}
+
+			if (dlg->locked_by != process_no)
+				dlg_unlock_dlg(dlg);
 		}
 
 		/* add to the profile */
@@ -489,8 +518,7 @@ int remove_ended_dlgs_from_db(void)
 
 	VAL_INT(values) = DLG_STATE_DELETED ;
 
-	CON_PS_REFERENCE(dialog_db_handle) = &my_ps;
-
+	CON_SET_CURR_PS(dialog_db_handle, &my_ps);
 	if(dialog_dbf.delete(dialog_db_handle, match_keys, 0, values, 1) < 0) {
 		LM_ERR("failed to delete database information\n");
 		return -1;
@@ -506,6 +534,7 @@ static int load_dialog_info_from_db(int dlg_hash_size)
 	db_row_t * rows;
 	int i, nr_rows;
 	struct dlg_cell *dlg;
+	struct dlg_entry *d_entry;
 	str callid, from_uri, to_uri, from_tag, to_tag;
 	str cseq1,cseq2,contact1,contact2,rroute1,rroute2,mangled_fu,mangled_tu;
 	int no_rows = 10;
@@ -537,8 +566,7 @@ static int load_dialog_info_from_db(int dlg_hash_size)
 				continue;
 			}
 
-			hash_entry = (unsigned int )(VAL_BIGINT(values) >> 32);
-			hash_id = (unsigned int)(VAL_BIGINT(values) & 0x00000000ffffffff);
+			dlg_parse_db_id(VAL_BIGINT(values), hash_entry, hash_id);
 
 			if (VAL_NULL(values+6) || VAL_NULL(values+7)) {
 				LM_ERR("columns %.*s or/and %.*s cannot be null -> skipping\n",
@@ -562,13 +590,40 @@ static int load_dialog_info_from_db(int dlg_hash_size)
 
 			/*restore the dialog info*/
 			GET_STR_VALUE(callid, values, 1, 1, 0);
-			GET_STR_VALUE(from_uri, values, 2, 1, 0);
 			GET_STR_VALUE(from_tag, values, 3, 1, 0);
+			GET_STR_VALUE(to_tag, values, 5, 1, 0);
+
+			d_entry = &d_table->entries[hash_entry];
+			dlg_lock(d_table, d_entry);
+
+			if (get_dlg_unsafe(d_entry, &callid, &from_tag, &to_tag,
+			                   &dlg) == 0) {
+				/*
+				 * there are two cases that could lead here:
+				 * 1) a race condition between the loading from DB and events
+				 *    received over a replicated channel - in this case we
+				 *    double check if the dialog has the same callid, and if
+				 *    we do, we drop the loaded dialog, as it has already been
+				 *    learned through replication
+				 * 2) a call looping scenario - a call that passes more than
+				 *    once through the same OpenSIPS instance, basically
+				 *    creating different dialogs with different hash IDs - in
+				 *    this case we shall learn the new dialog (Ticket #2311)
+				 */
+				if (dlg->h_id == hash_id) {
+					dlg_unlock(d_table, d_entry);
+					LM_DBG("dialog already exists, skipping (ci: %.*s, did: %u.%u)\n",
+							callid.len, callid.s, hash_entry, hash_id);
+					continue;
+				}
+			}
+
+			GET_STR_VALUE(from_uri, values, 2, 1, 0);
 			GET_STR_VALUE(to_uri, values, 4, 1, 0);
 
 			if((dlg=build_new_dlg(&callid, &from_uri, &to_uri, &from_tag))==0){
 				LM_ERR("failed to build new dialog\n");
-				goto error;
+				goto error_unlock;
 			}
 
 			if(dlg->h_entry != hash_entry){
@@ -579,11 +634,11 @@ static int load_dialog_info_from_db(int dlg_hash_size)
 					dialog_table_name.len, dialog_table_name.s,
 					dlg->h_entry,hash_entry);
 				shm_free(dlg);
-				goto error;
+				continue;
 			}
 
-			/*link the dialog*/
-			link_dlg(dlg, 0);
+			/* link the dialog */
+			link_dlg_unsafe(d_entry, dlg);
 
 			dlg->h_id = hash_id;
 
@@ -596,12 +651,6 @@ static int load_dialog_info_from_db(int dlg_hash_size)
 			dlg->start_ts	= VAL_INT(values+6);
 
 			dlg->state 		= VAL_INT(values+7);
-			if (dlg->state==DLG_STATE_CONFIRMED_NA ||
-			dlg->state==DLG_STATE_CONFIRMED) {
-				active_dlgs_cnt++;
-			} else if (dlg->state==DLG_STATE_EARLY) {
-				early_dlgs_cnt++;
-			}
 
 			GET_STR_VALUE(cseq1, values, 9 , 1, 1);
 			GET_STR_VALUE(cseq2, values, 10 , 1, 1);
@@ -615,12 +664,12 @@ static int load_dialog_info_from_db(int dlg_hash_size)
 
 			/* add the 2 legs */
 			if ( (dlg_update_leg_info(0, dlg, &from_tag, &rroute1, &contact1,
-			&cseq1, caller_sock,0,0,0)!=0) ||
+			NULL, &cseq1, caller_sock,0,0,0,0)!=0) ||
 			(dlg_update_leg_info(1, dlg, &to_tag, &rroute2, &contact2,
-			&cseq2, callee_sock,&mangled_fu,&mangled_tu,0)!=0) ) {
+			NULL, &cseq2, callee_sock,&mangled_fu,&mangled_tu,0,0)!=0) ) {
 				LM_ERR("dlg_set_leg_info failed\n");
 				/* destroy the dialog */
-				unref_dlg(dlg,1);
+				unref_dlg_unsafe(dlg, 1, d_entry);
 				continue;
 			}
 			dlg->legs_no[DLG_LEG_200OK] = DLG_FIRST_CALLEE_LEG;
@@ -635,12 +684,6 @@ static int load_dialog_info_from_db(int dlg_hash_size)
 				}
 			}
 
-			/* profiles */
-			if (!VAL_NULL(values+18))
-				read_dialog_profiles( VAL_STR(values+18).s,
-					strlen(VAL_STR(values+18).s), dlg, 0, 0);
-
-
 			/* script flags */
 			if (!VAL_NULL(values+19)) {
 				dlg->user_flags = VAL_INT(values+19);
@@ -650,6 +693,11 @@ static int load_dialog_info_from_db(int dlg_hash_size)
 			if (!VAL_NULL(values+25)) {
 				dlg->mod_flags = VAL_INT(values+25);
 			}
+
+			/* the script routes */
+			GET_ROUTE_VALUE( dlg->rt_on_answer, values, 26);
+			GET_ROUTE_VALUE( dlg->rt_on_timeout, values, 27);
+			GET_ROUTE_VALUE( dlg->rt_on_hangup, values, 28);
 
 			/* dialog flags */
 			dlg->flags = VAL_INT(values+22);
@@ -678,12 +726,12 @@ static int load_dialog_info_from_db(int dlg_hash_size)
 					dlg->legs[callee_idx(dlg)].tag.len,
 					ZSW(dlg->legs[callee_idx(dlg)].tag.s));
 				/* destroy the dialog */
-				unref_dlg(dlg,1);
+				unref_dlg_unsafe(dlg, 1, d_entry);
 				continue;
 			}
 
-			/* reference the dialog as kept in the timer list */
-			ref_dlg(dlg,1);
+			/* reference the dialog as kept in the timer list + this ref */
+			ref_dlg_unsafe(dlg, 2);
 			LM_DBG("current dialog timeout is %u\n", dlg->tl.timeout);
 
 			dlg->lifetime = 0;
@@ -693,26 +741,33 @@ static int load_dialog_info_from_db(int dlg_hash_size)
 			dlg->legs[callee_idx(dlg)].last_gen_cseq =
 				(unsigned int)(VAL_INT(values+21));
 
+			dlg_unlock(d_table, d_entry);
+
+			/* profiles */
+			if (!VAL_NULL(values+18))
+				read_dialog_profiles( VAL_STR(values+18).s,
+					strlen(VAL_STR(values+18).s), dlg, 0, 0);
+
 			if (dlg->flags & DLG_FLAG_PING_CALLER || dlg->flags & DLG_FLAG_PING_CALLEE) {
 				if (0 != insert_ping_timer(dlg))
 					LM_CRIT("Unable to insert dlg %p into ping timer\n",dlg);
 				else {
 					/* reference dialog as kept in ping timer list */
-					ref_dlg(dlg,1);
+					ref_dlg(dlg, 1);
 				}
 			}
 
+
+			if (restore_reinvite_pinging(dlg) != 0)
+				LM_ERR("failed to fetch some Re-INVITE pinging data\n");
 			if (dlg_has_reinvite_pinging(dlg)) {
 				/* re-populate Re-INVITE pinging fields */
-				if (restore_reinvite_pinging(dlg) != 0)
-					LM_ERR("failed to fetch some Re-INVITE pinging data\n");
-				else if (0 != insert_reinvite_ping_timer(dlg))
+				if (0 != insert_reinvite_ping_timer(dlg))
 					LM_CRIT("Unable to insert dlg %p into reinvite"
 					        "ping timer\n", dlg);
-				else {
+				else
 					/* reference dialog as kept in reinvite ping timer list */
-					ref_dlg(dlg,1);
-				}
+					ref_dlg(dlg, 1);
 			}
 
 			if ((rc = fetch_dlg_value(dlg, &shtag_dlg_val, &tag_name, 0)) == 0) {
@@ -723,11 +778,19 @@ static int load_dialog_info_from_db(int dlg_hash_size)
 
 			if (dlg_db_mode == DB_MODE_DELAYED) {
 				/* to be later removed by timer */
-				ref_dlg(dlg,1);
+				ref_dlg(dlg, 1);
 			}
 
-			next_dialog:
-			;
+			if (dlg->state==DLG_STATE_CONFIRMED_NA ||
+			dlg->state==DLG_STATE_CONFIRMED) {
+				active_dlgs_cnt++;
+			} else if (dlg->state==DLG_STATE_EARLY) {
+				early_dlgs_cnt++;
+			}
+			run_load_callback_per_dlg(dlg);
+			unref_dlg(dlg, 1);
+
+			next_dialog:;
 		}
 
 		/* any more data to be fetched ?*/
@@ -748,6 +811,8 @@ static int load_dialog_info_from_db(int dlg_hash_size)
 		remove_ended_dlgs_from_db();
 	return 0;
 
+error_unlock:
+	dlg_unlock(d_table, d_entry);
 error:
 	dialog_dbf.free_result(dialog_db_handle, res);
 	if (found_ended_dlgs)
@@ -808,8 +873,7 @@ int dlg_timer_remove_from_db(struct dlg_cell *cell)
 	}
 
 	/* store info in del holders */
-	VAL_BIGINT(dlg_del_values+dlg_del_curr_no) =
-			((long long)cell->h_entry << 32) | (cell->h_id);
+	VAL_BIGINT(dlg_del_values+dlg_del_curr_no) = dlg_get_db_id(cell);
 	dlg_del_holder[dlg_del_curr_no]=cell;
 	/* mark is as deleted so we don't care about it later
 	 * in the timer */
@@ -819,8 +883,8 @@ int dlg_timer_remove_from_db(struct dlg_cell *cell)
 	if (dlg_del_curr_no == dlg_bulk_del_no) {
 		LM_DBG("triggering delete for %d dialogs\n",dlg_del_curr_no);
 
-		CON_PS_REFERENCE(dialog_db_handle) = &my_ps;
 		CON_USE_OR_OP(dialog_db_handle);
+		CON_SET_CURR_PS(dialog_db_handle, &my_ps);
 		if(dialog_dbf.delete(dialog_db_handle, dlg_del_keys,
 					0, dlg_del_values, dlg_bulk_del_no) < 0)
 			LM_ERR("failed to delete bulk database information !!!\n");
@@ -882,10 +946,9 @@ int remove_dialog_from_db(struct dlg_cell * cell)
 	VAL_TYPE(values) = DB_BIGINT;
 	VAL_NULL(values) = 0;
 
-	VAL_BIGINT(values) = ((long long)cell->h_entry << 32) | (cell->h_id);
+	VAL_BIGINT(values) = dlg_get_db_id(cell);
 
-	CON_PS_REFERENCE(dialog_db_handle) = &my_ps;
-
+	CON_SET_CURR_PS(dialog_db_handle, &my_ps);
 	if(dialog_dbf.delete(dialog_db_handle, match_keys, 0, values, 1) < 0) {
 		LM_ERR("failed to delete database information\n");
 		return -1;
@@ -922,13 +985,11 @@ int update_dialog_timeout_info(struct dlg_cell * cell)
 	entry = (d_table->entries)[cell->h_entry];
 	dlg_lock( d_table, &entry);
 
-	SET_BIGINT_VALUE(values, (((long long)cell->h_entry << 32) |
-				 cell->h_id));
+	SET_BIGINT_VALUE(values, dlg_get_db_id(cell));
 	SET_INT_VALUE(values+1, (unsigned int)( (unsigned int)time(0) +
 			 cell->tl.timeout - get_ticks()) );
 
-	CON_PS_REFERENCE(dialog_db_handle) = &my_ps_update;
-
+	CON_SET_CURR_PS(dialog_db_handle, &my_ps_update);
 	if((dialog_dbf.update(dialog_db_handle, (insert_keys), 0,
 					(values), (insert_keys+1), (values+1), 1, 1)) !=0){
 		LM_ERR("could not update database timeout info\n");
@@ -958,17 +1019,18 @@ int update_dialog_dbinfo(struct dlg_cell * cell)
 	int callee_leg;
 
 	db_key_t insert_keys[DIALOG_TABLE_TOTAL_COL_NO] = {
-			&dlg_id_column,      &call_id_column,     &from_uri_column,
-			&from_tag_column,    &to_uri_column,      &to_tag_column,
+			&dlg_id_column,      &call_id_column,      &from_uri_column,
+			&from_tag_column,    &to_uri_column,       &to_tag_column,
 			&from_sock_column,   &to_sock_column,
-			&start_time_column,  &mangled_fu_column,  &mangled_tu_column,
+			&start_time_column,  &mangled_fu_column,   &mangled_tu_column,
 
 			&state_column,       &timeout_column,
-			&from_cseq_column,   &to_cseq_column,     &from_ping_cseq_column,
+			&from_cseq_column,   &to_cseq_column,      &from_ping_cseq_column,
 			&to_ping_cseq_column,&flags_column,
-			&vars_column,        &profiles_column,    &sflags_column,
+			&vars_column,        &profiles_column,     &sflags_column,
 			&mflags_column,      &from_contact_column,
-			&to_contact_column,    &from_route_column,&to_route_column};
+			&to_contact_column,  &from_route_column,   &to_route_column,
+			&rt_on_answer_column,&rt_on_timeout_column,&rt_on_hangup_column};
 
 	if(use_dialog_table()!=0)
 		return -1;
@@ -989,14 +1051,15 @@ int update_dialog_dbinfo(struct dlg_cell * cell)
 		VAL_TYPE(values+13) = VAL_TYPE(values+14) = VAL_TYPE(values+19) =
 		VAL_TYPE(values+22) = VAL_TYPE(values+23) = VAL_TYPE(values+24) =
 		VAL_TYPE(values+25) = DB_STR;
+		VAL_TYPE(values+26) = VAL_TYPE(values+27) = VAL_TYPE(values+28) =
+		DB_STRING;
 		VAL_TYPE(values+18) = DB_BLOB;
 
 		/* lock the entry */
 		entry = (d_table->entries)[cell->h_entry];
 		dlg_lock( d_table, &entry);
 
-		SET_BIGINT_VALUE(values, (((long long)cell->h_entry << 32) |
-					 cell->h_id));
+		SET_BIGINT_VALUE(values, dlg_get_db_id(cell));
 		/* to be later removed by timer */SET_STR_VALUE(values+1, cell->callid);
 
 		SET_STR_VALUE(values+2, cell->from_uri);
@@ -1033,11 +1096,15 @@ int update_dialog_dbinfo(struct dlg_cell * cell)
 		SET_STR_VALUE(values+24, cell->legs[DLG_CALLER_LEG].route_set);
 		SET_STR_VALUE(values+25, cell->legs[callee_leg].route_set);
 
-		CON_PS_REFERENCE(dialog_db_handle) = &my_ps_insert;
+		SET_ROUTE_VALUE(values+26, cell->rt_on_answer);
+		SET_ROUTE_VALUE(values+27, cell->rt_on_timeout);
+		SET_ROUTE_VALUE(values+28, cell->rt_on_hangup);
 
+		CON_SET_CURR_PS(dialog_db_handle, &my_ps_insert);
 		if((dialog_dbf.insert(dialog_db_handle, insert_keys, values,
 								DIALOG_TABLE_TOTAL_COL_NO)) !=0){
-			LM_ERR("could not add another dialog to db\n");
+			LM_ERR("could not add another dialog to db - state=%d callid=%.*s\n",
+					cell->state, cell->callid.len, cell->callid.s);
 			goto error;
 		}
 
@@ -1061,8 +1128,7 @@ int update_dialog_dbinfo(struct dlg_cell * cell)
 		entry = (d_table->entries)[cell->h_entry];
 		dlg_lock( d_table, &entry);
 
-		SET_BIGINT_VALUE(values, (((long long)cell->h_entry << 32) |
-					 cell->h_id));
+		SET_BIGINT_VALUE(values, dlg_get_db_id(cell));
 		SET_INT_VALUE(values+11, cell->state);
 		SET_INT_VALUE(values+12, (unsigned int)( (unsigned int)time(0) +
 				 cell->tl.timeout - get_ticks()) );
@@ -1077,8 +1143,7 @@ int update_dialog_dbinfo(struct dlg_cell * cell)
 		SET_STR_VALUE(values+22, cell->legs[DLG_CALLER_LEG].contact);
 		SET_STR_VALUE(values+23, cell->legs[callee_leg].contact);
 
-		CON_PS_REFERENCE(dialog_db_handle) = &my_ps_update;
-
+		CON_SET_CURR_PS(dialog_db_handle, &my_ps_update);
 		if((dialog_dbf.update(dialog_db_handle, (insert_keys), 0,
 						(values), (insert_keys+11), (values+11), 1, 13)) !=0){
 			LM_ERR("could not update database info\n");
@@ -1100,13 +1165,11 @@ int update_dialog_dbinfo(struct dlg_cell * cell)
 		entry = (d_table->entries)[cell->h_entry];
 		dlg_lock( d_table, &entry);
 
-		SET_BIGINT_VALUE(values, (((long long)cell->h_entry << 32) |
-					 cell->h_id));
+		SET_BIGINT_VALUE(values, dlg_get_db_id(cell));
 
 		set_final_update_cols(values+18, cell, 0);
 
-		CON_PS_REFERENCE(dialog_db_handle) = &my_ps_update_vp;
-
+		CON_SET_CURR_PS(dialog_db_handle, &my_ps_update_vp);
 		if((dialog_dbf.update(dialog_db_handle, (insert_keys), 0,
 						(values), (insert_keys+18), (values+18), 1, 4)) !=0){
 			LM_ERR("could not update database info\n");
@@ -1257,9 +1320,10 @@ str* write_dialog_profiles( struct dlg_profile_link *links)
 }
 
 /* duplicate the SDPs/Contacts of caller/callee(s) into dlg val storage */
-static int persist_reinvite_pinging(struct dlg_cell *dlg)
+int persist_reinvite_pinging(struct dlg_cell *dlg)
 {
-	str caller_adv_sdp = str_init("CSDP"), callee_adv_sdp = str_init("cSDP");
+	str caller_in_sdp = str_init("uCSDP"), callee_in_sdp = str_init("ucSDP");
+	str caller_out_sdp = str_init("aCSDP"), callee_out_sdp = str_init("acSDP");
 	str caller_adv_ct = str_init("Cct"), callee_adv_ct = str_init("cct");
 
 	if (dlg->legs_no[DLG_LEG_200OK] == 0) {
@@ -1267,8 +1331,16 @@ static int persist_reinvite_pinging(struct dlg_cell *dlg)
 		return 0;
 	}
 
-	if (store_dlg_value_unsafe(dlg, &caller_adv_sdp,
-	                    &dlg->legs[DLG_CALLER_LEG].adv_sdp) != 0) {
+	if (dlg->legs[DLG_CALLER_LEG].in_sdp.len &&
+			store_dlg_value_unsafe(dlg, &caller_in_sdp,
+				&dlg->legs[DLG_CALLER_LEG].in_sdp) != 0) {
+		LM_ERR("failed to persist caller UAC SDP\n");
+		return -1;
+	}
+
+	if (dlg->legs[DLG_CALLER_LEG].out_sdp.len &&
+			store_dlg_value_unsafe(dlg, &caller_out_sdp,
+				&dlg->legs[DLG_CALLER_LEG].out_sdp) != 0) {
 		LM_ERR("failed to persist caller advertised SDP\n");
 		return -1;
 	}
@@ -1279,8 +1351,16 @@ static int persist_reinvite_pinging(struct dlg_cell *dlg)
 		return -1;
 	}
 
-	if (store_dlg_value_unsafe(dlg, &callee_adv_sdp,
-	                       &dlg->legs[dlg->legs_no[DLG_LEG_200OK]].adv_sdp) != 0) {
+	if (dlg->legs[dlg->legs_no[DLG_LEG_200OK]].in_sdp.len &&
+			store_dlg_value_unsafe(dlg, &callee_in_sdp,
+				&dlg->legs[dlg->legs_no[DLG_LEG_200OK]].in_sdp) != 0) {
+		LM_ERR("failed to persist callee UAC SDP\n");
+		return -1;
+	}
+
+	if (dlg->legs[dlg->legs_no[DLG_LEG_200OK]].out_sdp.len &&
+			store_dlg_value_unsafe(dlg, &callee_out_sdp,
+				&dlg->legs[dlg->legs_no[DLG_LEG_200OK]].out_sdp) != 0) {
 		LM_ERR("failed to persist callee advertised SDP\n");
 		return -1;
 	}
@@ -1295,18 +1375,29 @@ static int persist_reinvite_pinging(struct dlg_cell *dlg)
 }
 
 /* re-populate the SDPs/Contacts of caller/callee(s) from dlg val storage */
-static int restore_reinvite_pinging(struct dlg_cell *dlg)
+int restore_reinvite_pinging(struct dlg_cell *dlg)
 {
-	str caller_adv_sdp = str_init("CSDP"), callee_adv_sdp = str_init("cSDP");
+	str caller_in_sdp = str_init("uCSDP"), callee_in_sdp = str_init("ucSDP");
+	str caller_out_sdp = str_init("aCSDP"), callee_out_sdp = str_init("acSDP");
 	str caller_adv_ct = str_init("Cct"), callee_adv_ct = str_init("cct");
 	str out_buf;
 	int ret = 0;
 
-	if (fetch_dlg_value(dlg, &caller_adv_sdp, &out_buf, 0) != 0) {
-		LM_ERR("failed to fetch caller advertised SDP\n");
-		ret = -1;
+	if (fetch_dlg_value(dlg, &caller_in_sdp, &out_buf, 0) != 0) {
+		dlg->legs[DLG_CALLER_LEG].in_sdp.len = 0;
+		dlg->legs[DLG_CALLER_LEG].in_sdp.s = 0;
 	} else {
-		if (shm_str_dup(&dlg->legs[DLG_CALLER_LEG].adv_sdp, &out_buf) != 0) {
+		if (shm_str_dup(&dlg->legs[DLG_CALLER_LEG].in_sdp, &out_buf) != 0) {
+			LM_ERR("oom\n");
+			ret = -1;
+		}
+	}
+
+	if (fetch_dlg_value(dlg, &caller_out_sdp, &out_buf, 0) != 0) {
+		dlg->legs[DLG_CALLER_LEG].out_sdp.len = 0;
+		dlg->legs[DLG_CALLER_LEG].out_sdp.s = 0;
+	} else {
+		if (shm_str_dup(&dlg->legs[DLG_CALLER_LEG].out_sdp, &out_buf) != 0) {
 			LM_ERR("oom\n");
 			ret = -1;
 		}
@@ -1323,11 +1414,22 @@ static int restore_reinvite_pinging(struct dlg_cell *dlg)
 		}
 	}
 
-	if (fetch_dlg_value(dlg, &callee_adv_sdp, &out_buf, 0) != 0) {
-		LM_ERR("failed to fetch callee advertised SDP\n");
-		ret = -1;
+	if (fetch_dlg_value(dlg, &callee_in_sdp, &out_buf, 0) != 0) {
+		dlg->legs[DLG_FIRST_CALLEE_LEG].in_sdp.len = 0;
+		dlg->legs[DLG_FIRST_CALLEE_LEG].in_sdp.s = 0;
 	} else {
-		if (shm_str_dup(&dlg->legs[DLG_FIRST_CALLEE_LEG].adv_sdp, &out_buf) != 0) {
+		if (shm_str_dup(&dlg->legs[DLG_FIRST_CALLEE_LEG].in_sdp, &out_buf) != 0) {
+			LM_ERR("oom\n");
+			ret = -1;
+		}
+	}
+
+
+	if (fetch_dlg_value(dlg, &callee_out_sdp, &out_buf, 0) != 0) {
+		dlg->legs[DLG_FIRST_CALLEE_LEG].out_sdp.len = 0;
+		dlg->legs[DLG_FIRST_CALLEE_LEG].out_sdp.s = 0;
+	} else {
+		if (shm_str_dup(&dlg->legs[DLG_FIRST_CALLEE_LEG].out_sdp, &out_buf) != 0) {
 			LM_ERR("oom\n");
 			ret = -1;
 		}
@@ -1363,10 +1465,8 @@ static inline void set_final_update_cols(db_val_t *vals, struct dlg_cell *cell,
 		run_dlg_callbacks(DLGCB_WRITE_VP, cell, 0, DLG_DIR_NONE, NULL, 1, 1);
 	}
 
-	if (dlg_has_reinvite_pinging(cell)) {
-		if (persist_reinvite_pinging(cell) != 0)
-			LM_ERR("failed to persist some Re-INVITE pinging info\n");
-	}
+	if (persist_reinvite_pinging(cell) != 0)
+		LM_ERR("failed to persist some Re-INVITE pinging info\n");
 
 	/* save sharing tag name as dlg val */
 	if (cell->shtag.s && store_dlg_value_unsafe(cell, &shtag_dlg_val,
@@ -1430,7 +1530,8 @@ void dialog_update_db(unsigned int ticks, void *do_lock)
 			&state_column,		&timeout_column,		&from_cseq_column,
 			&to_cseq_column,	&from_ping_cseq_column, &to_ping_cseq_column,
 			&vars_column,		&profiles_column,		&sflags_column,
-			&mflags_column,		&flags_column};
+			&mflags_column,		&flags_column,			&rt_on_answer_column,
+			&rt_on_timeout_column,&rt_on_hangup_column};
 
 	if (dialog_db_handle==0 || use_dialog_table()!=0)
 		return;
@@ -1450,6 +1551,9 @@ void dialog_update_db(unsigned int ticks, void *do_lock)
 	VAL_TYPE(values+11) = VAL_TYPE(values+12) = VAL_TYPE(values+13) =
 	VAL_TYPE(values+14) = VAL_TYPE(values+17) = VAL_TYPE(values+18) =
 	VAL_TYPE(values+22) = DB_STR;
+
+	VAL_TYPE(values+26) = VAL_TYPE(values+27) = VAL_TYPE(values+28) =
+	DB_STRING;
 
 	VAL_TYPE(values+21) = DB_BLOB;
 
@@ -1485,8 +1589,7 @@ void dialog_update_db(unsigned int ticks, void *do_lock)
 				}
 				LM_DBG("inserting new dialog %p\n",cell);
 
-				SET_BIGINT_VALUE(values, (((long long)cell->h_entry << 32) |
-								 cell->h_id));
+				SET_BIGINT_VALUE(values, dlg_get_db_id(cell));
 				SET_STR_VALUE(values+1, cell->callid);
 				SET_STR_VALUE(values+2, cell->from_uri);
 
@@ -1530,14 +1633,19 @@ void dialog_update_db(unsigned int ticks, void *do_lock)
 				SET_INT_VALUE(values+25, cell->flags &
 					~(DLG_FLAG_NEW|DLG_FLAG_CHANGED|DLG_FLAG_VP_CHANGED|DLG_FLAG_DB_DELETED));
 
-				CON_PS_REFERENCE(dialog_db_handle) = &my_ps_insert;
-				if (con_set_inslist(&dialog_dbf,dialog_db_handle,
-				&ins_list,insert_keys,DIALOG_TABLE_TOTAL_COL_NO) < 0 )
-					CON_RESET_INSLIST(dialog_db_handle);
+				SET_ROUTE_VALUE(values+26, cell->rt_on_answer);
+				SET_ROUTE_VALUE(values+27, cell->rt_on_timeout);
+				SET_ROUTE_VALUE(values+28, cell->rt_on_hangup);
 
+				if (con_set_inslist(&dialog_dbf, dialog_db_handle,
+						&ins_list, insert_keys, DIALOG_TABLE_TOTAL_COL_NO) < 0) {
+					CON_RESET_INSLIST(dialog_db_handle);
+				}
+				CON_SET_CURR_PS(dialog_db_handle, &my_ps_insert);
 				if((dialog_dbf.insert(dialog_db_handle, insert_keys,
 				values, DIALOG_TABLE_TOTAL_COL_NO)) !=0){
-					LM_ERR("could not add another dialog to db\n");
+					LM_ERR("could not add another dialog to db - state=%d callid=%.*s\n",
+							cell->state, cell->callid.len, cell->callid.s);
 					cell = cell->next;
 					continue;
 				}
@@ -1563,8 +1671,7 @@ void dialog_update_db(unsigned int ticks, void *do_lock)
 			} else if ( (cell->flags & DLG_FLAG_CHANGED)!=0 || on_shutdown ){
 				LM_DBG("updating existing dialog %p\n",cell);
 
-				SET_BIGINT_VALUE(values, (((long long)cell->h_entry << 32) |
-								 cell->h_id));
+				SET_BIGINT_VALUE(values, dlg_get_db_id(cell));
 
 				SET_STR_VALUE(values+13, cell->legs[DLG_CALLER_LEG].contact);
 				SET_STR_VALUE(values+14,
@@ -1580,7 +1687,7 @@ void dialog_update_db(unsigned int ticks, void *do_lock)
 				set_final_update_cols(values+21, cell, on_shutdown);
 				SET_INT_VALUE(values+25, cell->flags);
 
-				CON_PS_REFERENCE(dialog_db_handle) = &my_ps_update;
+				CON_SET_CURR_PS(dialog_db_handle, &my_ps_update);
 
 				if((dialog_dbf.update(dialog_db_handle, (insert_keys), 0,
 				(values), (insert_keys+13), (values+13), 1, 13)) !=0) {
@@ -1597,12 +1704,11 @@ void dialog_update_db(unsigned int ticks, void *do_lock)
 				cell->flags &= ~(DLG_FLAG_CHANGED|DLG_FLAG_VP_CHANGED);
 			} else if (db_flush_vp && (cell->flags & DLG_FLAG_VP_CHANGED)) {
 
-				SET_BIGINT_VALUE(values, (((long long)cell->h_entry << 32) |
-								 cell->h_id));
+				SET_BIGINT_VALUE(values, dlg_get_db_id(cell));
 
 				set_final_update_cols(values+21, cell, on_shutdown);
 
-				CON_PS_REFERENCE(dialog_db_handle) = &my_ps_update_vp;
+				CON_SET_CURR_PS(dialog_db_handle, &my_ps_update_vp);
 
 				if((dialog_dbf.update(dialog_db_handle, (insert_keys), 0,
 				(values), (insert_keys+21), (values+21), 1, 4)) !=0) {
@@ -1642,7 +1748,7 @@ static int sync_dlg_db_mem(void)
 	db_val_t * values;
 	db_row_t * rows;
 	struct dlg_entry *d_entry;
-	struct dlg_cell *it,*known_dlg,*dlg=NULL;
+	struct dlg_cell *known_dlg, *dlg = NULL;
 	int i, nr_rows,callee_leg_idx,db_timeout;
 	int no_rows = 10;
 	unsigned int db_caller_cseq = 0, db_callee_cseq = 0;
@@ -1650,7 +1756,7 @@ static int sync_dlg_db_mem(void)
 	struct socket_info *caller_sock,*callee_sock;
 	str callid, from_uri, to_uri, from_tag, to_tag;
 	str cseq1,cseq2,contact1,contact2,rroute1,rroute2,mangled_fu,mangled_tu;
-	int hash_entry,hash_id;
+	unsigned int hash_entry, hash_id;
 	str tag_name;
 	int rc;
 
@@ -1670,14 +1776,13 @@ static int sync_dlg_db_mem(void)
 
 			values = ROW_VALUES(rows + i);
 
-			if (VAL_NULL(values)) {
+			if (VAL_NULL(values) || VAL_TYPE(values) != DB_BIGINT) {
 				LM_ERR("column %.*s cannot be null -> skipping\n",
 					dlg_id_column.len, dlg_id_column.s);
 				continue;
 			}
 
-			hash_entry = (int)(VAL_BIGINT(values) >> 32);
-			hash_id = (int)(VAL_BIGINT(values) & 0x00000000ffffffff);
+			dlg_parse_db_id(VAL_BIGINT(values), hash_entry, hash_id);
 
 			if (VAL_NULL(values+6) || VAL_NULL(values+7)) {
 				LM_ERR("columns %.*s or/and %.*s cannot be null -> skipping\n",
@@ -1694,7 +1799,7 @@ static int sync_dlg_db_mem(void)
 			/*restore the dialog info*/
 			GET_STR_VALUE(callid, values, 1, 1, 0);
 			GET_STR_VALUE(from_tag, values, 3, 1, 0);
-			GET_STR_VALUE(to_tag, values, 5, 1, 1);
+			GET_STR_VALUE(to_tag, values, 5, 1, 0);
 
 			/* TODO - check about hash resize ? maybe hash was lowered & we overflow the hash */
 			known_dlg = 0;
@@ -1703,22 +1808,7 @@ static int sync_dlg_db_mem(void)
 			/* lock the whole entry */
 			dlg_lock( d_table, d_entry);
 
-			for (it=d_entry->first;it;it=it->next)
-				if (it->callid.len == callid.len &&
-					it->legs[DLG_CALLER_LEG].tag.len == from_tag.len &&
-					memcmp(it->callid.s,callid.s,callid.len)==0 &&
-					memcmp(it->legs[DLG_CALLER_LEG].tag.s,from_tag.s,from_tag.len)==0) {
-					/* callid & ftag match */
-					callee_leg_idx = callee_idx(it);
-					if (it->legs[callee_leg_idx].tag.len == to_tag.len &&
-						memcmp(it->legs[callee_leg_idx].tag.s,to_tag.s,to_tag.len)==0) {
-						/* full dlg match */
-						known_dlg = it;
-						break;
-					}
-				}
-
-			if (known_dlg == 0) {
+			if (get_dlg_unsafe(d_entry, &callid, &from_tag, &to_tag, &known_dlg) != 0) {
 				/* we can safely unlock here */
 				dlg_unlock( d_table, d_entry);
 				LM_DBG("First seen dialog - load all stuff - callid = [%.*s]\n",callid.len,callid.s);
@@ -1744,7 +1834,7 @@ static int sync_dlg_db_mem(void)
 						"hash_size: please erase %.*s database and restart\n",
 						dialog_table_name.len, dialog_table_name.s);
 					shm_free(dlg);
-					goto error;
+					continue;
 				}
 
 				/*link the dialog*/
@@ -1759,12 +1849,6 @@ static int sync_dlg_db_mem(void)
 				dlg->start_ts	= VAL_INT(values+6);
 
 				dlg->state 		= VAL_INT(values+7);
-				if (dlg->state==DLG_STATE_CONFIRMED_NA ||
-				dlg->state==DLG_STATE_CONFIRMED) {
-					if_update_stat(dlg_enable_stats, active_dlgs, 1);
-				} else if (dlg->state==DLG_STATE_EARLY) {
-					if_update_stat(dlg_enable_stats, early_dlgs, 1);
-				}
 
 				GET_STR_VALUE(cseq1, values, 9 , 1, 1);
 				GET_STR_VALUE(cseq2, values, 10 , 1, 1);
@@ -1777,10 +1861,10 @@ static int sync_dlg_db_mem(void)
 				GET_STR_VALUE(mangled_tu, values, 24,0,1);
 
 				/* add the 2 legs */
-				if ((dlg_update_leg_info(0, dlg, &from_tag, &rroute1, &contact1,
-				&cseq1, caller_sock,0,0,0)!=0) ||
+				if ((dlg_update_leg_info(0, dlg, &from_tag, &rroute1,&contact1,
+				NULL, &cseq1, caller_sock,0,0,0,0)!=0) ||
 				(dlg_update_leg_info(1, dlg, &to_tag, &rroute2, &contact2,
-				&cseq2, callee_sock,&mangled_fu,&mangled_tu,0)!=0) ) {
+				NULL, &cseq2, callee_sock,&mangled_fu,&mangled_tu,0,0)!=0) ) {
 					LM_ERR("dlg_set_leg_info failed\n");
 					/* destroy the dialog */
 					unref_dlg(dlg,1);
@@ -1813,6 +1897,10 @@ static int sync_dlg_db_mem(void)
 				if (!VAL_NULL(values+25)) {
 					dlg->mod_flags = VAL_INT(values+25);
 				}
+
+				GET_ROUTE_VALUE( dlg->rt_on_answer, values, 26);
+				GET_ROUTE_VALUE( dlg->rt_on_timeout, values, 27);
+				GET_ROUTE_VALUE( dlg->rt_on_hangup, values, 28);
 
 				/* top hiding */
 				dlg->flags = VAL_INT(values+22);
@@ -1861,11 +1949,11 @@ static int sync_dlg_db_mem(void)
 					}
 				}
 
-				if (dlg_has_reinvite_pinging(dlg)) {
+				if (restore_reinvite_pinging(dlg) != 0)
+					LM_ERR("failed to fetch some Re-INVITE pinging data\n");
+				else if (dlg_has_reinvite_pinging(dlg)) {
 					/* re-populate Re-INVITE pinging fields */
-					if (restore_reinvite_pinging(dlg) != 0)
-						LM_ERR("failed to fetch some Re-INVITE pinging data\n");
-					else if (0 != insert_reinvite_ping_timer(dlg))
+					if (0 != insert_reinvite_ping_timer(dlg))
 						LM_CRIT("Unable to insert dlg %p into reinvite"
 						        "ping timer\n", dlg);
 					else {
@@ -1885,7 +1973,16 @@ static int sync_dlg_db_mem(void)
 					ref_dlg(dlg,1);
 				}
 
+				update_dlg_stats(dlg, +1);
+
 				run_load_callback_per_dlg(dlg);
+
+				if (dlg->state==DLG_STATE_CONFIRMED_NA ||
+				dlg->state==DLG_STATE_CONFIRMED) {
+					if_update_stat(dlg_enable_stats, active_dlgs, 1);
+				} else if (dlg->state==DLG_STATE_EARLY) {
+					if_update_stat(dlg_enable_stats, early_dlgs, 1);
+				}
 			} else {
 				/* we already saw this dialog before
 				 * check which is the newer version */
@@ -1996,12 +2093,15 @@ static int sync_dlg_db_mem(void)
 
 					/* skip flags - keep what we have - anyway can't tell which is new */
 
+					known_dlg->locked_by = process_no;
+
 					/* profiles - do not insert into a profile
 					 * is dlg is already in that profile*/
 					if (!VAL_NULL(values+18))
 						read_dialog_profiles( VAL_STR(values+18).s,
 							strlen(VAL_STR(values+18).s), known_dlg, 1, 0);
 
+					known_dlg->locked_by = 0;
 					dlg_unlock( d_table, d_entry);
 				} else {
 					/* DB has newer state, just update fields from DB */
@@ -2066,6 +2166,11 @@ static int sync_dlg_db_mem(void)
 					if (dlg_db_mode==DB_MODE_SHUTDOWN)
 						known_dlg->flags |= DLG_FLAG_NEW;
 
+					/* update the routes too */
+					GET_ROUTE_VALUE( known_dlg->rt_on_answer, values, 26);
+					GET_ROUTE_VALUE( known_dlg->rt_on_timeout, values, 27);
+					GET_ROUTE_VALUE( known_dlg->rt_on_hangup, values, 28);
+
 					/* update script variables
 					 * if already found, delete the old one
 					 * and replace with new one */
@@ -2078,12 +2183,15 @@ static int sync_dlg_db_mem(void)
 						}
 					}
 
+					known_dlg->locked_by = process_no;
+
 					/* profiles - do not insert into a profile
 					 * is dlg is already in that profile*/
 					if (!VAL_NULL(values+18))
 						read_dialog_profiles( VAL_STR(values+18).s,
 							strlen(VAL_STR(values+18).s), known_dlg, 1, 0);
 
+					known_dlg->locked_by = 0;
 					dlg_unlock( d_table, d_entry);
 				}
 			}
@@ -2133,7 +2241,8 @@ static int restore_dlg_db(void)
 			&state_column,		&timeout_column,		&from_cseq_column,
 			&to_cseq_column,	&from_ping_cseq_column, &to_ping_cseq_column,
 			&vars_column,		&profiles_column,		&sflags_column,
-			&mflags_column,		&flags_column};
+			&mflags_column,		&flags_column,			&rt_on_answer_column,
+			&rt_on_timeout_column,&rt_on_hangup_column};
 
 	VAL_TYPE(values) = DB_BIGINT;
 	VAL_TYPE(values+8) =
@@ -2147,6 +2256,9 @@ static int restore_dlg_db(void)
 	VAL_TYPE(values+11) = VAL_TYPE(values+12) = VAL_TYPE(values+13) =
 	VAL_TYPE(values+14) = VAL_TYPE(values+17) = VAL_TYPE(values+18) =
 	VAL_TYPE(values+22) = DB_STR;
+
+	VAL_TYPE(values+26) = VAL_TYPE(values+27) = VAL_TYPE(values+28) =
+	DB_STRING;
 
 	VAL_TYPE(values+21) = DB_BLOB;
 
@@ -2168,8 +2280,7 @@ static int restore_dlg_db(void)
 
 			callee_leg = callee_idx(cell);
 
-			SET_BIGINT_VALUE(values, (((long long)cell->h_entry << 32) |
-							 cell->h_id));
+			SET_BIGINT_VALUE(values, dlg_get_db_id(cell));
 			SET_STR_VALUE(values+1, cell->callid);
 			SET_STR_VALUE(values+2, cell->from_uri);
 
@@ -2213,14 +2324,19 @@ static int restore_dlg_db(void)
 			SET_INT_VALUE(values+25, cell->flags & ~(DLG_FLAG_NEW|DLG_FLAG_CHANGED|
 													 DLG_FLAG_VP_CHANGED));
 
-			CON_PS_REFERENCE(dialog_db_handle) = &my_ps_insert;
-			if (con_set_inslist(&dialog_dbf,dialog_db_handle,
-			&ins_list,insert_keys,DIALOG_TABLE_TOTAL_COL_NO) < 0 )
-				CON_RESET_INSLIST(dialog_db_handle);
+			SET_ROUTE_VALUE(values+26, cell->rt_on_answer);
+			SET_ROUTE_VALUE(values+27, cell->rt_on_timeout);
+			SET_ROUTE_VALUE(values+28, cell->rt_on_hangup);
 
+			if (con_set_inslist(&dialog_dbf, dialog_db_handle,
+					&ins_list, insert_keys, DIALOG_TABLE_TOTAL_COL_NO) < 0) {
+				CON_RESET_INSLIST(dialog_db_handle);
+			}
+			CON_SET_CURR_PS(dialog_db_handle, &my_ps_insert);
 			if((dialog_dbf.insert(dialog_db_handle, insert_keys,
 			values, DIALOG_TABLE_TOTAL_COL_NO)) !=0){
-				LM_ERR("could not add another dialog to db\n");
+				LM_ERR("could not add another dialog to db - state=%d callid=%.*s\n",
+						cell->state, cell->callid.len, cell->callid.s);
 				continue;
 			}
 

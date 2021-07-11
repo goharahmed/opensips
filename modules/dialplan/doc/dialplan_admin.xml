@@ -1,7 +1,7 @@
 <!-- Module User's Guide -->
 
 <chapter>
-    <title>&adminguide;</title>
+	<title>&adminguide;</title>
 
 	<section id="overview" xreflabel="Overview">
 	<title>Overview</title>
@@ -17,10 +17,11 @@
 	<para>
 	At startup, the module will load all transformation rules from one or more
 	dialplan-compatible tables. The data of each table will be stored in a
-	partition which is defined by the "db_url" and "table_name" parameters.
-	Every table row will be stored in memory as a translation rule. Each rule
-	will describe how the matching should be made, how the input value should
-	be modified and which attributes should be set for the matching transformation.
+	<emphasis>partition</emphasis> (data source), which is defined by the
+	"db_url" and "table_name" properties.  Every table row will be stored in
+	memory as a translation rule. Each rule will describe how the matching
+	should be made, how the input value should be modified and which attributes
+	should be set for the matching transformation.
 	</para>
 	<para>
 	A dialplan rule can be of two types:
@@ -99,7 +100,7 @@
 		</para>
 		<para>
 		The definition of the tables used by the dialplan module can be found
-		at <ulink url="http://www.opensips.org/html/db-schema.html#AEN1501">&osipsdbdocslink;#AEN1501</ulink>
+		at <ulink url="https://opensips.org/db-schema.html#AEN1501">&osipsdbdocslink;#AEN1501</ulink>
 		</para>
 		<section>
 		<title>What to place in table</title>
@@ -319,31 +320,42 @@
 	<section id="param_partition" xreflabel="partition">
 		<title><varname>partition</varname> (string)</title>
 		<para>
-		This can be used to define new db_url and table_name parameters from which
-		to load the translation rules. These parameters will be held in partitions.
-		The db_url parameter is mandatory. The order of the parameters does not matter.
-		Multiple partitions can be defined and you can also define the default partition
-		here. The name of this partition is "default". In order to be able to use a table
-		from a partition, its name must be found in the "version" table belonging to the
-		database defined in the partition's db_url.
+		Specify a new dialplan partition (data source).  This parameter may
+		be set multiple times.  Each partition may have a specific "db_url" and
+		"table_name".  If not specified, these values will be inherited from
+		<xref linkend="param_db_url"/>, db_default_url or
+		<xref linkend="param_table_name"/>, respectively.  The name of
+		the default partition is 'default'.
+		</para>
+		<para>
+		Note: OpenSIPS will validate each partition, so make sure to add any
+		required entries in the "version" table of each database defined
+		through the 'db_url' property.
 		</para>
 
 		<example>
-		<title> Set <varname>partition</varname> parameter</title>
+		<title> Defining the <varname>'pstn'</varname> partition</title>
 		<programlisting format="linespecific">
 ...
-modparam("dialplan", "partition",
-  "part2:table_name=dialplan;db_url=mysql://user:pw@localhost/db;")
+modparam("dialplan", "partition", "
+	pstn:
+		table_name = dialplan;
+		db_url = mysql://opensips:opensipsrw@127.0.0.1/opensips")
 ...
 		</programlisting>
 		</example>
 
 		<example>
-		<title> Set <varname>default partition</varname> with partition parameter</title>
+		<title> Define the 'pstn' partition and make it the 'default' partition, so we avoid loading the 'dialplan' table</title>
 		<programlisting format="linespecific">
 ...
-modparam("dialplan", "partition",
-  "default:table_name=dialplan;db_url=mysql://user:pw@localhost/db;")
+db_default_url = "mysql://opensips:opensipsrw@localhost/opensips"
+
+loadmodule "dialplan.so"
+modparam("dialplan", "partition", "
+	pstn:
+		table_name = dialplan_pstn")
+modparam("dialplan", "partition", "default: pstn")
 ...
 		</programlisting>
 		</example>
@@ -352,19 +364,20 @@ modparam("dialplan", "partition",
 	<section id="param_db_url" xreflabel="db_url">
 		<title><varname>db_url</varname> (string)</title>
 		<para>
-		The translation rules will be loaded using this database url.This
-		will be the db_url parameter value for the default partition.
+		The default DB connection of the module, overriding the global
+		'db_default_url' setting.  Once specified, partitions which are missing
+		the 'db_url' property will inherit their URL from this value.
 		</para>
 		<para>
-		NOTE: if you intend to use the default partition you have to explicity 
-		set this default db_url, otherwise OpenSIPS will not start (he value 
-		of global default db_url is not inherited here! ).
+		<emphasis>
+			Default value is NULL (not set).
+		</emphasis>
 		</para>
 		<example>
 		<title>Set <varname>db_url</varname> parameter</title>
 		<programlisting format="linespecific">
 ...
-modparam("dialplan", "db_url", "mysql://user:passwb@localhost/db")
+modparam("dialplan", "db_url", "mysql://user:passwd@localhost/db")
 ...
 		</programlisting>
 		</example>
@@ -373,10 +386,9 @@ modparam("dialplan", "db_url", "mysql://user:passwb@localhost/db")
 	<section id="param_table_name" xreflabel="table_name">
 		<title><varname>table_name</varname> (string)</title>
 		<para>
-		The table's name from which to load the translation rules.This
-		will be the table_name parameter value for the default partition.
-		The db_url must be defined for the default partition in order to
-		be able to define it's table name.
+		The default name of the table from which to load translation rules.
+		Partitions which are missing the 'table_name' property will inherit
+		their table name from this value.
 		</para>
 		<para>
 		<emphasis>
@@ -538,8 +550,8 @@ modparam("dialplan", "repl_exp_col", "column_name")
 	<section id="param_timerec_col" xreflabel="timerec_col">
 		<title><varname>timerec_col</varname> (integer)</title>
 		<para>
-		The column name that indicates an additional time recurrence check within the rule.
-		(column values are RFC 2445-compatible strings)
+		The column name that indicates an additional time recurrence check 
+		within the rule (column values are RFC 2445-compatible strings)
 		</para>
 		<para>
 		<emphasis>
@@ -603,7 +615,7 @@ modparam("dialplan", "attrs_col", "column_name")
 
 	<section id="func_dp_translate" xreflabel="dp_translate()">
 	<title>
-		<function moreinfo="none">dp_translate([partition:]id, src/dest[, attrs_pvar])</function>
+		<function moreinfo="none">dp_translate(id, input, [out_var], [attrs_var], [partition])</function>
 	</title>
 	<para>
 	Will try to translate the src string into dest string according to
@@ -613,78 +625,48 @@ modparam("dialplan", "attrs_col", "column_name")
 	<itemizedlist>
 	<listitem>
 		<para>
-		<emphasis>id</emphasis> - the dialplan id of possible matching rules.
-		The <emphasis>id</emphasis> parameter can have the following types:
-		</para>
-		<itemizedlist>
-			<listitem>
-			<para><emphasis>integer</emphasis> - the dialplan id is statically
-			assigned </para>
-			</listitem>
-
-			<listitem>
-			<para><emphasis>pvar</emphasis> - the dialplan id is the value of an
-			existing pseudo-variable (as integer value)
-			</para>
-			</listitem>
-
-		</itemizedlist>
-	</listitem>
-
-	<listitem>
-		<para>
-		<emphasis>partition</emphasis> - Specifies the partition where the search will
-		take place. This parameter can be ommited. If the parameter is omitted the default
-		partition will be used if exists.
-		The <emphasis>partition</emphasis> parameter can have the following types:
-		</para>
-		<itemizedlist>
-			<listitem>
-			<para><emphasis>string</emphasis> - the table name is statically
-			assigned </para>
-			</listitem>
-
-			<listitem>
-			<para><emphasis>pvar</emphasis> - the partition name is the value of an
-			existing pseudo-variable (as string value)
-			</para>
-			</listitem>
-
-		</itemizedlist>
-	</listitem>
-
-	<listitem>
-		<para>
-		<emphasis>src/dest</emphasis> - input and output of the function.
-		If this parameter is missing the default parameter
-		<quote>ruri.user/ruri.user</quote> will be used, thus translating
-		the request uri.
-		</para>
-		<para>
-		The <quote>src</quote> variable can be any type of pseudo-variable.
-		</para>
-		<para>
-		The <quote>dest</quote> variable  can be also any type of
-		pseudo-variable, but it must be a writable one.
+		<emphasis>id</emphasis> (int) - the dialplan id to be used for matching rules
 		</para>
 	</listitem>
 
 	<listitem>
 		<para>
-		<emphasis>attrs_pvar (output, optional)</emphasis> - a pseudo-variable
-		which will hold the attributes of the matched translation rule.
+		<emphasis>input</emphasis> (string) - input string to be used for rule matching
+		and for computing the output string.
+		</para>
+	</listitem>
+
+	<listitem>
+		<para>
+		<emphasis>out_var</emphasis> (var, optional) - variable to be populated/written with 
+		the output string (if provided by the translation rule).
+		</para>
+	</listitem>
+
+	<listitem>
+		<para>
+		<emphasis>attrs_var</emphasis> (var, optional) - variable to be populated/written 
+		with the atribute string, if provided by the translation rule.
+	</para>
+	</listitem>
+
+	<listitem>
+		<para>
+		<emphasis>partition</emphasis> (string, optional) - the name of the partition
+		(set of data) to be used for locating the DP ID.
 	</para>
 	</listitem>
 	</itemizedlist>
 	<para>
-	This function can be used from REQUEST_ROUTE, BRANCH_ROUTE.
+	This function can be used from REQUEST_ROUTE, FAILURE_ROUTE, LOCAL_ROUTE,
+	BRANCH_ROUTE, STARTUP_ROUTE, TIMER_ROUTE and EVENT_ROUTE.
 	</para>
 	<example>
 	<title><function>dp_translate</function> usage</title>
 	<programlisting format="linespecific">
 ...
-dp_translate("240", "$ruri.user/$avp(dest)");
-xlog("translated to var $avp(dest) \n");
+dp_translate(240, $ru, $var(out));
+xlog("translated into '$var(out)' \n");
 ...
 	</programlisting>
 	</example>
@@ -693,7 +675,7 @@ xlog("translated to var $avp(dest) \n");
 	<programlisting format="linespecific">
 ...
 $avp(src) = $ruri.user;
-dp_translate("$var(x)", "$avp(src)/$var(y)", "$var(attrs)");
+dp_translate($var(x), $avp(src), $var(y), $var(attrs));
 xlog("translated to var $var(y) with attributes: '$var(attrs)'\n");
 ...
 	</programlisting>
@@ -702,9 +684,9 @@ xlog("translated to var $var(y) with attributes: '$var(attrs)'\n");
 	<title><function>dp_translate</function> usage</title>
 	<programlisting format="linespecific">
 ...
-$avp(src) = $uri.user;
-dp_translate("example_partition:$var(x)", "$avp(src)/$var(y)", "$avp(attrs)");
-xlog("translated to var $var(y) with attributes: '$avp(attrs)'\n");
+$var(id) = 10;
+dp_translate($var(id), $avp(in), , $avp(attrs), "example_partition");
+xlog("matched with attributes '$avp(attrs) against example_partition'\n");
 ...
 	</programlisting>
 	</example>
@@ -712,10 +694,8 @@ xlog("translated to var $var(y) with attributes: '$avp(attrs)'\n");
 	<title><function>dp_translate</function> usage</title>
 	<programlisting format="linespecific">
 ...
-$var(partition) = "default";
-$var(id)	= 10;
-dp_translate("$var(partition):$var(id)", "$avp(src)/$var(y)");
-xlog("translate to var $var(y) partition $var(partition)")
+dp_translate(10, $var(in), , , $var(part));
+xlog("'$var(in)' matched against partition '$var(part)'\n")
 ...
 	</programlisting>
 	</example>
@@ -739,64 +719,70 @@ xlog("translate to var $var(y) partition $var(partition)")
 		<para>Parameters: <emphasis>1</emphasis></para>
 			<itemizedlist>
 				<listitem>
-				<para><emphasis>table_name</emphasis> (optional) - Partition to be reloaded.
-				If no table is specified, the table specified in the "partition"
-				parameter (default "default") will be reloaded.</para>
+				<para><emphasis>partition</emphasis> (optional) - Partition
+					to be reloaded.  If not specified, all partitions will be
+					reloaded.</para>
+				</listitem>
+			</itemizedlist>
+		<para>
+		MI DATAGRAM Command Format:
+		</para>
+		<programlisting  format="linespecific">
+		opensips-cli -x mi dp_reload
+		</programlisting>
+		</section>
+
+	<section id="mi_dp_translate" xreflabel="dp_translate">
+			<title><function moreinfo="none">dp_translate</function></title>
+			<para>
+			It will apply a translation rule identified by a dialplan
+				id on an input string.
+			</para>
+		<para>
+		Name: <emphasis>dp_translate</emphasis>
+		</para>
+		<para>Parameters: <emphasis>3</emphasis></para>
+			<itemizedlist>
+			<listitem>
+			<para><emphasis>dpid</emphasis> - the dpid of the rule set used for
+			match the input string</para>
+			</listitem>
+			<listitem>
+			<para><emphasis>input</emphasis> - the input string</para>
+			</listitem>
+			<listitem>
+			<para><emphasis>partition</emphasis> - (optional) the name of the 
+			partition when the dpid is located</para>
+			</listitem>
+			</itemizedlist>
+		<para>
+		MI DATAGRAM Command Format:
+		</para>
+		<programlisting  format="linespecific">
+        opensips-cli -x mi dp_translate 10 +40123456789
+		</programlisting>
+		</section>
+
+	<section id="mi_dp_show_partiton" xreflabel="dp_show_partiton">
+		<title><function moreinfo="none">dp_show_partiton</function></title>
+		<para>
+			Display partition(s) details.
+		</para>
+		<para>
+		Name: <emphasis>dp_show_partiton</emphasis>
+		</para>
+		<para>Parameters: <emphasis>2</emphasis></para>
+			<itemizedlist>
+				<listitem>
+				<para><emphasis>partition</emphasis> (optional) - The 
+				partition name. If no partition is specified, all known 
+				partitions will be listed.</para>
 				</listitem>
 			</itemizedlist>
  		<para>
 		MI DATAGRAM Command Format:
 		</para>
-        <programlisting  format="linespecific">
-		opensips-cli -x mi dp_reload
-		</programlisting>
-		</section>
-
-    <section id="mi_dp_translate" xreflabel="dp_translate">
-			<title><function moreinfo="none">dp_translate</function></title>
-			<para>
-                It will apply a translation rule identified by a dialplan
-                id on an input string.
-			</para>
-		<para>
-		Name: <emphasis>dp_translate</emphasis>
-		</para>
-        <para>Parameters: <emphasis>2</emphasis></para>
-        	<itemizedlist>
-                <listitem>
-                <para><emphasis>dpid</emphasis> - Given in the format "[Partition Name:]Dialplan ID" this parameter represents the dpid of the rules used to match the input string. The table name can be ommited. The default table is dialplan.</para>
-                </listitem>
-                <listitem>
-                <para><emphasis>Input String</emphasis></para>
-                </listitem>
-            </itemizedlist>
- 		<para>
-		MI DATAGRAM Command Format:
-		</para>
-        <programlisting  format="linespecific">
-        opensips-cli -x mi dp_translate 10 +40123456789
-		</programlisting>
-		</section>
-
-    <section id="mi_dp_show_partiton" xreflabel="dp_show_partiton">
-			<title><function moreinfo="none">dp_show_partiton</function></title>
-			<para>
-                Display partition(s) details.
-			</para>
-		<para>
-		Name: <emphasis>dp_show_partiton</emphasis>
-		</para>
-        <para>Parameters: <emphasis>2</emphasis></para>
-        	<itemizedlist>
-                <listitem>
-                <para><emphasis>partition</emphasis> (optional) - The partition name.
-                If no partition is specified, all known partitions will be listed.</para>
-                </listitem>
-            </itemizedlist>
- 		<para>
-		MI DATAGRAM Command Format:
-		</para>
-        <programlisting  format="linespecific">
+		<programlisting  format="linespecific">
         opensips-cli -x mi dp_translate default
 		</programlisting>
 		</section>

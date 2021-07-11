@@ -25,30 +25,40 @@
 #include "../../evi/evi_transport.h"
 #include "../../evi/evi_modules.h"
 #include "../tm/tm_load.h"
-#include "ebr_data.h"
 
+#include "ebr_data.h"
+#include "api.h"
 
 
 /* module API */
 static int fix_event_name(void** param);
 static int fix_notification_route(void** param);
-static int fixup_notify(void** param, int param_no);
-static int fixup_wait(void** param, int param_no);
+static int fixup_check_avp(void** param);
 
 static int mod_init(void);
-static int notify_on_event(struct sip_msg *msg, void *ev, void *avp_filter,
-	void *route, void *timeout);
+static int cfg_validate(void);
+static int notify_on_event(struct sip_msg *msg, ebr_event* event, pv_spec_t *avp_filter,
+					void *route, int *timeout);
 static int wait_for_event(struct sip_msg* msg, async_ctx *ctx,
-		char *ev, char* avp_filter, char* timeout);
+					ebr_event* event, pv_spec_t* avp_filter, int* timeout);
 
 
 /* EVI transport API */
-static int ebr_raise(struct sip_msg *msg, str* ev_name,
-		evi_reply_sock *sock, evi_params_t *params);
+static int ebr_raise(struct sip_msg *msg, str* ev_name, evi_reply_sock *sock,
+	evi_params_t *params, evi_async_ctx_t *async_ctx);
 static evi_reply_sock* ebr_parse(str socket);
 static int ebr_match(evi_reply_sock *sock1, evi_reply_sock *sock2);
 static str ebr_print(evi_reply_sock *sock);
 
+void ebr_bind(ebr_api_t *api);
+ebr_event *get_ebr_event(const str *name);
+int api_notify_on_event(struct sip_msg *msg, ebr_event *event,
+                        const ebr_filter *filters,
+                        ebr_pack_params_cb pack_params,
+                        ebr_notify_cb notify, int timeout);
+int api_wait_for_event(struct sip_msg *msg, async_ctx *ctx,
+                        ebr_event *event, const ebr_filter *filters,
+                        ebr_pack_params_cb pack_params, int timeout);
 
 /* IPC type registered with the IPC layer */
 ipc_handler_type ebr_ipc_type;
@@ -66,22 +76,34 @@ static param_export_t params[] = {
 
 /* exported module functions (to script) */
 static cmd_export_t cmds[]={
-	{"notify_on_event", (cmd_function)notify_on_event, 3,
-		fixup_notify, 0,
-		EVENT_ROUTE|REQUEST_ROUTE|ONREPLY_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE },
-	{"notify_on_event", (cmd_function)notify_on_event, 4,
-		fixup_notify, 0,
-		EVENT_ROUTE|REQUEST_ROUTE|ONREPLY_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE },
-	{0,0,0,0,0,0}
+	{"notify_on_event", (cmd_function)notify_on_event, {
+		{CMD_PARAM_STR, fix_event_name, 0},
+		{CMD_PARAM_VAR, fixup_check_avp, 0},
+		{CMD_PARAM_STR, fix_notification_route, 0},
+		{CMD_PARAM_INT, 0 ,0}, {0,0,0}},
+		EVENT_ROUTE|REQUEST_ROUTE|ONREPLY_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE},
+	{"ebr_bind", (cmd_function)ebr_bind, {{0,0,0}}, 0},
+	{0,0,{{0,0,0}},0}
 };
 
 /* exported module async functions (to script) */
 static acmd_export_t acmds[] = {
-	{"wait_for_event",  (acmd_function)wait_for_event,  3, fixup_wait },
-	{0, 0, 0, 0}
+	{"wait_for_event",  (acmd_function)wait_for_event, {
+		{CMD_PARAM_STR, fix_event_name, 0},
+		{CMD_PARAM_VAR, fixup_check_avp, 0},
+		{CMD_PARAM_INT, 0 ,0}, {0,0,0}}},
+	{0,0,{{0,0,0}}}
 };
 
-
+static dep_export_t deps = {
+	{ /* OpenSIPS module dependencies */
+		{ MOD_TYPE_DEFAULT, "tm",        DEP_SILENT },
+		{ MOD_TYPE_NULL, NULL, 0 },
+	},
+	{ /* modparam dependencies */
+		{ NULL, NULL },
+	},
+};
 
 /**
  * module exports
@@ -94,8 +116,10 @@ struct module_exports exports= {
 	MODULE_VERSION,
 	/* dlopen flags */
 	DEFAULT_DLFLAGS,
+	/* load function */
+	0,
 	/* OpenSIPS module dependencies */
-	NULL,
+	&deps,
 	/* exported functions */
 	cmds,
 	/* exported async functions */
@@ -112,6 +136,8 @@ struct module_exports exports= {
 	NULL,
 	/* extra processes */
 	NULL,
+	/* module pre-initialization function */
+	NULL,
 	/* module initialization function */
 	mod_init,
 	/* response handling function */
@@ -119,7 +145,9 @@ struct module_exports exports= {
 	/* destroy function */
 	NULL,
 	/* per-child init function */
-	NULL
+	NULL,
+	/* reload confirm function */
+	cfg_validate
 };
 
 
@@ -140,7 +168,7 @@ static evi_export_t evi_backend_ebr = {
 	/* function for printing an EBR socket */
 	ebr_print,
 	/* super flags for unknown purposes :D */
-	(1<<25)
+	(1<<22)
 };
 
 
@@ -162,47 +190,68 @@ static int mod_init(void)
 		return -1;
 	}
 
-	/* try binding to TM if needed and if available */
+	/* try binding to TM if available */
 	memset( &ebr_tmb, 0, sizeof(ebr_tmb) );
-	if ( is_script_func_used("notify_on_event",-1) ) {
-		/* TM may be used passing the transaction context to the
-		 * notification routes */
-		LM_DBG("trying to load TM API, if available\n");
-		if (load_tm_api(&ebr_tmb)<0) {
-			LM_NOTICE("unable to load TM API, so TM context will not be "
-				"available in notification routes\n");
-		}
-	}
+
+	/* TM may be used passing the transaction context to the
+	 * notification routes */
+	LM_DBG("trying to load TM API, if available\n");
+	if (load_tm_api(&ebr_tmb) < 0)
+		LM_NOTICE("unable to load TM API, so TM context will not be "
+		          "available in notification routes\n");
 
 	return 0;
 }
 
 
-/* Fixes an EBR event (given by name) by coverting to an internal
- * structure (if not already found)
- */
-int fix_event_name(void** param)
+void ebr_bind(ebr_api_t *api)
 {
-	str event;
+	api->get_ebr_event = get_ebr_event;
+	api->notify_on_event = api_notify_on_event;
+	api->async_wait_for_event = api_wait_for_event;
+}
+
+
+static int cfg_validate(void)
+{
+	if ( ebr_tmb.t_gett==NULL && is_script_func_used("notify_on_event",-1)) {
+		LM_ERR("notify_on_event() was found, but module started without TM "
+			"support/biding, better restart\n");
+		return 0;
+	}
+
+	return 1;
+}
+
+
+ebr_event *get_ebr_event(const str *name)
+{
 	ebr_event *ev;
 
-	/* convert the event to numerical ID */
-	event.s = (char*)*param;
-	event.len = strlen(event.s);
-
 	/* check if we have the ID in our list */
-	ev = search_ebr_event( &event );
-
-	if (ev==NULL) {
+	if (!(ev = search_ebr_event(name))) {
 		/* add the new event into the list */
-		if ( (ev=add_ebr_event( &event )) == NULL ) {
-			LM_ERR("failed to add event <%s>\n",event.s);
-			return -1;
+		if (!(ev = add_ebr_event(name))) {
+			LM_ERR("failed to add event <%.*s>\n", name->len, name->s);
+			return NULL;
 		}
 	}
 
-	pkg_free(*param);
-	*param = (void*)ev;
+	return ev;
+}
+
+
+/* Fix an EBR event (given by name) by converting to an internal structure */
+int fix_event_name(void** param)
+{
+	ebr_event *ev;
+
+	if (!(ev = get_ebr_event((str *)*param))) {
+		LM_ERR("failed to fix event name\n");
+		return -1;
+	}
+
+	*param = ev;
 	return 0;
 }
 
@@ -210,95 +259,39 @@ int fix_event_name(void** param)
 static int fix_notification_route(void** param)
 {
 	int route_idx;
+	str name_s;
 
-	route_idx = get_script_route_ID_by_name( (char*)*param, rlist, RT_NO);
+	if (pkg_nt_str_dup(&name_s, (str*)*param) < 0)
+		return -1;
+
+	route_idx = get_script_route_ID_by_name(name_s.s,
+		sroutes->request, RT_NO);
 	if (route_idx==-1) {
 		LM_ERR("notification route <%s> not defined in script\n",
-			(char*)*param);
+			name_s.s);
 		return -1;
 	}
-	pkg_free((char*)*param);
+
 	*param = (void*)(long)route_idx;
+	pkg_free(name_s.s);
+	return 0;
+}
+
+static int fixup_check_avp(void** param)
+{
+	if (((pv_spec_t *)*param)->type!=PVT_AVP) {
+		LM_ERR("filter parameter must be an AVP\n");
+		return E_SCRIPT;
+	}
+
 	return 0;
 }
 
 
-int fixup_notify(void** param, int param_no)
+static int notify_on_event(struct sip_msg *msg, ebr_event* event, pv_spec_t *avp_filter,
+									void *route, int *timeout)
 {
-	if (param_no==1) {
-		/* name of the event */
-		return fix_event_name(param);
-	} else
-	if (param_no==2) {
-		/* AVP for key-val event filter */
-		if (fixup_pvar(param)<0)
-			return -1;
-		/* must be an AVP */
-		if (((pv_spec_t*)(*param))->type!= PVT_AVP) {
-			LM_ERR("KEY and VAL filter variables must be AVPs\n");
-			return -1;
-		}
-		pkg_free(*param);
-		/* ugly, but directly grab the ID of the AVP from the spec */
-		*param = (void*)(long)((pv_spec_t*)(*param))->pvp.pvn.u.isname.name.n;
-		return 0;
-	} else
-	if (param_no==3) {
-		/* notification route */
-		return fix_notification_route(param);
-	} else
-	if (param_no==4) {
-		/* timeout */
-		return fixup_igp(param);
-	}
-
-	return -1;
-}
-
-
-int fixup_wait(void** param, int param_no)
-{
-	if (param_no==1) {
-		/* name of the event */
-		return fix_event_name(param);
-	} else
-	if (param_no==2) {
-		/* AVPs for key-val event filter */
-		if (fixup_pvar(param)<0)
-			return -1;
-		/* must be an AVP */
-		if (((pv_spec_t*)(*param))->type!= PVT_AVP) {
-			LM_ERR("KEY and VAL filter variables must be AVPs\n");
-			return -1;
-		}
-		pkg_free(*param);
-		/* ugly, but directly grab the ID of the AVP from the spec */
-		*param = (void*)(long)((pv_spec_t*)(*param))->pvp.pvn.u.isname.name.n;
-		return 0;
-	} else
-	if (param_no==3) {
-		/* timeout */
-		return fixup_igp(param);
-	}
-
-	return -1;
-}
-
-
-static int notify_on_event(struct sip_msg *msg, void *ev, void *avp_filter,
-									void *route, void *timeout)
-{
-	int t = 0;
-	gparam_p gp;
-
-	if (timeout) {
-		gp = (gparam_p)timeout;
-		if (fixup_get_ivalue(msg, gp, &t) < 0) {
-			LM_ERR("can't get timeout!\n");
-		}
-	}
-
-	ebr_event* event=(ebr_event*)ev;
+	ebr_filter *filters;
 
 	if (event->event_id==-1) {
 		/* do the init of the event*/
@@ -308,10 +301,16 @@ static int notify_on_event(struct sip_msg *msg, void *ev, void *avp_filter,
 		}
 	}
 
+	if (pack_ebr_filters(msg, avp_filter->pvp.pvn.u.isname.name.n,
+	                     &filters) < 0) {
+		LM_ERR("failed to build list of EBR filters\n");
+		return -1;
+	}
+
 	/* we have a valid EBR event here, let's subscribe on it */
-	if (add_ebr_subscription( msg, event, (int)(long)avp_filter,
-	    t, route,
-	    EBR_SUBS_TYPE_NOTY ) <0 ) {
+	if (add_ebr_subscription( msg, event, filters,
+	    timeout ? *timeout : 0, NULL, route,
+	    EBR_SUBS_TYPE_NOTY|EBR_DATA_TYPE_ROUT ) <0 ) {
 		LM_ERR("failed to add ebr subscription for event %d\n",
 			event->event_id);
 		return -1;
@@ -321,22 +320,14 @@ static int notify_on_event(struct sip_msg *msg, void *ev, void *avp_filter,
 }
 
 
-static int wait_for_event(struct sip_msg* msg, async_ctx *ctx,
-								char *ev, char* avp_filter, char* timeout)
+int api_notify_on_event(struct sip_msg *msg, ebr_event *event,
+                        const ebr_filter *filters,
+                        ebr_pack_params_cb pack_params,
+                        ebr_notify_cb notify, int timeout)
 {
-	int t = 0; /* timeout */
-	gparam_p gp;
+	ebr_filter *filters_cpy;
 
-	if (timeout) {
-		gp = (gparam_p)timeout;
-		if (fixup_get_ivalue(msg, gp, &t) < 0) {
-			LM_ERR("can't get timeout!\n");
-		}
-	}
-
-	ebr_event* event=(ebr_event*)ev;
-
-	if (event->event_id==-1) {
+	if (event->event_id == -1) {
 		/* do the init of the event*/
 		if (init_ebr_event(event)<0) {
 			LM_ERR("failed to init event\n");
@@ -344,12 +335,41 @@ static int wait_for_event(struct sip_msg* msg, async_ctx *ctx,
 		}
 	}
 
+	if (dup_ebr_filters(filters, &filters_cpy) != 0) {
+		LM_ERR("oom\n");
+		return -1;
+	}
+
 	/* we have a valid EBR event here, let's subscribe on it */
-	if (add_ebr_subscription( msg, event, (int)(long)avp_filter,
-	    t, (void*)ctx,
-	    EBR_SUBS_TYPE_WAIT ) <0 ) {
+	if (add_ebr_subscription( msg, event, filters_cpy,
+	    timeout, pack_params, notify,
+	    EBR_SUBS_TYPE_NOTY|EBR_DATA_TYPE_FUNC ) <0 ) {
 		LM_ERR("failed to add ebr subscription for event %d\n",
 			event->event_id);
+		return -1;
+	}
+
+	return 0;
+}
+
+
+static int _wait_for_event(struct sip_msg *msg, async_ctx *ctx,
+                    ebr_event *event, ebr_filter *filters, int timeout,
+                    ebr_pack_params_cb pack_params)
+{
+	if (event->event_id == -1) {
+		/* do the init of the event*/
+		if (init_ebr_event(event) < 0) {
+			LM_ERR("failed to init event\n");
+			return -1;
+		}
+	}
+
+	/* we have a valid EBR event here, let's subscribe on it */
+	if (add_ebr_subscription(msg, event, filters,
+	    timeout, pack_params, (void *)ctx, EBR_SUBS_TYPE_WAIT) < 0) {
+		LM_ERR("failed to add ebr subscription for event %d\n",
+		       event->event_id);
 		return -1;
 	}
 
@@ -358,7 +378,39 @@ static int wait_for_event(struct sip_msg* msg, async_ctx *ctx,
 	ctx->resume_f = ebr_resume_from_wait;
 	async_status = ASYNC_NO_FD;
 
-	return 1;
+	return 0;
+}
+
+
+static int wait_for_event(struct sip_msg* msg, async_ctx *ctx,
+					ebr_event* event, pv_spec_t* avp_filter, int* timeout)
+{
+	ebr_filter *filters;
+	int rc;
+
+	if (pack_ebr_filters(msg, avp_filter->pvp.pvn.u.isname.name.n,
+	                     &filters) < 0) {
+		LM_ERR("failed to build list of EBR filters\n");
+		return -1;
+	}
+
+	rc = _wait_for_event(msg, ctx, event, filters, *timeout, NULL);
+	return rc == 0 ? 1 : rc;
+}
+
+
+int api_wait_for_event(struct sip_msg *msg, async_ctx *ctx,
+                        ebr_event *event, const ebr_filter *filters,
+                        ebr_pack_params_cb pack_params, int timeout)
+{
+	ebr_filter *filters_cpy;
+
+	if (dup_ebr_filters(filters, &filters_cpy) != 0) {
+		LM_ERR("oom\n");
+		return -1;
+	}
+
+	return _wait_for_event(msg, ctx, event, filters_cpy, timeout, pack_params);
 }
 
 /************ implementation of the EVI transport API *******************/
@@ -419,8 +471,8 @@ static str ebr_print(evi_reply_sock *sock)
 }
 
 
-static int ebr_raise(struct sip_msg *msg, str* ev_name,
-							 evi_reply_sock *sock, evi_params_t *params)
+static int ebr_raise(struct sip_msg *msg, str* ev_name, evi_reply_sock *sock,
+	evi_params_t *params, evi_async_ctx_t *async_ctx)
 {
 	if (!sock || !(sock->flags & EVI_PARAMS)) {
 		LM_ERR("no socket found\n");

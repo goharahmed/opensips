@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2014 OpenSIPS Solutions
+ * Copyright (C) 2009-2020 OpenSIPS Solutions
  * Copyright (C) 2006-2009 Voice System SRL
  *
  * This file is part of opensips, a free SIP server.
@@ -16,23 +16,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
- *
- * History:
- * --------
- * 2006-04-14  initial version (bogdan)
- * 2006-11-28  Added num_100s and num_200s to dlg_cell, to aid in adding
- *             statistics tracking of the number of early, and active dialogs.
- *             (Jeffrey Magder - SOMA Networks)
- * 2007-03-06  syncronized state machine added for dialog state. New tranzition
- *             design based on events; removed num_1xx and num_2xx (bogdan)
- * 2007-07-06  added flags, cseq, contact, route_set and bind_addr
- *             to struct dlg_cell in order to store these information into db
- *             (ancuta)
- * 2008-04-17  added new dialog flag to avoid state tranzitions from DELETED to
- *             CONFIRMED_NA due delayed "200 OK" (bogdan)
- * 2009-09-09  support for early dialogs added; proper handling of cseq
- *             while PRACK is used (bogdan)
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 
@@ -42,6 +26,8 @@
 #include "../../locking.h"
 #include "../../context.h"
 #include "../../mi/mi.h"
+#include "../../lib/dbg/struct_hist.h"
+
 #include "dlg_timer.h"
 #include "dlg_cb.h"
 #include "dlg_vals.h"
@@ -79,6 +65,9 @@
 #define DLG_FLAG_REINVITE_PING_ENGAGED_REPL	(1<<14)
 #define DLG_FLAG_END_ON_RACE_CONDITION		(1<<15)
 #define DLG_FLAG_WAS_CANCELLED			(1<<16)
+#define DLG_FLAG_RACE_CONDITION_OCCURRED	(1<<17)
+#define DLG_FLAG_SELF_EXTENDED_TIMEOUT		(1<<18)
+#define DLG_FLAG_SYNCED                     (1<<19)
 
 #define dlg_has_reinvite_pinging(dlg) \
 	(dlg->flags & DLG_FLAG_REINVITE_PING_CALLER || \
@@ -103,7 +92,10 @@ struct dlg_leg {
 	str route_set;
 	str contact;    /* this leg's Contact URI (most recent version) */
 	str adv_contact;	/* topology hiding advertised contact towards this leg - full header */
-	str adv_sdp;		/* latest SDP advertised towards this leg ( full body ), after all OpenSIPS changes */
+	str in_sdp;			/* latest SDP advertised by the uac ( full body ), after all OpenSIPS changes */
+	str out_sdp;		/* latest SDP advertised towards this leg ( full body ), after all OpenSIPS changes */
+	str tmp_in_sdp;		/* temporarily stored in_sdp until confirmation (200 OK) arrives */
+	str tmp_out_sdp;	/* temporarily stored out_sdp until confirmation (200 OK) arrives */
 	str route_uris[64];
 	int nr_uris;
 	unsigned int last_gen_cseq; /* FIXME - think this can be atomic_t to avoid locking */
@@ -163,6 +155,14 @@ struct dlg_cell
 	struct dlg_profile_link *profile_links;
 	struct dlg_val       *vals;
 	str                  shtag;
+
+	int                  rt_on_answer;
+	int                  rt_on_timeout;
+	int                  rt_on_hangup;
+
+#ifdef DBG_DIALOG
+	struct struct_hist   *hist;
+#endif
 };
 
 
@@ -185,13 +185,24 @@ struct dlg_table
 	gen_lock_set_t     *locks;
 };
 
-
+extern stat_var *active_dlgs;
+extern stat_var *early_dlgs;
+extern struct struct_hist_list *dlg_hist;
 extern struct dlg_table *d_table;
 extern int ctx_dlg_idx;
+extern int dlg_enable_stats;
 
 #define callee_idx(_dlg) \
 	(((_dlg)->legs_no[DLG_LEG_200OK]==0)? \
 		DLG_FIRST_CALLEE_LEG : (_dlg)->legs_no[DLG_LEG_200OK])
+
+#define other_leg(dlg, l) \
+	(l == DLG_CALLER_LEG? callee_idx(dlg): DLG_CALLER_LEG)
+
+#define dlg_get_out_sdp(_dlg, _dst) \
+	((_dlg)->legs[(_dst)].out_sdp.s? \
+	 (_dlg)->legs[(_dst)].out_sdp:(_dlg)->legs[other_leg(_dlg, _dst)].in_sdp)
+
 
 #define ctx_dialog_get() \
 	((struct dlg_cell*)context_get_ptr(CONTEXT_GLOBAL,current_processing_ctx,ctx_dlg_idx) )
@@ -201,7 +212,7 @@ extern int ctx_dlg_idx;
 
 struct dlg_cell *get_current_dialog();
 
-#define dlg_hash(_callid) core_hash(_callid, 0, d_table->size)
+#define dlg_hash(_callid) core_hash(_callid, NULL, d_table->size)
 
 #define dlg_lock(_table, _entry) \
 		lock_set_get( (_table)->locks, (_entry)->lock_idx);
@@ -271,19 +282,32 @@ static inline str* dlg_leg_to_uri(struct dlg_cell *dlg,int leg_no)
 void unlink_unsafe_dlg(struct dlg_entry *d_entry, struct dlg_cell *dlg);
 void destroy_dlg(struct dlg_cell *dlg);
 
+#ifdef DBG_DIALOG
+#define DBG_REF(dlg, cnt) \
+	sh_log((dlg)->hist, DLG_REF, "h=%d, ref %d with +%d", \
+	       (dlg)->h_entry, (dlg)->ref, (cnt));
+#define DBG_UNREF(dlg, cnt) \
+	sh_log((dlg)->hist, DLG_UNREF, "h=%d, unref %d with -%d", \
+	       (dlg)->h_entry, (dlg)->ref, (cnt));
+#define DBG_FLUSH(dlg) sh_flush((dlg)->hist)
+#else
+#define DBG_REF(dlg, cnt)
+#define DBG_UNREF(dlg, cnt)
+#define DBG_FLUSH(dlg)
+#endif
+
 #define ref_dlg_unsafe(_dlg,_cnt)     \
 	do { \
+		DBG_REF(_dlg, _cnt); \
 		(_dlg)->ref += (_cnt); \
-		LM_DBG("ref dlg %p with %d -> %d\n", \
-			(_dlg),(_cnt),(_dlg)->ref); \
 	}while(0)
 
 #define unref_dlg_unsafe(_dlg,_cnt,_d_entry)   \
 	do { \
+		DBG_UNREF(_dlg, _cnt); \
 		(_dlg)->ref -= (_cnt); \
-		LM_DBG("unref dlg %p with %d -> %d in entry %p\n",\
-			(_dlg),(_cnt),(_dlg)->ref,(_d_entry));\
 		if ((_dlg)->ref<0) {\
+			DBG_FLUSH(_dlg); \
 			LM_CRIT("bogus ref %d with cnt %d for dlg %p [%u:%u] "\
 				"with clid '%.*s' and tags '%.*s' '%.*s'\n",\
 				(_dlg)->ref, _cnt, _dlg,\
@@ -291,10 +315,10 @@ void destroy_dlg(struct dlg_cell *dlg);
 				(_dlg)->callid.len, (_dlg)->callid.s,\
 				dlg_leg_print_info(_dlg, DLG_CALLER_LEG, tag), \
 				dlg_leg_print_info(_dlg, callee_idx(_dlg), tag)); \
+			abort(); \
 		}\
 		if ((_dlg)->ref<=0) { \
 			unlink_unsafe_dlg( _d_entry, _dlg);\
-			LM_DBG("ref <=0 for dialog %p, destroying it\n",_dlg);\
 			destroy_dlg(_dlg);\
 		}\
 	}while(0)
@@ -307,7 +331,7 @@ void destroy_dlg(struct dlg_cell *dlg);
 	({ \
 		char *___p; \
 		int ___flags = 0; \
-		for (___p=(input).s; ___p < (input).s + (input).len; ___p++) \
+		for (___p=(input)->s; ___p < (input)->s + (input)->len; ___p++) \
 		{ \
 			switch (*___p) \
 			{ \
@@ -359,8 +383,8 @@ struct dlg_cell* build_new_dlg(str *callid, str *from_uri,
 int dlg_clone_callee_leg(struct dlg_cell *dlg, int cloned_leg_idx);
 
 int dlg_update_leg_info(int leg_idx, struct dlg_cell *dlg, str* tag, str *rr,
-		str *contact,str *cseq, struct socket_info *sock,
-		str *mangled_from,str *mangled_to,str *sdp);
+		str *contact, str *adv_ct, str *cseq, struct socket_info *sock,
+		str *mangled_from,str *mangled_to,str *in_sdp, str *out_sdp);
 
 int dlg_update_cseq(struct dlg_cell *dlg, unsigned int leg, str *cseq,
 						int field_type);
@@ -374,13 +398,49 @@ struct dlg_cell* get_dlg(str *callid, str *ftag, str *ttag,
 
 struct dlg_cell* get_dlg_by_val(str *attr, str *val);
 
-struct dlg_cell* get_dlg_by_callid( str *callid, int active_only);
+struct dlg_cell* get_dlg_by_callid(const str *callid, int active_only);
 
-void link_dlg(struct dlg_cell *dlg, int n);
+struct dlg_cell* get_dlg_by_did(str *did, int active_only);
 
-void unref_dlg(struct dlg_cell *dlg, unsigned int cnt);
+struct dlg_cell *get_dlg_by_dialog_id(str *dialog_id);
 
-void ref_dlg(struct dlg_cell *dlg, unsigned int cnt);
+int get_dlg_direction(void);
+
+void link_dlg(struct dlg_cell *dlg, int extra_refs);
+
+#define _link_dlg_unsafe(d_entry, dlg) \
+	do { \
+		if (!d_entry->first) { \
+			d_entry->first = d_entry->last = dlg; \
+		} else { \
+			d_entry->last->next = dlg; \
+			dlg->prev = d_entry->last; \
+			d_entry->last = dlg; \
+		} \
+		DBG_REF(dlg, 1); \
+		dlg->ref++; \
+		d_entry->cnt++; \
+	} while (0)
+
+#define link_dlg_unsafe(d_entry, dlg) \
+	do { \
+		dlg->h_id = d_entry->next_id++; \
+		_link_dlg_unsafe(d_entry, dlg); \
+	} while (0)
+
+void _unref_dlg(struct dlg_cell *dlg, unsigned int cnt);
+#define unref_dlg(dlg, cnt) \
+	do { \
+		DBG_UNREF(dlg, cnt); \
+		_unref_dlg(dlg, cnt); \
+	} while (0)
+
+void _ref_dlg(struct dlg_cell *dlg, unsigned int cnt);
+#define ref_dlg(dlg, cnt) \
+	do { \
+		DBG_REF(dlg, cnt); \
+		_ref_dlg(dlg, cnt); \
+	} while (0)
 
 void next_state_dlg(struct dlg_cell *dlg, int event, int dir, int *old_state,
 		int *new_state, int *unref, int last_dst_leg, char replicate_events);
@@ -532,6 +592,43 @@ static inline int match_dialog(struct dlg_cell *dlg, str *callid,
 */
 }
 
+/* @return: 0 if found, -1 otherwise */
+static inline int get_dlg_unsafe(struct dlg_entry *d_entry,
+          str *callid, str *from_tag, str *to_tag, struct dlg_cell **out_dlg)
+{
+	struct dlg_cell *it;
+	int callee_leg_idx;
+
+	for (it = d_entry->first; it; it = it->next) {
+		if (it->callid.len == callid->len &&
+			it->legs[DLG_CALLER_LEG].tag.len == from_tag->len &&
+			!memcmp(it->callid.s, callid->s, callid->len) &&
+			!memcmp(it->legs[DLG_CALLER_LEG].tag.s, from_tag->s, from_tag->len)) {
+			/* callid & ftag match */
+			callee_leg_idx = callee_idx(it);
+			if (it->legs[callee_leg_idx].tag.len == to_tag->len &&
+				!memcmp(it->legs[callee_leg_idx].tag.s, to_tag->s, to_tag->len)) {
+				/* full dlg match */
+				*out_dlg = it;
+				return 0;
+			}
+		}
+	}
+
+	*out_dlg = NULL;
+	return -1;
+}
+
+static inline void update_dlg_stats(struct dlg_cell *dlg, int amount)
+{
+	if (dlg->state == DLG_STATE_CONFIRMED_NA ||
+	        dlg->state==DLG_STATE_CONFIRMED) {
+		if_update_stat(dlg_enable_stats, active_dlgs, amount);
+	} else if (dlg->state == DLG_STATE_EARLY) {
+		if_update_stat(dlg_enable_stats, early_dlgs, amount);
+	}
+}
+
 int mi_print_dlg(mi_item_t *dialog_obj, struct dlg_cell *dlg, int with_context);
 
 static inline void init_dlg_term_reason(struct dlg_cell *dlg,char *reason,int reason_len)
@@ -549,7 +646,17 @@ static inline void init_dlg_term_reason(struct dlg_cell *dlg,char *reason,int re
 	}
 }
 
+
 int state_changed_event_init(void);
 void state_changed_event_destroy(void);
+
+#define dlg_get_db_id(_dlg) \
+	(((unsigned long long)(_dlg)->h_entry << 32) | ((_dlg)->h_id))
+
+#define dlg_parse_db_id(_did, _h_entry, _h_id) \
+	do { \
+		(_h_entry) = (unsigned int)((unsigned long long)(_did) >> 32); \
+		(_h_id) = (unsigned int)((unsigned long long)(_did) & 0xFFFFFFFFULL); \
+	} while(0)
 
 #endif

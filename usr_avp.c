@@ -125,7 +125,7 @@ struct usr_avp* new_avp(unsigned short flags, int id, int_str val)
 
 	if (flags & AVP_VAL_STR) {
 		/* avp type ID, str value */
-		s = (str*)(void*)&(avp->data);
+		s = (str *)&avp->data;
 		s->len = val.s.len;
 		s->s = (char*)s + sizeof(str);
 		memcpy( s->s, val.s.s , s->len);
@@ -424,6 +424,19 @@ void destroy_index_avp( unsigned short flags, int name, int index)
 	destroy_avp( avp );
 }
 
+void destroy_avp_list_bulk( struct usr_avp **list )
+{
+	struct usr_avp *avp, *foo;
+
+	avp = *list;
+	while( avp ) {
+		foo = avp;
+		avp = avp->next;
+		shm_free_bulk( foo );
+	}
+	*list = 0;
+}
+
 
 void destroy_avp_list_unsafe( struct usr_avp **list )
 {
@@ -476,7 +489,7 @@ struct usr_avp** set_avp_list( struct usr_avp **list )
 	return foo;
 }
 
-static inline int __search_avp_map(str *alias, map_t m)
+static inline int __search_avp_map(const str *alias, map_t m)
 {
 	int **id = (int **)map_find(m, *alias);
 	LM_DBG("looking for [%.*s] avp %s - found %d\n", alias->len, alias->s,
@@ -485,7 +498,7 @@ static inline int __search_avp_map(str *alias, map_t m)
 }
 
 
-static int lookup_avp_alias_str(str *alias, int extra)
+static int lookup_avp_alias_str(const str *alias, int extra)
 {
 	int id;
 	if (!alias || !alias->len || !alias->s)
@@ -501,7 +514,7 @@ static int lookup_avp_alias_str(str *alias, int extra)
 	return id;
 }
 
-static inline int new_avp_alias(str *alias)
+static inline int new_avp_alias(const str *alias)
 {
 	int id = last_avp_index + 1;
 
@@ -518,7 +531,7 @@ static inline int new_avp_alias(str *alias)
 	return id;
 }
 
-static inline int new_avp_extra_alias(str *alias)
+static inline int new_avp_extra_alias(const str *alias)
 {
 	int id;
 
@@ -531,6 +544,7 @@ static inline int new_avp_extra_alias(str *alias)
 	lock_get(extra_lock);
 	id = (*last_avp_index_shm) + 1;
 	if (map_put(avp_map_shm, *alias, int2p(id))) {
+		lock_release(extra_lock);
 		LM_WARN("[BUG] Value should have already be found [%.*s]\n",
 				alias->len, alias->s);
 		return -1;
@@ -543,7 +557,7 @@ static inline int new_avp_extra_alias(str *alias)
 	return id;
 }
 
-int parse_avp_spec( str *name, int *avp_name)
+int parse_avp_spec(const str *name, int *avp_name)
 {
 	int id, extra;
 

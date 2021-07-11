@@ -40,6 +40,7 @@
 #include "../../mi/mi.h"
 #include "../../mem/mem.h"
 #include "../../mem/shm_mem.h"
+#include "../../reactor_proc.h"
 #include "mi_fifo.h"
 #include "fifo_fnc.h"
 
@@ -67,14 +68,14 @@ FILE* mi_create_fifo(void)
 
 	/* create FIFO ... */
 	if ((mkfifo(mi_fifo_name, mi_fifo_mode)<0)) {
-		LM_ERR("can't create FIFO: %s (mode=%d)\n", strerror(errno), mi_fifo_mode);
+		LM_ERR("can't create FIFO: %s (mode=%o)\n", strerror(errno), mi_fifo_mode);
 		return 0;
 	}
 
 	LM_DBG("FIFO created @ %s\n", mi_fifo_name );
 
 	if ((chmod(mi_fifo_name, mi_fifo_mode)<0)) {
-		LM_ERR("can't chmod FIFO: %s (mode=%d)\n", strerror(errno), mi_fifo_mode);
+		LM_ERR("can't chmod FIFO: %s (mode=%o)\n", strerror(errno), mi_fifo_mode);
 		return 0;
 	}
 
@@ -455,67 +456,6 @@ static inline char *get_reply_filename( char * file, int len )
 	return reply_fifo_s;
 }
 
-static inline void free_async_handler( struct mi_handler *hdl )
-{
-	if (hdl)
-		shm_free(hdl);
-}
-
-
-static void fifo_close_async(mi_response_t *resp, struct mi_handler *hdl, int done)
-{
-	FILE *reply_stream;
-	char *name;
-
-	name = (char*)hdl->param;
-
-	if (resp || done) {
-		/*open fifo reply*/
-		reply_stream = mi_open_reply_pipe( name );
-		if (reply_stream==NULL) {
-			LM_ERR("cannot open reply pipe %s\n", name );
-			return;
-		}
-
-		/* TODO: handle reply
-		if (mi_rpl!=0) {
-			mi_write_tree( reply_stream, mi_rpl, 0);
-			free_mi_tree( mi_rpl );
-		} else {
-			mi_fifo_reply( reply_stream, "%d %.*s\n", code, reason.len, reason.s);
-			mi_trace_reply( 0, 0, code, &reason, 0, t_dst);
-		}
-		*/
-
-		fclose(reply_stream);
-	}
-
-	if (done)
-		free_async_handler( hdl );
-	return;
-}
-
-
-static inline struct mi_handler* build_async_handler( char *name, int len)
-{
-	struct mi_handler *hdl;
-	char *p;
-
-	hdl = (struct mi_handler*)shm_malloc( sizeof(struct mi_handler) + len + 1);
-	if (hdl==0) {
-		LM_ERR("no more shared memory\n");
-		return 0;
-	}
-
-	p = (char*)(hdl) + sizeof(struct mi_handler);
-	memcpy( p, name, len+1 );
-
-	hdl->handler_f = fifo_close_async;
-	hdl->param = (void*)p;
-
-	return hdl;
-}
-
 
 #define mi_open_reply(_name,_file,_err) \
 	do { \
@@ -539,7 +479,7 @@ static inline struct mi_handler* build_async_handler( char *name, int len)
 
 #define mi_trace_fifo_request(method, params) \
 	do { \
-		if ((is_mi_cmd_traced(mi_trace_mod_id, cmd)) || !cmd) { \
+		if ((!cmd || is_mi_cmd_traced(mi_trace_mod_id, cmd))) { \
 			mi_trace_request(0, 0, method, strlen(method), \
 						params, &backend, t_dst); \
 		} \
@@ -547,7 +487,7 @@ static inline struct mi_handler* build_async_handler( char *name, int len)
 
 #define mi_trace_fifo_reply(message) \
 	do { \
-		if ((is_mi_cmd_traced(mi_trace_mod_id, cmd)) || !cmd) { \
+		if ((!cmd || is_mi_cmd_traced(mi_trace_mod_id, cmd))) { \
 			mi_trace_reply(0, 0, message, t_dst); \
 		} \
 	} while(0)
@@ -556,7 +496,7 @@ static inline struct mi_handler* build_async_handler( char *name, int len)
 	do { \
 		if (_file) { \
 			str _s = str_init(_msg); \
-			mi_open_reply( file, _stream, _err); \
+			mi_open_reply( _file, _stream, _err); \
 			if (mi_fifo_write(_file, _stream, &_s, cmd) < 0) { \
 				LM_ERR("cannot reply %s error\n", _msg); \
 				goto _err; \
@@ -574,6 +514,7 @@ struct mi_fifo_flush_params {
 static int mi_fifo_write(char *file, FILE *stream, str *msg, struct mi_cmd *cmd)
 {
 	int ret, written;
+	FILE *old_stream = stream;
 
 	mi_open_reply(file, stream, error);
 
@@ -589,6 +530,8 @@ static int mi_fifo_write(char *file, FILE *stream, str *msg, struct mi_cmd *cmd)
 
 	mi_trace_fifo_reply(msg);
 
+	if (!old_stream && stream)
+		fclose(stream);
 	return written;
 
 error:
@@ -612,151 +555,270 @@ static int mi_fifo_flush(unsigned char *buf, int len, void *param)
 	return mi_fifo_write(params->file, params->stream, &msg, params->cmd);
 }
 
+struct mi_async_param {
+	mi_item_t *id;
+	char *file;
+};
 
-void mi_fifo_server(FILE *fifo_stream)
+static inline void free_async_handler(struct mi_handler *hdl)
+{
+	if (hdl) {
+		free_shm_mi_item(((struct mi_async_param *)hdl->param)->id);
+		shm_free(hdl);
+	}
+}
+
+static int mi_fifo_reply(FILE *reply_stream, char *file, str *buf,
+		mi_response_t *response, mi_item_t *id, struct mi_cmd *cmd)
 {
 	struct mi_fifo_flush_params params;
-	const char **parse_end = NULL;
+
+	params.cmd = cmd;
+	params.file = file;
+	params.stream = reply_stream;
+
+	return print_mi_response_flush(response, id,
+			mi_fifo_flush, &params, buf, mi_fifo_pp);
+}
+
+static void fifo_close_async(mi_response_t *resp, struct mi_handler *hdl, int done)
+{
+	FILE *reply_stream = NULL;
+	struct mi_async_param *p;
+	int rc;
+	char buffer[MAX_MI_FIFO_BUFFER];
+	str buf;
+	buf.s = buffer;
+	buf.len = MAX_MI_FIFO_BUFFER;
+	struct mi_cmd *cmd = NULL; /* used by mi_throw_error */
+
+	p = (struct mi_async_param *)hdl->param;
+
+	if (resp || done) {
+		if (resp!=0) {
+			rc = mi_fifo_reply(NULL, p->file, &buf, resp, p->id, NULL);
+			if (rc == MI_NO_RPL) {
+				LM_DBG("No reply for jsonrpc notification\n");
+			} else if (rc < 0) {
+				LM_ERR("failed to print json response\n");
+				mi_throw_error(reply_stream, p->file, free_request,
+						"failed to print response");
+			} else
+				free_mi_response(resp);
+		} else {
+			mi_throw_error(reply_stream, p->file, free_request,
+					"failed to build response");
+		}
+
+		if (reply_stream)
+			fclose(reply_stream);
+	}
+
+free_request:
+	if (done)
+		free_async_handler(hdl);
+	return;
+}
+
+
+static inline struct mi_handler* build_async_handler(char *name, int len, mi_item_t *id)
+{
+	struct {
+		struct mi_handler hdl;
+		struct mi_async_param p;
+		char file[0];
+	} *buf;
+
+	buf = shm_malloc(sizeof(*buf) + len + 1);
+	if (buf == NULL) {
+		LM_ERR("no more shared memory\n");
+		return 0;
+	}
+	buf->p.file = buf->file;
+	buf->p.id = shm_clone_mi_item(id);
+
+	memcpy(buf->file, name, len+1 );
+
+	buf->hdl.handler_f = fifo_close_async;
+	buf->hdl.param = &buf->p;
+
+	return &buf->hdl;
+}
+
+
+int mi_fifo_callback(int fd, void *fs, int was_timeout)
+{
+	static int remain_len = 0;
+	FILE *fifo_stream = (FILE*)fs;
+	const char *parse_end = NULL;
 	mi_request_t request;
 	int read_len, parse_len;
 	char *req_method = NULL;
-	char *file_sep, *file, *p;
+	char *file_sep, *file, *p, *f;
 	struct mi_cmd *cmd = NULL;
 	FILE *reply_stream;
-	int remain_len = 0;
 	struct mi_handler *hdl = NULL;
 	mi_response_t *response = NULL;
 	int rc;
 	str buf;
 
-	while(1) {
-		reply_stream = NULL;
+	reply_stream = NULL;
 
-		/* commands must look this way ':[filename]:' */
-		if (mi_read_fifo(mi_buf + remain_len,
-				MAX_MI_FIFO_BUFFER - remain_len,
-				&fifo_stream, &read_len)) {
-			LM_ERR("failed to read command\n");
-			goto skip_unparsed;
-		}
-		remain_len = read_len;
-		parse_len = read_len;
-		p = mi_buf;
+	/* commands must look this way ':[filename]:' */
+	if (mi_read_fifo(mi_buf + remain_len,
+			MAX_MI_FIFO_BUFFER - remain_len,
+			&fifo_stream, &read_len)) {
+		LM_ERR("failed to read command\n");
+		goto skip_unparsed;
+	}
+	remain_len = read_len;
+	parse_len = read_len;
+	p = mi_buf;
 
-		while (parse_len && is_ws(*p)) {
-			p++;
-			parse_len--;
-		}
-
-		if (parse_len==0) {
-			LM_DBG("command file is empty\n");
-			goto skip_unparsed;
-		}
-		if (parse_len<3) {
-			LM_DBG("command must have at least 3 chars (has %d)\n", parse_len);
-			continue;
-		}
-		if (*p!=MI_CMD_SEPARATOR) {
-			LM_ERR("command must begin with %c: %.*s\n", MI_CMD_SEPARATOR, parse_len, p);
-			goto skip_unparsed;
-		}
+	while (parse_len && is_ws(*p)) {
 		p++;
 		parse_len--;
-		file = p;
-		file_sep=memchr(p, MI_CMD_SEPARATOR , parse_len);
-		if (file_sep==NULL) {
-			LM_ERR("file separator missing: %.*s\n", read_len, mi_buf);
+	}
+
+	if (parse_len==0) {
+		LM_DBG("command file is empty\n");
+		goto skip_unparsed;
+	}
+	if (parse_len<3) {
+		LM_DBG("command must have at least 3 chars (has %d)\n", parse_len);
+		return -1;
+	}
+	if (*p!=MI_CMD_SEPARATOR) {
+		LM_ERR("command must begin with %c: %.*s\n",
+			MI_CMD_SEPARATOR, parse_len, p);
+		goto skip_unparsed;
+	}
+	p++;
+	parse_len--;
+	file = p;
+	file_sep=memchr(p, MI_CMD_SEPARATOR , parse_len);
+	if (file_sep==NULL) {
+		LM_ERR("file separator missing: %.*s\n", read_len, mi_buf);
+		goto skip_unparsed;
+	}
+	if (file_sep - file + 1 >= parse_len) {
+		LM_DBG("no command specified yet: %.*s\n", read_len, mi_buf);
+		return -1;
+	}
+	p = file_sep + 1;
+	parse_len -= file_sep - file + 1;
+	if (file_sep==file) {
+		file = NULL; /* no reply expected */
+	} else {
+		f = get_reply_filename(file, file_sep - file);
+		if (f==NULL) {
+			LM_ERR("error trimming filename: %.*s\n",
+				(int)(file_sep - file), file);
 			goto skip_unparsed;
 		}
-		if (file_sep - file + 1 >= parse_len) {
-			LM_DBG("no command specified yet: %.*s\n", read_len, mi_buf);
-			continue;
-		}
-		p = file_sep + 1;
-		parse_len -= file_sep - file + 1;
-		if (file_sep==file) {
-			file = NULL; /* no reply expected */
-		} else {
-			file = get_reply_filename(file, file_sep - file);
-			if (file==NULL) {
-				LM_ERR("error trimming filename: %.*s\n", (int)(file_sep - file), file);
-				goto skip_unparsed;
-			}
-		}
+		file = f;
+	}
 
-		/* make the command null terminated */
-		p[parse_len] = '\0';
-		memset(&request, 0, sizeof request);
-		if (parse_mi_request(p, parse_end, &request) < 0) {
-			LM_ERR("cannot parse command: %.*s\n", parse_len, p);
-			continue;
-		}
+	/* make the command null terminated */
+	p[parse_len] = '\0';
+	memset(&request, 0, sizeof request);
+	if (parse_mi_request(p, &parse_end, &request) < 0) {
+		LM_ERR("cannot parse command: %.*s\n", parse_len, p);
+		return -1;
+	}
 
-		if (parse_end) {
-			parse_len -= *parse_end - p;
-			p = (char *)*parse_end;
-			memmove(mi_buf, p, parse_len);
-		} else
-			parse_len = 0;
-		remain_len = parse_len;
+	if (parse_end && parse_len != parse_end - p) {
+		parse_len -= parse_end - p;
+		p = (char *)parse_end;
+		memmove(mi_buf, p, parse_len);
+	} else
+		parse_len = 0;
+	remain_len = parse_len;
 
-		req_method = mi_get_req_method(&request);
-		if (req_method)
-			cmd = lookup_mi_cmd(req_method, strlen(req_method));
-		/* if asyncron cmd, build the async handler */
-		if (cmd && cmd->flags&MI_ASYNC_RPL_FLAG) {
-			hdl = build_async_handler(file, strlen(file));
-			if (hdl==0) {
-				LM_ERR("failed to build async handler\n");
+	req_method = mi_get_req_method(&request);
+	if (req_method)
+		cmd = lookup_mi_cmd(req_method, strlen(req_method));
+	/* if asyncron cmd, build the async handler */
+	if (cmd && cmd->flags&MI_ASYNC_RPL_FLAG) {
+		hdl = build_async_handler(file, strlen(file), request.id);
+		if (hdl==0) {
+			LM_ERR("failed to build async handler\n");
 
-				mi_throw_error(reply_stream, file, free_request,
-						"failed to build async handler");
-
-				goto free_request;
-			}
-		} else {
-			hdl = 0;
-			mi_open_reply( file, reply_stream, free_request);
-			if (!cmd)
-				LM_INFO("command %s not found!\n", req_method);
-		}
-
-		mi_trace_fifo_request(req_method, request.params);
-		response = handle_mi_request(&request, cmd, hdl);
-		LM_DBG("got mi response = [%p]\n", response);
-
-		if (response == NULL) {
-			LM_ERR("failed to build response!\n");
 			mi_throw_error(reply_stream, file, free_request,
-					"failed to build response");
-		} else if (response != MI_ASYNC_RPL) {
-			buf.s = mi_buf + remain_len;
-			buf.len = MAX_MI_FIFO_BUFFER - remain_len;
-			if (file) {
-				params.file = file;
-				params.stream = reply_stream;
-				params.cmd = cmd;
-				rc = print_mi_response_flush(response, request.id,
-						mi_fifo_flush, &params, &buf, mi_fifo_pp);
-				if (rc == MI_NO_RPL) {
-					LM_DBG("No reply for jsonrpc notification\n");
-				} else if (rc < 0) {
-					LM_ERR("failed to print json response\n");
-					mi_throw_error(reply_stream, file, free_request,
-							"failed to print response");
-				} else
-					free_mi_response(response);
-			}
-			/* if there is no file specified, there is nothing to reply */
+					"failed to build async handler");
+
+			goto free_request;
 		}
+	} else {
+		hdl = 0;
+		mi_open_reply( file, reply_stream, free_request);
+		if (!cmd)
+			LM_INFO("command %s not found!\n", req_method);
+	}
+
+	mi_trace_fifo_request(req_method, request.params);
+	response = handle_mi_request(&request, cmd, hdl);
+	LM_DBG("got mi response = [%p]\n", response);
+
+	if (response == NULL) {
+		LM_ERR("failed to build response!\n");
+		mi_throw_error(reply_stream, file, free_request,
+				"failed to build response");
+	} else if (response != MI_ASYNC_RPL) {
+		buf.s = mi_buf + remain_len;
+		buf.len = MAX_MI_FIFO_BUFFER - remain_len;
+		if (file) {
+			rc = mi_fifo_reply(reply_stream, file, &buf,
+					response, request.id, cmd);
+			if (rc == MI_NO_RPL) {
+				LM_DBG("No reply for jsonrpc notification\n");
+			} else if (rc < 0) {
+				LM_ERR("failed to print json response\n");
+				mi_throw_error(reply_stream, file, free_request,
+						"failed to print response");
+			} else
+				free_mi_response(response);
+		}
+		/* if there is no file specified, there is nothing to reply */
+	} else
+		goto skip_unparsed;
 
 free_request:
-		free_async_handler(hdl);
-		free_mi_request_parsed(&request);
-		if (reply_stream)
-			fclose(reply_stream);
-		continue;
+	free_async_handler(hdl);
+	free_mi_request_parsed(&request);
+	if (reply_stream)
+		fclose(reply_stream);
+	return 0;
 skip_unparsed:
-		remain_len = 0;
-	}
+	remain_len = 0;
+	return 0;
 }
+
+
+void mi_fifo_server(FILE *fifo_stream)
+{
+	int fd;
+
+	if (reactor_proc_init( "MI FIFO" )<0) {
+		LM_ERR("failed to init the MI FIFO reactor\n");
+		return;
+	}
+
+	fd = fileno(fifo_stream);
+	if (fd<0) {
+		LM_ERR("failed to retriev fd from stream\n");
+		return;
+	}
+
+	if (reactor_proc_add_fd( fd, mi_fifo_callback, fifo_stream)<0) {
+		LM_CRIT("failed to add FIFO listen socket to reactor\n");
+		return;
+	}
+
+	reactor_proc_loop();
+
+	/* we get here only if the "loop"-ing failed to start*/
+
+	return;
+}
+

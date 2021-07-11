@@ -1,7 +1,7 @@
 /*
  * call center module - call queuing and distributio
  *
- * Copyright (C) 2014 OpenSIPS Solutions
+ * Copyright (C) 2014-2020 OpenSIPS Solutions
  *
  * This file is part of opensips, a free SIP server.
  *
@@ -17,11 +17,7 @@
  *
  * You should have received a copy of the GNU General Public License 
  * along with this program; if not, write to the Free Software 
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
- *
- * History:
- * --------
- *  2014-03-17 initial version (bogdan)
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 
@@ -33,6 +29,8 @@
 #include "../../locking.h"
 #include "../../ut.h"
 #include "../../trim.h"
+#include "../../timer.h"
+#include "../../evi/evi.h"
 #include "../b2b_logic/b2b_load.h"
 #include "cc_data.h"
 
@@ -42,6 +40,9 @@ extern b2bl_api_t b2b_api;
 
 extern unsigned int wrapup_time;
 
+/* events */
+static str agent_event = str_init("E_CALLCENTER_AGENT_REPORT");
+static event_id_t agent_evi_id;
 
 static void free_cc_flow( struct cc_flow *flow);
 static void free_cc_agent( struct cc_agent *agent);
@@ -129,6 +130,12 @@ struct cc_data* init_cc_data(void)
 	}
 	if (lock_set_init(data->call_locks)==0 ) {
 		LM_CRIT("failed to init set of call locks\n");
+		goto error;
+	}
+
+	agent_evi_id = evi_publish_event(agent_event);
+	if (agent_evi_id == EVI_ERROR) {
+		LM_ERR("cannot register %.*s event\n", agent_event.len, agent_event.s);
 		goto error;
 	}
 
@@ -239,8 +246,10 @@ static unsigned long cc_flow_get_load( void *flow_p)
 }
 #endif
 
+
 int add_cc_flow( struct cc_data *data, str *id, int priority, str *skill,
-												str *cid, str *recordings )
+		str *cid, int max_wrapup, int diss_hangup, int diss_ewt_th, 
+		int diss_qsize_th, int diss_onhold_th, str *recordings )
 {
 	struct cc_flow *flow, *prev_flow;
 	unsigned int i;
@@ -267,6 +276,13 @@ int add_cc_flow( struct cc_data *data, str *id, int priority, str *skill,
 		flow->id.len = id->len;
 		/* priority */
 		flow->priority = priority;
+		/* max wrapup time */
+		flow->max_wrapup = max_wrapup;
+		/* dissuading related options */
+		flow->diss_hangup = diss_hangup;
+		flow->diss_ewt_th = diss_ewt_th;
+		flow->diss_qsize_th = diss_qsize_th;
+		flow->diss_onhold_th = diss_onhold_th;
 		/* skill */
 		flow->skill = get_skill_id( data, skill );
 		if (flow->skill==0) {
@@ -373,6 +389,13 @@ int add_cc_flow( struct cc_data *data, str *id, int priority, str *skill,
 		/* flow already exists -> update */
 		/* priority */
 		flow->priority = priority;
+		/* max wrapup time */
+		flow->max_wrapup = max_wrapup;
+		/* dissuading related options */
+		flow->diss_hangup = diss_hangup;
+		flow->diss_ewt_th = diss_ewt_th;
+		flow->diss_qsize_th = diss_qsize_th;
+		flow->diss_onhold_th = diss_onhold_th;
 		/* skill - needs to be changed ? */
 		skill_id = get_skill_id(data,skill);
 		if (skill_id==0) {
@@ -471,7 +494,8 @@ static unsigned long cc_agent_get_att( void *agent_p)
 #endif
 
 int add_cc_agent( struct cc_data *data, str *id, str *location,
-				str *skills, unsigned int logstate, unsigned int last_call_end)
+				str *skills, unsigned int logstate, unsigned int own_wrapup,
+												unsigned int wrapup_end_time)
 {
 	struct cc_agent *agent, *prev_agent= 0;
 	struct sip_uri uri;
@@ -513,6 +537,8 @@ int add_cc_agent( struct cc_data *data, str *id, str *location,
 		agent->did = uri.user;
 		/* LOG STATE */
 		agent->loged_in = logstate;
+		/* WRAPUP TIME */
+		agent->wrapup_time = (own_wrapup==0)? wrapup_time : own_wrapup;
 		/* set of skills */
 		if (skills && skills->len) {
 			p = skills->s;
@@ -562,9 +588,9 @@ int add_cc_agent( struct cc_data *data, str *id, str *location,
 			goto error;
 		}
 #endif
-		if(last_call_end && (last_call_end + wrapup_time < (int)time(NULL))) {
+		if (wrapup_end_time && (wrapup_end_time > (int)time(NULL))) {
 			agent->state = CC_AGENT_WRAPUP;
-			agent->last_call_end = last_call_end - startup_time; /* it will be a negative value */
+			agent->wrapup_end_time = wrapup_end_time - startup_time;
 		}
 		agent->is_new = 1;
 		/* link the agent */
@@ -596,6 +622,8 @@ int add_cc_agent( struct cc_data *data, str *id, str *location,
 		if(logstate != agent->loged_in) {
 			agent_switch_login(data, agent, prev_agent);
 		}
+		/* WRAPUP TIME */
+		agent->wrapup_time = (own_wrapup==0)? wrapup_time : own_wrapup;
 		/* skills - needs to be changed ? */
 		agent->no_skills = 0;
 		if (skills && skills->len) {
@@ -673,14 +701,15 @@ void cc_list_remove_call(struct cc_data *data, struct cc_call *call)
 	print_call_list(data);
 }
 
-struct cc_call* new_cc_call(struct cc_data *data, struct cc_flow *flow, str *dn, str *un)
+struct cc_call* new_cc_call(struct cc_data *data, struct cc_flow *flow,
+		str *dn, str *un, str *param)
 {
 	struct cc_call *call;
 	char *p;
 
 	/* new call structure */
 	call = (struct cc_call*)shm_malloc( sizeof(struct cc_call) +
-		(dn?dn->len:0) + (un?un->len:0) );
+		(dn?dn->len:0) + (un?un->len:0) + (param?param->len:0) );
 	if (call==NULL) {
 		LM_ERR("no more shm mem for a new call\n");
 		return NULL;
@@ -700,6 +729,12 @@ struct cc_call* new_cc_call(struct cc_data *data, struct cc_flow *flow, str *dn,
 		call->caller_un.len = un->len;
 		memcpy( p, un->s, un->len );
 		p += un->len;
+	}
+	if (param && param->s && param->len) {
+		call->script_param.s = p;
+		call->script_param.len = param->len;
+		memcpy( p, param->s, param->len );
+		p += param->len;
 	}
 
 	call->recv_time = get_ticks();
@@ -736,6 +771,9 @@ void free_cc_call(struct cc_data * data, struct cc_call *call)
 
 	if(call->b2bua_id.s)
 		shm_free(call->b2bua_id.s);
+
+	if (call->b2bua_agent_id.s)
+		shm_free(call->b2bua_agent_id.s);
 
 	shm_free(call);
 }
@@ -1031,4 +1069,81 @@ struct cc_call *cc_queue_pop_call_for_agent(struct cc_data *data,
 
 	return NULL;
 }
+
+
+void agent_raise_event(struct cc_agent *agent, struct cc_call *call)
+{
+	static str agent_id_str = str_init("agent_id");
+	static str status_str = str_init("status");
+	static str status_offline_str = str_init("offline");
+	static str status_free_str = str_init("free");
+	static str status_incall_str = str_init("incall");
+	static str status_wrapup_str = str_init("wrapup");
+	static str wrapup_ends_str = str_init("wrapup_ends");
+	static str flow_id_str = str_init("flow_id");
+
+	evi_params_p list;
+	str *txt = NULL;
+	int ts;
+
+	if (agent_evi_id == EVI_ERROR || !evi_probe_event(agent_evi_id))
+		return;
+
+	list = evi_get_params();
+	if (!list) {
+		LM_ERR("cannot create event params\n");
+		return;
+	}
+
+	if (evi_param_add_str(list, &agent_id_str, &agent->id) < 0) {
+		LM_ERR("cannot add agent_id\n");
+		goto error;
+	}
+
+	if (!agent->loged_in) {
+		txt = &status_offline_str;
+	} else {
+		switch (agent->state) {
+			case CC_AGENT_FREE:
+				txt = &status_free_str;
+				break;
+			case CC_AGENT_INCALL:
+				txt = &status_incall_str;
+				break;
+			case CC_AGENT_WRAPUP:
+				txt = &status_wrapup_str;
+				break;
+		}
+	}
+
+	if (evi_param_add_str(list, &status_str, txt) < 0) {
+		LM_ERR("cannot add state\n");
+		goto error;
+	}
+
+	if (agent->state==CC_AGENT_WRAPUP) {
+		ts = (int)time(NULL)+agent->wrapup_end_time-get_ticks();
+		if (evi_param_add_int(list, &wrapup_ends_str, &ts) < 0) {
+			LM_ERR("cannot add wrapup time\n");
+			goto error;
+		}
+	}
+
+	if (agent->state==CC_AGENT_INCALL && call) {
+		if (evi_param_add_str(list, &flow_id_str, &call->flow->id) < 0) {
+			LM_ERR("cannot add wrapup time\n");
+			goto error;
+		}
+	}
+
+
+	if (evi_raise_event(agent_evi_id, list)) {
+		LM_ERR("unable to send agent report event\n");
+	}
+	return;
+
+error:
+	evi_free_params(list);
+}
+
 

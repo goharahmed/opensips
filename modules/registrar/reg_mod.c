@@ -2,6 +2,7 @@
  * Registrar module interface
  *
  * Copyright (C) 2001-2003 FhG Fokus
+ * Copyright (C) 2020 OpenSIPS Solutions
  *
  * This file is part of opensips, a free SIP server.
  *
@@ -54,39 +55,37 @@
  */
 
 #include <stdio.h>
+
 #include "../../sr_module.h"
 #include "../../timer.h"
 #include "../../dprint.h"
 #include "../../error.h"
 #include "../../socket_info.h"
 #include "../../pvar.h"
+#include "../../mod_fix.h"
+#include "../../lib/reg/config.h"
+#include "../../lib/reg/pn.h"
+#include "../../lib/reg/common.h"
+
 #include "../usrloc/ul_mod.h"
 #include "../signaling/signaling.h"
-#include "../../mod_fix.h"
 
 #include "save.h"
 #include "lookup.h"
 #include "reply.h"
 #include "reg_mod.h"
 
-
-
-
-
 /*! \brief Module init & destroy function */
 static int  mod_init(void);
 static int  child_init(int);
 static void mod_destroy(void);
-/*! \brief Fixup functions */
-static int registrar_fixup(void** param, int param_no);
-static int fixup_remove(void** param, int param_no);
-/*! \brief Functions */
-static int add_sock_hdr(struct sip_msg* msg, char *str, char *foo);
+static int cfg_validate(void);
 
-static int fixup_is_registered(void **param, int param_no);
-static int fixup_is_aor_registered(void **param, int param_no);
-static int fixup_is_contact_registered(void **param, int param_no);
-static int fixup_is_ip_registered(void **param, int param_no);
+/*! \brief Fixup functions */
+static int domain_fixup(void** param);
+
+/*! \brief Functions */
+static int add_sock_hdr(struct sip_msg* msg, str *str);
 
 int default_expires = 3600; 			/*!< Default expires value in seconds */
 qvalue_t default_q  = Q_UNSPECIFIED;	/*!< Default q value multiplied by 1000 */
@@ -97,7 +96,6 @@ int min_expires     = 60;			/*!< Minimum expires the phones are allowed to use i
  						 * use 0 to switch expires checking off */
 int max_expires     = 0;			/*!< Maximum expires the phones are allowed to use in seconds,
  						 * use 0 to switch expires checking off */
-int max_contacts = 0;		/*!< Maximum number of contacts per AOR (0=no checking) */
 int retry_after = 0;				/*!< The value of Retry-After HF in 5xx replies */
 
 extern ucontact_t **selected_cts;
@@ -115,11 +113,11 @@ char* attr_avp_param = 0;
 unsigned short attr_avp_type = 0;
 int attr_avp_name;
 
+usrloc_api_t ul;
 
 int reg_use_domain = 0;
 /*!< Realm prefix to be removed */
-char* realm_pref    = "";
-str realm_prefix;
+str realm_prefix = str_init("");
 
 str sock_hdr_name = {0,0};
 str gruu_secret = {0,0};
@@ -140,58 +138,56 @@ struct sig_binds sigb;
 struct tm_binds tmb;
 
 
-/*! \brief
- * Exported functions
- */
 static cmd_export_t cmds[] = {
-	{"save",         (cmd_function)save,         1,  registrar_fixup,  0,
-		REQUEST_ROUTE|ONREPLY_ROUTE },
-	{"save",         (cmd_function)save,         2,  registrar_fixup,  0,
-		REQUEST_ROUTE|ONREPLY_ROUTE },
-	{"save",         (cmd_function)save,         3,  registrar_fixup,  0,
-		REQUEST_ROUTE|ONREPLY_ROUTE },
-	{"save",         (cmd_function)save,         4,  registrar_fixup,  0,
-		REQUEST_ROUTE|ONREPLY_ROUTE },
-	{"remove",       (cmd_function)w_remove_2,   2,  fixup_remove,     0,
-		REQUEST_ROUTE|ONREPLY_ROUTE },
-	{"remove",       (cmd_function)w_remove_3,   3,  fixup_remove,     0,
-		REQUEST_ROUTE|ONREPLY_ROUTE },
-	{"remove",       (cmd_function)w_remove_4,   4,  fixup_remove,     0,
-		REQUEST_ROUTE|ONREPLY_ROUTE },
-	{"remove",       (cmd_function)_remove,      5,  fixup_remove,     0,
-		REQUEST_ROUTE|ONREPLY_ROUTE },
-	{"lookup",       (cmd_function)lookup,       1,  registrar_fixup,  0,
-		REQUEST_ROUTE | FAILURE_ROUTE },
-	{"lookup",       (cmd_function)lookup,       2,  registrar_fixup,  0,
-		REQUEST_ROUTE | FAILURE_ROUTE },
-	{"lookup",       (cmd_function)lookup,       3,  registrar_fixup,  0,
-		REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE },
-	{"add_sock_hdr", (cmd_function)add_sock_hdr, 1,  fixup_str_null,   0,
-		REQUEST_ROUTE },
-	{"is_registered",      (cmd_function)is_registered, 1,
-		fixup_is_aor_registered, 0,
+	{"save", (cmd_function)save, {
+		{CMD_PARAM_STR|CMD_PARAM_STATIC, domain_fixup, 0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE|ONREPLY_ROUTE},
+	{"remove", (cmd_function)_remove, {
+		{CMD_PARAM_STR|CMD_PARAM_STATIC, domain_fixup, 0},
+		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE|ONREPLY_ROUTE},
+	{"remove_ip_port", (cmd_function)_remove_ip_port, {
+		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_INT, 0, 0},
+		{CMD_PARAM_STR|CMD_PARAM_STATIC, domain_fixup, 0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},{0,0,0}},
+		ALL_ROUTES},
+	{"lookup", (cmd_function)reg_lookup, {
+		{CMD_PARAM_STR|CMD_PARAM_STATIC, domain_fixup, 0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE|ONREPLY_ROUTE|FAILURE_ROUTE},
+	{"add_sock_hdr", (cmd_function)add_sock_hdr, {
+		{CMD_PARAM_STR,0,0}, {0,0,0}},
 		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-	{"is_registered",      (cmd_function)is_registered, 2,
-		fixup_is_aor_registered, 0,
+	{"is_registered", (cmd_function)is_registered, {
+		{CMD_PARAM_STR|CMD_PARAM_STATIC, domain_fixup, 0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
 		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-	{"is_contact_registered",      (cmd_function)is_contact_registered, 1,
-		fixup_is_contact_registered, 0,
+	{"is_contact_registered", (cmd_function)is_contact_registered, {
+		{CMD_PARAM_STR|CMD_PARAM_STATIC, domain_fixup, 0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
 		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-	{"is_contact_registered",      (cmd_function)is_contact_registered, 2,
-		fixup_is_contact_registered, 0,
+	{"is_ip_registered", (cmd_function)is_ip_registered, {
+		{CMD_PARAM_STR|CMD_PARAM_STATIC, domain_fixup, 0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_VAR,0,0}, {0,0,0}},
 		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-	{"is_contact_registered",      (cmd_function)is_contact_registered, 3,
-		fixup_is_contact_registered, 0,
-		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-	{"is_contact_registered",      (cmd_function)is_contact_registered, 4,
-		fixup_is_contact_registered, 0,
-		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-	{"is_ip_registered",      (cmd_function)is_ip_registered, 3,
-		fixup_is_ip_registered, 0,
-		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-	{0, 0, 0, 0, 0, 0}
+	{0,0,{{0,0,0}},0}
 };
 
+static acmd_export_t acmds[] = {
+	pn_async_cmds,
+	{0,0,{{0,0,0}}}
+};
 
 /*! \brief
  * Exported parameters
@@ -200,20 +196,25 @@ static param_export_t params[] = {
 	{"default_expires",    INT_PARAM, &default_expires       },
 	{"default_q",          INT_PARAM, &default_q             },
 	{"case_sensitive",     INT_PARAM, &case_sensitive        },
-	{"tcp_persistent_flag",INT_PARAM, &tcp_persistent_flag   },
 	{"tcp_persistent_flag",STR_PARAM, &tcp_persistent_flag_s },
-	{"realm_prefix",       STR_PARAM, &realm_pref            },
+	{"realm_prefix",       STR_PARAM, &realm_prefix.s         },
 	{"min_expires",        INT_PARAM, &min_expires           },
 	{"max_expires",        INT_PARAM, &max_expires           },
-	{"received_param",     STR_PARAM, &rcv_param             },
+	{"received_param",     STR_PARAM, &rcv_param.s           },
 	{"received_avp",       STR_PARAM, &rcv_avp_param         },
-	{"max_contacts",       INT_PARAM, &max_contacts          },
 	{"retry_after",        INT_PARAM, &retry_after           },
 	{"sock_hdr_name",      STR_PARAM, &sock_hdr_name.s       },
 	{"mcontact_avp",       STR_PARAM, &mct_avp_param         },
 	{"attr_avp",           STR_PARAM, &attr_avp_param        },
 	{"gruu_secret",        STR_PARAM, &gruu_secret.s         },
 	{"disable_gruu",       INT_PARAM, &disable_gruu          },
+
+	/* common registrar modparams */
+	reg_modparams,
+
+	/* common SIP Push Notification (RFC 8599) modparams */
+	pn_modparams,
+
 	{0, 0, 0}
 };
 
@@ -236,6 +237,7 @@ static dep_export_t deps = {
 		{ MOD_TYPE_NULL, NULL, 0 },
 	},
 	{ /* modparam dependencies */
+		pn_modparam_deps,
 		{ NULL, NULL },
 	},
 };
@@ -248,19 +250,22 @@ struct module_exports exports = {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
-	&deps,           /* OpenSIPS module dependencies */
+	NULL,        /* load function */
+	&deps,       /* OpenSIPS module dependencies */
 	cmds,        /* Exported functions */
-	0,           /* Exported async functions */
+	acmds,       /* Exported async functions */
 	params,      /* Exported parameters */
 	mod_stats,   /* exported statistics */
 	0,           /* exported MI functions */
 	0,           /* exported pseudo-variables */
-	0,			 /* exported transformations */
+	0,           /* exported transformations */
 	0,           /* extra processes */
+	0,           /* module pre-initialization function */
 	mod_init,    /* module initialization function */
 	0,
 	mod_destroy, /* destroy function */
 	child_init,  /* Per-child init function */
+	cfg_validate /* reload confirm function */
 };
 
 
@@ -283,11 +288,6 @@ static int mod_init(void)
 	/* load TM API */
 	memset(&tmb, 0, sizeof(struct tm_binds));
 	load_tm_api(&tmb);
-
-	realm_prefix.s = realm_pref;
-	realm_prefix.len = strlen(realm_pref);
-
-	rcv_param.len = strlen(rcv_param.s);
 
 	if (rcv_avp_param && *rcv_avp_param) {
 		s.s = rcv_avp_param; s.len = strlen(s.s);
@@ -351,44 +351,41 @@ static int mod_init(void)
 	if (is_script_func_used("save", 4) && !ul.tags_in_use()) {
 		LM_ERR("as per your current usrloc module configuration, "
 				"save() ownership tags will be completely ignored!\n");
+		LM_ERR("Hint: switch the usrloc 'pinging_mode' to 'ownership'\n");
 		return -1;
 	}
 
-	/* Normalize default_q parameter */
-	if (default_q != Q_UNSPECIFIED) {
-		if (default_q > MAX_Q) {
-			LM_DBG("default_q = %d, lowering to MAX_Q: %d\n", default_q, MAX_Q);
-			default_q = MAX_Q;
-		} else if (default_q < MIN_Q) {
-			LM_DBG("default_q = %d, raising to MIN_Q: %d\n", default_q, MIN_Q);
-			default_q = MIN_Q;
-		}
+	if (reg_init_globals() != 0) {
+		LM_ERR("failed to init globals\n");
+		return -1;
 	}
-
-	/*
-	 * Import use_domain parameter from usrloc
-	 */
-	reg_use_domain = ul.use_domain;
 
 	if (sock_hdr_name.s)
 		sock_hdr_name.len = strlen(sock_hdr_name.s);
 
-	if (gruu_secret.s)
-		gruu_secret.len = strlen(gruu_secret.s);
-
-	/* fix the flags */
-	fix_flag_name(tcp_persistent_flag_s, tcp_persistent_flag);
-	tcp_persistent_flag = get_flag_id_by_name(FLAG_TYPE_MSG, tcp_persistent_flag_s);
-	tcp_persistent_flag = (tcp_persistent_flag!=-1)?(1<<tcp_persistent_flag):0;
-
-	/* init contact sorting array */
-	selected_cts = pkg_malloc(selected_cts_sz * sizeof *selected_cts);
-	if (!selected_cts) {
-		LM_ERR("oom\n");
+	if (pn_init() < 0) {
+		LM_ERR("failed to init SIP Push Notification support\n");
 		return -1;
 	}
 
 	return 0;
+}
+
+
+static int cfg_validate(void)
+{
+	if (is_script_func_used("save", 4) && !ul.tags_in_use()) {
+		LM_ERR("save() with sharing tag was found, but the module's "
+			"configuration has no tag support, better restart\n");
+		return 0;
+	}
+
+	if (!pn_cfg_validate()) {
+		LM_ERR("failed to validate opensips.cfg PN configuration\n");
+		return 0;
+	}
+
+	return 1;
 }
 
 
@@ -411,58 +408,22 @@ static int child_init(int rank)
 static int domain_fixup(void** param)
 {
 	udomain_t* d;
+	str d_nt;
 
-	if (ul.register_udomain((char*)*param, &d) < 0) {
+	if (pkg_nt_str_dup(&d_nt, (str*)*param) < 0)
+		return E_OUT_OF_MEM;
+
+	if (ul.register_udomain(d_nt.s, &d) < 0) {
 		LM_ERR("failed to register domain\n");
 		return E_UNSPEC;
 	}
+
+	pkg_free(d_nt.s);
 
 	*param = (void*)d;
 	return 0;
 }
 
-/*! \brief
- * @params: domain, AOR, contact, next_hop, sip_instance
- */
-static int fixup_remove(void** param, int param_no)
-{
-	switch (param_no) {
-	case 1:
-		return domain_fixup(param);
-	case 2:
-		return fixup_spve(param);
-	case 3:
-		return fixup_spve(param);
-	case 4:
-		return fixup_spve(param);
-	case 5:
-		return fixup_spve(param);
-
-	default:
-		LM_ERR("maximum 5 params! given at least %d\n", param_no);
-		return E_INVALID_PARAMS;
-	}
-}
-
-/*! \brief
- * Fixup for "save"+"lookup" functions - domain, flags, AOR params
- */
-static int registrar_fixup(void** param, int param_no)
-{
-	if (param_no == 1) {
-		/* name of the table */
-		return domain_fixup(param);
-	} else if (param_no == 2) {
-		/* flags */
-		return fixup_spve(param);
-	} else if (param_no == 3) {
-		/* AOR - from PVAR */
-		return fixup_sgp(param);
-	} else {
-		/* ownership tag */
-		return fixup_sgp(param);
-	}
-}
 
 static void mod_destroy(void)
 {
@@ -474,16 +435,14 @@ static void mod_destroy(void)
 #include "../../ip_addr.h"
 #include "../../ut.h"
 
-static int add_sock_hdr(struct sip_msg* msg, char *name, char *foo)
+static int add_sock_hdr(struct sip_msg* msg, str *hdr_name)
 {
 	struct socket_info* si;
 	struct lump* anchor;
-	str *hdr_name;
 	str hdr;
 	char *p;
 	str use_sock_str;
 
-	hdr_name = (str*)name;
 	si = msg->rcv.bind_address;
 
 	if(si->adv_sock_str.len) {
@@ -536,56 +495,4 @@ error1:
 	pkg_free(hdr.s);
 error:
 	return -1;
-}
-
-
-
-/*
- * fixup for domain and aor
- */
-static int fixup_is_registered(void **param, int param_no)
-{
-	udomain_t *d;
-
-	if (param_no == 1) {
-		if (ul.register_udomain((char*)*param, &d) < 0) {
-	        LM_ERR("failed to register domain\n");
-			return E_UNSPEC;
-		}
-		*param = (void*)d;
-	    return 0;
-	}
-
-	return fixup_pvar(param);
-}
-
-static int fixup_is_aor_registered(void **param, int param_no)
-{
-	if (param_no > 2) {
-		LM_ERR("invalid param number\n");
-		return E_UNSPEC;
-	}
-
-	return fixup_is_registered(param, param_no);
-}
-
-static int fixup_is_contact_registered(void **param, int param_no)
-{
-	if (param_no > 4) {
-		LM_ERR("invalid param number\n");
-		return E_UNSPEC;
-	}
-
-	return fixup_is_registered(param, param_no);
-}
-
-
-static int fixup_is_ip_registered(void **param, int param_no)
-{
-	if (param_no > 3) {
-		LM_ERR("invalid param number\n");
-		return E_UNSPEC;
-	}
-
-	return fixup_is_registered(param, param_no);
 }

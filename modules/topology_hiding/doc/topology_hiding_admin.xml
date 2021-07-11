@@ -163,7 +163,7 @@ modparam("topology_hiding", "force_dialog", 1)
 		</emphasis>
 		</para>
 		<example>
-		<title>Set <varname>th_callid_passwd</varname> parameter</title>
+		<title>Set <varname>th_contact_encode_passwd</varname> parameter</title>
 		<programlisting format="linespecific">
 ...
 modparam("topology_hiding", "th_contact_encode_passwd", "my_topoh_passwd")
@@ -183,10 +183,35 @@ modparam("topology_hiding", "th_contact_encode_passwd", "my_topoh_passwd")
 		</emphasis>
 		</para>
 		<example>
-		<title>Set <varname>th_callid_passwd</varname> parameter</title>
+		<title>Set <varname>th_contact_encode_param</varname> parameter</title>
 		<programlisting format="linespecific">
 ...
 modparam("topology_hiding", "th_contact_encode_param", "customparam")
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_th_contact_encode_scheme" xreflabel="th_contact_encode_scheme">
+		<title><varname>th_contact_encode_scheme</varname> (string)</title>
+		<para>
+			When not relying on the dialog module ( due to script writer preference or simply when doing topo hiding for non INVITE dialogs ), the module will store the needed information in a Contact URI param. This parameter configures the encoding scheme to be used for the data stored in
+			the Contact URI param. Possible values are:
+			<itemizedlist>
+				<listitem><para><emphasis>base64</emphasis></para></listitem>
+				<listitem><para><emphasis>base32</emphasis></para></listitem>
+			</itemizedlist>
+		</para>
+		<para>
+		<emphasis>
+			Default value is <quote>"base64"</quote>
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>th_contact_encode_scheme</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("topology_hiding", "th_contact_encode_scheme", "base32")
 ...
 </programlisting>
 		</example>
@@ -308,7 +333,7 @@ if (has_totag())
     if (has_totag()) {
         if (!topology_hiding_match() ) {
             xlog(" cannot match request to a dialog \n");
-	    send_reply("404","Not found");
+	    send_reply(404,"Not found");
         } else
 		route(RELAY);
     }

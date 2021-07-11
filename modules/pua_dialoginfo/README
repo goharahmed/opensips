@@ -18,7 +18,7 @@ pua dialoginfo
               1.3.3. include_localremote (int)
               1.3.4. caller_confirmed (int)
               1.3.5. publish_on_trying (int)
-              1.3.6. nopublish_flag (int)
+              1.3.6. nopublish_flag (str)
               1.3.7. presence_server (string)
               1.3.8. caller_spec_param (string)
               1.3.9. callee_spec_param (string)
@@ -28,6 +28,7 @@ pua dialoginfo
 
               1.4.1. dialoginfo_set([side])
               1.4.2. dialoginfo_set_branch_callee(callee)
+              1.4.3. dialoginfo_mute_branch([side])
 
    2. Contributors
 
@@ -60,6 +61,7 @@ pua dialoginfo
    1.11. Set osips_ps parameter
    1.12. dialoginfo_set usage
    1.13. dialoginfo_set_branch_callee usage
+   1.14. dialoginfo_mute_branch usage
 
 Chapter 1. Admin Guide
 
@@ -376,7 +378,7 @@ modparam("pua_dialoginfo", "publish_on_trying", 1)
 #  |--ACK---->|          |            |
 ...
 
-1.3.6. nopublish_flag (int)
+1.3.6. nopublish_flag (str)
 
    By default, reINVITEs will trigger a PUBLISH. They are actually
    the only in-dialog request for which it makes sense. In some
@@ -387,7 +389,7 @@ modparam("pua_dialoginfo", "publish_on_trying", 1)
 
    Example 1.7. Set nopublish_flag parameter
 ...
-modparam("pua_dialoginfo", "nopublish_flag", 5)
+modparam("pua_dialoginfo", "nopublish_flag", "no_publish")
 ...
 
 1.3.7. presence_server (string)
@@ -454,8 +456,8 @@ modparam("pua_dialoginfo", "osips_ps", 0)
    published.
 
    Meaning of the parameters:
-     * side (optional) - can be "A" or/and "B" for caller or
-       callee PUBLISH only - if missing, both sides will be
+     * side (string, optional) - can be "A" or/and "B" for caller
+       or callee PUBLISH only - if missing, both sides will be
        published.
 
    Example 1.12. dialoginfo_set usage
@@ -477,9 +479,9 @@ modparam("pua_dialoginfo", "osips_ps", 0)
    multiple different callees.
 
    Meaning of the parameters:
-     * callee - a SIP nams addr description of the callee (the
-       name_addr format is '[display] <uri>' or 'uri', as in the
-       To or From headers)
+     * callee (string) - a SIP nams addr description of the callee
+       (the name_addr format is '[display] <uri>' or 'uri', as in
+       the To or From headers)
 
    Example 1.13. dialoginfo_set_branch_callee usage
 ...
@@ -491,6 +493,27 @@ branch_route[out]
 ...
 }
 
+1.4.3.  dialoginfo_mute_branch([side])
+
+   This function must be called for INVITE messages, in the branch
+   route only, in order to mute the publishing of the dialoginfo
+   information for caller/callee/both parties involved in that
+   branch.
+
+   Meaning of the parameters:
+     * side (string, optional) - can be "A" or/and "B" for caller
+       or callee muting only - if missing, both sides will be
+       muted.
+
+   Example 1.14. dialoginfo_mute_branch usage
+...
+        branch_route[out] {
+                # mute publishing for callee side if not a local domain
+                if (!is_domain_local("$rd"))
+                        dialoginfo_mute_branch("B");
+        }
+...
+
 Chapter 2. Contributors
 
 2.1. By Commit Statistics
@@ -498,19 +521,20 @@ Chapter 2. Contributors
    Table 2.1. Top contributors by DevScore^(1), authored
    commits^(2) and lines added/removed^(3)
      Name DevScore Commits Lines ++ Lines --
-   1. Bogdan-Andrei Iancu (@bogdan-iancu) 43 23 985 664
-   2. Anca Vamanu 27 16 713 231
-   3. Liviu Chircu (@liviuchircu) 12 9 44 76
-   4. Klaus Darilion 10 1 1109 0
-   5. Razvan Crainea (@razvancrainea) 8 6 11 15
-   6. Ovidiu Sas (@ovidiusas) 7 5 104 9
-   7. Vallimamod Abdullah 5 2 97 75
-   8. Damien Sandras (@dsandras) 4 2 93 1
-   9. Vlad Paiu (@vladpaiu) 4 2 29 15
-   10. Walter Doekes (@wdoekes) 4 2 19 8
+   1. Bogdan-Andrei Iancu (@bogdan-iancu) 56 33 1203 742
+   2. Anca Vamanu 26 16 713 231
+   3. Razvan Crainea (@razvancrainea) 12 10 19 18
+   4. Liviu Chircu (@liviuchircu) 12 9 44 76
+   5. Klaus Darilion 11 1 1109 0
+   6. Vlad Patrascu (@rvlad-patrascu) 8 5 41 76
+   7. Ovidiu Sas (@ovidiusas) 7 5 104 9
+   8. Vallimamod Abdullah 5 2 97 75
+   9. Damien Sandras (@dsandras) 4 2 93 1
+   10. Vlad Paiu (@vladpaiu) 4 2 29 15
 
-   All remaining contributors: Stanislaw Pitucha, Vlad Patrascu
-   (@rvlad-patrascu), Peter Lemenkov (@lemenkov), Aron Podrigal.
+   All remaining contributors: Walter Doekes (@wdoekes), Stanislaw
+   Pitucha, Peter Lemenkov (@lemenkov), Zero King (@l2dy), Aron
+   Podrigal (@ar45).
 
    (1) DevScore = author_commits + author_lines_added /
    (project_lines_added / project_commits) + author_lines_deleted
@@ -532,19 +556,19 @@ Chapter 2. Contributors
 
    Table 2.2. Most recently active contributors^(1) to this module
                       Name                   Commit Activity
-   1.  Bogdan-Andrei Iancu (@bogdan-iancu) Jan 2009 - Mar 2019
-   2.  Aron Podrigal                       Jan 2019 - Jan 2019
-   3.  Liviu Chircu (@liviuchircu)         Mar 2014 - Nov 2018
-   4.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
-   5.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - Jul 2017
-   6.  Razvan Crainea (@razvancrainea)     Feb 2012 - Apr 2017
-   7.  Ovidiu Sas (@ovidiusas)             Sep 2010 - Jan 2014
-   8.  Damien Sandras (@dsandras)          Jul 2013 - Aug 2013
-   9.  Vlad Paiu (@vladpaiu)               Aug 2011 - Aug 2011
-   10. Anca Vamanu                         Jul 2009 - Mar 2011
+   1.  Bogdan-Andrei Iancu (@bogdan-iancu) Jan 2009 - May 2021
+   2.  Razvan Crainea (@razvancrainea)     Feb 2012 - Jul 2020
+   3.  Zero King (@l2dy)                   Mar 2020 - Mar 2020
+   4.  Peter Lemenkov (@lemenkov)          Jun 2018 - Feb 2020
+   5.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - Apr 2019
+   6.  Aron Podrigal (@ar45)               Jan 2019 - Jan 2019
+   7.  Liviu Chircu (@liviuchircu)         Mar 2014 - Nov 2018
+   8.  Ovidiu Sas (@ovidiusas)             Sep 2010 - Jan 2014
+   9.  Damien Sandras (@dsandras)          Jul 2013 - Aug 2013
+   10. Vlad Paiu (@vladpaiu)               Aug 2011 - Aug 2011
 
-   All remaining contributors: Vallimamod Abdullah, Stanislaw
-   Pitucha, Walter Doekes (@wdoekes), Klaus Darilion.
+   All remaining contributors: Anca Vamanu, Vallimamod Abdullah,
+   Stanislaw Pitucha, Walter Doekes (@wdoekes), Klaus Darilion.
 
    (1) including any documentation-related commits, excluding
    merge commits
@@ -553,10 +577,10 @@ Chapter 3. Documentation
 
 3.1. Contributors
 
-   Last edited by: Bogdan-Andrei Iancu (@bogdan-iancu), Peter
-   Lemenkov (@lemenkov), Liviu Chircu (@liviuchircu), Vlad
-   Patrascu (@rvlad-patrascu), Razvan Crainea (@razvancrainea),
-   Ovidiu Sas (@ovidiusas), Damien Sandras (@dsandras), Vallimamod
+   Last edited by: Bogdan-Andrei Iancu (@bogdan-iancu), Vlad
+   Patrascu (@rvlad-patrascu), Peter Lemenkov (@lemenkov), Liviu
+   Chircu (@liviuchircu), Razvan Crainea (@razvancrainea), Ovidiu
+   Sas (@ovidiusas), Damien Sandras (@dsandras), Vallimamod
    Abdullah, Anca Vamanu, Walter Doekes (@wdoekes), Klaus
    Darilion.
 

@@ -39,6 +39,20 @@ enum osips_mm mem_allocator_rpm = MM_NONE;
 unsigned long rpm_mem_size = 0;
 char *rpm_mem_file = RESTART_PERSISTENCY_MEM_FILE;
 
+int set_rpm_mm(const char *mm_name)
+{
+#ifdef INLINE_ALLOC
+	LM_NOTICE("this is an inlined allocator build (see opensips -V), "
+	          "cannot set a custom rpm allocator (%s)\n", mm_name);
+	return 0;
+#endif
+
+	if (parse_mm(mm_name, &mem_allocator_rpm) < 0)
+		return -1;
+
+	return 0;
+}
+
 #ifndef INLINE_ALLOC
 #ifdef DBG_MALLOC
 void *(*gen_rpm_malloc)(void *blk, unsigned long size,
@@ -176,6 +190,7 @@ int rpm_mem_init_allocs(void)
 		gen_rpm_get_free       = (osips_get_mmstat_f)fm_get_free;
 		gen_rpm_get_frags      = (osips_get_mmstat_f)fm_get_frags;
 		break;
+#endif
 #ifdef Q_MALLOC
 	case MM_Q_MALLOC:
 		gen_rpm_malloc         = (osips_block_malloc_f)qm_malloc;
@@ -275,7 +290,6 @@ int rpm_mem_init_allocs(void)
 	}
 
 #endif
-#endif
 
 	/* store locks in sharem memory, so we don't have to clean them up */
 #ifdef HP_MALLOC
@@ -316,7 +330,7 @@ int rpm_mem_init_allocs(void)
 		LM_CRIT("could not initialize rpm keys lock\n");
 		return -1;
 	}
-#ifdef HP_MALLOC
+#if defined HP_MALLOC && defined INLINE_ALLOC
 	hp_init_rpm_statistics(rpm_block);
 #endif
 
@@ -462,7 +476,7 @@ int load_rpm_file(void)
 	rpm_map_block = rpm_mempool;
 	if (rpm_mem_init_allocs() < 0) {
 		rpm_mem_destroy();
-		goto recreate;
+		return 1;
 	}
 
 	return 0;
@@ -493,7 +507,7 @@ int init_rpm_mallocs(void)
 		if (fst.st_size != rpm_mem_size) {
 			LM_WARN("restart persistency cache (%s) size %ld is different than "
 					"the size we are running with %ld: creating a new cache!\n",
-					rpm_mem_file, fst.st_size, rpm_mem_size);
+					rpm_mem_file, (long)fst.st_size, rpm_mem_size);
 		} else if (load_rpm_file() == 0)
 			return 0; /* memblock loaded just fine */
 		LM_INFO("restart persistent cache is invalid: creating a new one!\n");

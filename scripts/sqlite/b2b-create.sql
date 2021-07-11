@@ -1,4 +1,4 @@
-INSERT INTO version (table_name, table_version) values ('b2b_entities','1');
+INSERT INTO version (table_name, table_version) values ('b2b_entities','2');
 CREATE TABLE b2b_entities (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     type INTEGER NOT NULL,
@@ -19,6 +19,8 @@ CREATE TABLE b2b_entities (
     route1 TEXT,
     sockinfo_srv CHAR(64),
     param CHAR(255) NOT NULL,
+    mod_name CHAR(32) NOT NULL,
+    storage BLOB(4096) DEFAULT NULL,
     lm INTEGER NOT NULL,
     lrc INTEGER,
     lic INTEGER,
@@ -32,18 +34,12 @@ CREATE TABLE b2b_entities (
 
 CREATE INDEX ORA_b2b_entities_param  ON b2b_entities (param);
 
-INSERT INTO version (table_name, table_version) values ('b2b_logic','3');
+INSERT INTO version (table_name, table_version) values ('b2b_logic','4');
 CREATE TABLE b2b_logic (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     si_key CHAR(64) NOT NULL,
     scenario CHAR(64),
     sstate INTEGER NOT NULL,
-    next_sstate INTEGER NOT NULL,
-    sparam0 CHAR(64),
-    sparam1 CHAR(64),
-    sparam2 CHAR(64),
-    sparam3 CHAR(64),
-    sparam4 CHAR(64),
     sdp TEXT(64),
     lifetime INTEGER DEFAULT 0 NOT NULL,
     e1_type INTEGER NOT NULL,

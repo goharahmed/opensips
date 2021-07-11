@@ -35,16 +35,17 @@
 #ifndef UCONTACT_H
 #define UCONTACT_H
 
-
 #include <stdio.h>
 #include <time.h>
+
 #include "../../map.h"
 #include "../../qvalue.h"
 #include "../../str.h"
 #include "../../proxy.h"
 #include "../../socket_info.h"
 #include "../../db/db_insertq.h"
-
+#include "../../lib/list.h"
+#include "../../str_list.h"
 
 
 /*! \brief States for in-memory contacts in regards to contact storage handler (db, in-memory, ldap etc) */
@@ -69,6 +70,9 @@ typedef enum flags {
 	 */
 	FL_EXTRA_HOP   = 1 << 1,
 
+	/* Handle RFC 8599 Push Notifications when routing to this contact */
+	FL_PN_ON       = 1 << 2,
+
 	FL_ALL         = (int)0xFFFFFFFF  /*!< All flags set */
 } ucontact_flags_t;
 
@@ -78,6 +82,19 @@ typedef enum flags {
  * in order to perform very fast "ucontact_t" lookups
  */
 typedef uint64_t ucontact_id;
+
+
+struct ct_match {
+	enum {
+		CT_MATCH_NONE=-1,
+		CT_MATCH_CONTACT_ONLY,
+		CT_MATCH_CONTACT_CALLID,
+		CT_MATCH_PARAMS,
+	} mode;
+
+	str_list *match_params;
+};
+
 
 /*! \brief
  * Main structure for handling of registered Contact: data
@@ -113,8 +130,13 @@ typedef struct ucontact {
 	unsigned int label;     /*!< label to find the contact in contact list>*/
 	int sipping_latency;    /*!< useconds; not restart-persistent >*/
 	str shtag;              /*!< helps determine the logical owner node */
+	str cdb_key;            /*!< the key of the contact in cache_db; makes
+	                              sense only in full_sharing_cachedb mode */
 
 	map_t kv_storage;       /*!< data attached by API subscribers >*/
+
+	int refresh_time;         /*!< UNIX timestamp: the next refresh event >*/
+	struct list_head refresh_list;
 
 	struct ucontact* next;  /*!< Next contact in the linked list */
 	struct ucontact* prev;  /*!< Previous contact in the linked list */
@@ -127,6 +149,7 @@ typedef struct ucontact_info {
 							  |aorhash| record label| contact label |
 							  0-------0-------------0---------------0
 							*/
+	str* c;
 	str received;
 	str* path;
 	time_t expires;
@@ -145,6 +168,11 @@ typedef struct ucontact_info {
 	str *packed_kv_storage;
 	str *attr;
 	str shtag;
+	str cdb_key;
+	int refresh_time;
+
+	/* contact matching algorithm - no need to free anything */
+	struct ct_match *cmatch;
 } ucontact_info_t;
 
 /*! \brief
@@ -271,11 +299,8 @@ struct urecord;
 /*! \brief
  * Update ucontact with new values
  */
-typedef int (*update_ucontact_t)(struct urecord* _r, ucontact_t* _c,
-		ucontact_info_t* _ci, char is_replicated);
-
 int update_ucontact(struct urecord* _r, ucontact_t* _c, ucontact_info_t* _ci,
-                    char is_replicated);
+                    const struct ct_match *match, char skip_replication);
 
 /*! \brief
  * Fetch a key from the contact-level storage
@@ -283,8 +308,6 @@ int update_ucontact(struct urecord* _r, ucontact_t* _c, ucontact_info_t* _ci,
  *
  * Returns: NULL on error/key not found, value pointer otherwise
  */
-typedef int_str_t *(*get_ucontact_key_t)(ucontact_t* _ct, const str* _key);
-
 int_str_t *get_ucontact_key(ucontact_t* _ct, const str* _key);
 
 /*! \brief
@@ -295,9 +318,6 @@ int_str_t *get_ucontact_key(ucontact_t* _ct, const str* _key);
  *
  * Returns: NULL on error, new value pointer otherwise
  */
-typedef int_str_t *(*put_ucontact_key_t)(ucontact_t* _ct,
-                                    const str* _key, const int_str_t* _val);
-
 int_str_t *put_ucontact_key(ucontact_t* _ct, const str* _key,
                             const int_str_t* _val);
 

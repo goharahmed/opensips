@@ -31,17 +31,19 @@
 #include "../../mi/mi.h"
 #include "../../timer.h"
 #include "../../bin_interface.h"
-#include "../../mod_fix.h"
 
 #include "api.h"
 #include "node_info.h"
+#include "topology.h"
 #include "clusterer.h"
 #include "sync.h"
 #include "sharing_tags.h"
+#include "clusterer_evi.h"
 
 int ping_interval = DEFAULT_PING_INTERVAL;
 int node_timeout = DEFAULT_NODE_TIMEOUT;
 int ping_timeout = DEFAULT_PING_TIMEOUT;
+int seed_fb_interval = DEFAULT_SEED_FB_INTERVAL;
 int current_id = -1;
 int db_mode = 1;
 
@@ -81,44 +83,53 @@ static mi_response_t *cluster_bcast_mi(const mi_params_t *params,
 								struct mi_handler *async_hdl);
 static mi_response_t *clusterer_list_cap(const mi_params_t *params,
 								struct mi_handler *async_hdl);
+static mi_response_t *clusterer_set_cap_status(const mi_params_t *params,
+								struct mi_handler *async_hdl);
+static mi_response_t *cluster_remove_node(const mi_params_t *params,
+								struct mi_handler *async_hdl);
 
 static void heartbeats_timer_handler(unsigned int ticks, void *param);
 static void heartbeats_utimer_handler(utime_t ticks, void *param);
 
-int cmd_broadcast_req(struct sip_msg *msg, char *param_cluster, char *param_msg,
-									char *param_tag);
-int cmd_send_req(struct sip_msg *msg, char *param_cluster, char *param_node,
-								char *param_msg, char *param_tag);
-int cmd_send_rpl(struct sip_msg *msg, char *param_cluster, char *param_node,
-								char *param_msg, char *param_tag);
-int cmd_check_addr(struct sip_msg *msg, char *param_cluster, char *param_ip,
-					char *param_addr_type);
+int cmd_broadcast_req(struct sip_msg *msg, int *cluster_id, str *gen_msg,
+									pv_spec_t *param_tag);
+int cmd_send_req(struct sip_msg *msg, int *cluster_id, int *node_id,
+								str *gen_msg, pv_spec_t *param_tag);
+int cmd_send_rpl(struct sip_msg *msg, int *cluster_id, int *node_id,
+								str *gen_msg, pv_spec_t *param_tag);
+int cmd_check_addr(struct sip_msg *msg, int *cluster_id, str *ip_str,
+					str *addr_type_str);
 
-static int fixup_broadcast(void ** param, int param_no);
-static int fixup_send(void ** param, int param_no);
-static int fixup_check_addr(void ** param, int param_no);
 
  /*
  * Exported functionsu
  */
 
 static cmd_export_t cmds[] = {
-	{"load_clusterer",  (cmd_function)load_clusterer, 0, 0, 0, 0},
-	{"cluster_broadcast_req", (cmd_function)cmd_broadcast_req, 2, fixup_broadcast, 0,
+	{"load_clusterer",  (cmd_function)load_clusterer, {{0,0,0}}, 0},
+	{"cluster_broadcast_req", (cmd_function)cmd_broadcast_req, {
+		{CMD_PARAM_INT,0,0},
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_VAR|CMD_PARAM_OPT,0,0}, {0,0,0}},
 		REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE | LOCAL_ROUTE | BRANCH_ROUTE | EVENT_ROUTE},
-	{"cluster_broadcast_req", (cmd_function)cmd_broadcast_req, 3, fixup_broadcast, 0,
+	{"cluster_send_req", (cmd_function)cmd_send_req, {
+		{CMD_PARAM_INT,0,0},
+		{CMD_PARAM_INT,0,0},
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_VAR|CMD_PARAM_OPT,0,0}, {0,0,0}},
 		REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE | LOCAL_ROUTE | BRANCH_ROUTE | EVENT_ROUTE},
-	{"cluster_send_req", (cmd_function)cmd_send_req, 3, fixup_send, 0,
+	{"cluster_send_rpl", (cmd_function)cmd_send_rpl, {
+		{CMD_PARAM_INT,0,0},
+		{CMD_PARAM_INT,0,0},
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_VAR,0,0}, {0,0,0}},
 		REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE | LOCAL_ROUTE | BRANCH_ROUTE | EVENT_ROUTE},
-	{"cluster_send_req", (cmd_function)cmd_send_req, 4, fixup_send, 0,
+	{"cluster_check_addr", (cmd_function)cmd_check_addr, {
+		{CMD_PARAM_INT,0,0},
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
 		REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE | LOCAL_ROUTE | BRANCH_ROUTE | EVENT_ROUTE},
-	{"cluster_send_rpl", (cmd_function)cmd_send_rpl, 4, fixup_send, 0,
-		REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE | LOCAL_ROUTE | BRANCH_ROUTE | EVENT_ROUTE},
-	{"cluster_check_addr", (cmd_function)cmd_check_addr, 2, fixup_check_addr, 0,
-		REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE | LOCAL_ROUTE | BRANCH_ROUTE | EVENT_ROUTE},
-	{"cluster_check_addr", (cmd_function)cmd_check_addr, 3, fixup_check_addr, 0,
-		REQUEST_ROUTE | FAILURE_ROUTE | ONREPLY_ROUTE | LOCAL_ROUTE | BRANCH_ROUTE | EVENT_ROUTE},
-	{0,0,0,0,0,0}
+	{0,0,{{0,0,0}},0}
 };
 
 /*
@@ -131,6 +142,7 @@ static param_export_t params[] = {
 	{"ping_interval",		INT_PARAM,	&ping_interval		},
 	{"node_timeout",		INT_PARAM,	&node_timeout		},
 	{"ping_timeout",		INT_PARAM,	&ping_timeout		},
+	{"seed_fallback_interval", INT_PARAM, &seed_fb_interval	},
 	{"id_col",				STR_PARAM,	&id_col.s			},
 	{"cluster_id_col",		STR_PARAM,	&cluster_id_col.s	},
 	{"node_id_col",			STR_PARAM,	&node_id_col.s		},
@@ -162,6 +174,7 @@ static mi_export_t mi_cmds[] = {
 	},
 	{ "clusterer_set_status", "sets the status for a specified connection", 0,0,{
 		{clusterer_set_status, {"cluster_id", "status", 0}},
+		{clusterer_set_status, {"cluster_id", "node_id", "status", 0}},
 		{EMPTY_MI_RECIPE}}
 	},
 	{ "clusterer_list", "lists the available connections for the specified server", 0,0,{
@@ -173,15 +186,21 @@ static mi_export_t mi_cmds[] = {
 		{EMPTY_MI_RECIPE}}
 	},
 	{ "cluster_send_mi", "sends an MI command to be run on a specific node in a cluster", 0,0,{
+		{cluster_send_mi, {"cluster_id", "destination", "cmd_name", 0}},
 		{cluster_send_mi, {"cluster_id", "destination", "cmd_name", "cmd_params", 0}},
 		{EMPTY_MI_RECIPE}}
 	},
 	{ "cluster_broadcast_mi", "dispatches an MI command to be run on all nodes in a cluster", 0,0,{
+		{cluster_bcast_mi, {"cluster_id", "cmd_name", 0}},
 		{cluster_bcast_mi, {"cluster_id", "cmd_name", "cmd_params", 0}},
 		{EMPTY_MI_RECIPE}}
 	},
 	{ "clusterer_list_cap", "lists registered capabilities and their states", 0,0,{
 		{clusterer_list_cap, {0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "clusterer_set_cap_status", "sets the status for a capability", 0,0,{
+		{clusterer_set_cap_status, {"cluster_id", "capability", "status", 0}},
 		{EMPTY_MI_RECIPE}}
 	},
 	{ "clusterer_list_shtags", "lists the sharing tags and their states", 0,0,{
@@ -190,6 +209,10 @@ static mi_export_t mi_cmds[] = {
 	},
 	{ "clusterer_shtag_set_active", "switch the status of the give sharing tag to active", 0,0,{
 		{shtag_mi_set_active, {"tag", 0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "clusterer_remove_node", "removes a node from the cluster", 0,0,{
+		{cluster_remove_node, {"cluster_id", "node_id", 0}},
 		{EMPTY_MI_RECIPE}}
 	},
 	{EMPTY_MI_EXPORT}
@@ -215,7 +238,8 @@ static module_dependency_t *get_deps_db_mode(param_export_t *param)
 
 static dep_export_t deps = {
 	{ /* OpenSIPS module dependencies */
-		{ MOD_TYPE_DEFAULT, "proto_bin", DEP_ABORT },
+		{ MOD_TYPE_DEFAULT, "proto_bin",  DEP_SILENT },
+		{ MOD_TYPE_DEFAULT, "proto_bins", DEP_SILENT },
 		{ MOD_TYPE_NULL, NULL, 0 },
 	},
 	{ /* modparam dependencies */
@@ -232,6 +256,7 @@ struct module_exports exports = {
 	MOD_TYPE_DEFAULT,		/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,		/* dlopen flags */
+	0,						/* load function */
 	&deps,            		/* OpenSIPS module dependencies */
 	cmds,					/* exported functions */
 	0,						/* exported async functions */
@@ -241,10 +266,12 @@ struct module_exports exports = {
 	mod_vars,				/* exported variables */
 	0,						/* exported transformations */
 	0,						/* extra processes */
+	0,						/* module pre-initialization function */
 	mod_init,				/* module initialization function */
 	0,						/* response handling function */
 	destroy,				/* destroy function */
-	child_init				/* per-child init function */
+	child_init,				/* per-child init function */
+	0						/* reload confirm function */
 };
 
 static inline int gcd(int a, int b) {
@@ -269,10 +296,11 @@ do { \
 				col_name.s);	\
 			return -1;	\
 		}	\
-		pe = q_memchr(p + 1, ',', descr->s + descr->len - p - 1);	\
-		aux.s = p + 1;	\
-		aux.len = pe ? pe - p - 1 : descr->s + descr->len - p - 1;	\
-		if (aux.s >= descr->s + descr->len || !aux.len) {	\
+		p++;	\
+		pe = q_memchr(p, ',', descr->s + descr->len - p);	\
+		aux.s = p;	\
+		aux.len = pe ? pe - p : descr->s + descr->len - p;	\
+		if (aux.len == 0) {	\
 			LM_ERR("<%.*s> value expected\n", col_name.len,	\
 				col_name.s);	\
 			return -1;	\
@@ -284,17 +312,17 @@ do { \
 					col_name.s);	\
 				return -1;	\
 			}	\
-		} else \
-			str_vals[(_col_idx)] = aux.len ? aux.s : NULL;	\
+		} else	\
+			str_vals[(_col_idx)] = aux;	\
 	} else {	\
 		if ((_type) == 0)	\
 			int_vals[(_col_idx)] = -1;	\
 		else	\
-			str_vals[(_col_idx)] = NULL;	\
+			str_vals[(_col_idx)].s = NULL;	\
 	}	\
 } while(0)
 
-int parse_param_node_info(str *descr, int *int_vals, char **str_vals)
+int parse_param_node_info(str *descr, int *int_vals, str *str_vals)
 {
 	char *p, *pe;
 	str aux;
@@ -348,6 +376,10 @@ static int mod_init(void)
 		LM_WARN("Invalid ping_timeout parameter, using default value\n");
 		ping_timeout = DEFAULT_PING_TIMEOUT;
 	}
+	if (seed_fb_interval < 0) {
+		LM_WARN("Invalid seed_fallback_interval parameter, using default value\n");
+		seed_fb_interval = DEFAULT_SEED_FB_INTERVAL;
+	}
 
 	/* create & init lock */
 	if ((cl_list_lock = lock_init_rw()) == NULL) {
@@ -365,12 +397,19 @@ static int mod_init(void)
 		*cluster_list = NULL;
 	} else {
 		/* sanity check of my_node_id if node_id also set in a my_node_info param */
-		for (cl = *cluster_list; cl; cl = cl->next)
+		for (cl = *cluster_list; cl; cl = cl->next) {
+			if (!cl->current_node) {
+				LM_ERR("current node is not part of cluster %d\n",
+				       cl->cluster_id);
+				goto error;
+			}
+
 			if (cl->current_node->node_id != current_id) {
 				LM_ERR("Bad 'my_node_id' parameter, value: %d different than"
 					" the node_id property in the 'my_node_info' parameter\n", current_id);
 				goto error;
 			}
+		}
 	}
 
 	if (db_mode) {
@@ -414,6 +453,12 @@ static int mod_init(void)
 			LM_CRIT("Unable to register clusterer heartbeats timer\n");
 			goto error;
 		}
+	}
+
+	if (register_utimer("cl-seed-fb-check", seed_fb_check_timer,
+		NULL, SEED_FB_CHECK_INTERVAL*1000, TIMER_FLAG_DELAY_ON_DELAY) < 0) {
+		LM_CRIT("Unable to register clusterer seed check timer\n");
+		goto error;
 	}
 
 	if (bin_register_cb(&cl_internal_cap, bin_rcv_cl_packets, NULL, 0) < 0) {
@@ -509,7 +554,7 @@ mi_response_t *clusterer_reload(const mi_params_t *params,
 static mi_response_t *clusterer_set_status(const mi_params_t *params,
 								struct mi_handler *async_hdl)
 {
-	int cluster_id;
+	int cluster_id, node_id;
 	int state;
 	int rc;
 
@@ -518,16 +563,58 @@ static mi_response_t *clusterer_set_status(const mi_params_t *params,
 	if (cluster_id < 1)
 		return init_mi_error(400, MI_SSTR("Bad value for 'cluster_id'"));
 
+	switch (try_get_mi_int_param(params, "node_id", &node_id)) {
+		case -1:
+			node_id = current_id;
+		case 0:
+			if (node_id < 1)
+				return init_mi_error(400, MI_SSTR("Bad value for 'node_id'"));
+			break;
+		default:
+			return init_mi_param_error();
+	}
+
 	if (get_mi_int_param(params, "status", &state) < 0)
 		return init_mi_param_error();
 	if (state != STATE_DISABLED && state != STATE_ENABLED)
 		return init_mi_error(400, MI_SSTR("Bad value for 'status'"));
 
-	rc = cl_set_state(cluster_id, state);
+	rc = cl_set_state(cluster_id, node_id, state);
 	if (rc == -1)
 		return init_mi_error(404, MI_SSTR("Cluster id not found"));
 	if (rc == 1)
 		return init_mi_error(404, MI_SSTR("Node id not found"));
+
+	return init_mi_result_ok();
+}
+
+static mi_response_t *clusterer_set_cap_status(const mi_params_t *params,
+								struct mi_handler *async_hdl)
+{
+	int cluster_id;
+	int status;
+	str capability;
+	int rc;
+
+	if (get_mi_int_param(params, "cluster_id", &cluster_id) < 0)
+		return init_mi_param_error();
+	if (cluster_id < 1)
+		return init_mi_error(400, MI_SSTR("Bad value for 'cluster_id'"));
+
+	if (get_mi_string_param(params, "capability",
+		&capability.s, &capability.len) < 0)
+		return init_mi_param_error();
+
+	if (get_mi_int_param(params, "status", &status) < 0)
+		return init_mi_param_error();
+	if (status != CAP_DISABLED && status != CAP_ENABLED)
+		return init_mi_error(400, MI_SSTR("Bad value for 'status'"));
+
+	rc = mi_cap_set_state(cluster_id, &capability, status);
+	if (rc == -1)
+		return init_mi_error(404, MI_SSTR("Cluster id not found"));
+	if (rc == -2)
+		return init_mi_error(404, MI_SSTR("Capability not found"));
 
 	return init_mi_result_ok();
 }
@@ -541,9 +628,9 @@ static mi_response_t *clusterer_list(const mi_params_t *params,
 	mi_response_t *resp = NULL;
 	mi_item_t *resp_obj;
 	mi_item_t *clusters_arr, *cluster_item, *nodes_arr, *node_item;
-	static str str_up   = 	str_init("Up     ");
-	static str str_prob = 	str_init("Probe  ");
-	static str str_down = 	str_init("Down   ");
+	static str str_up   = 	str_init("Up");
+	static str str_prob = 	str_init("Probe");
+	static str str_down = 	str_init("Down");
 	static str str_none = 	str_init("none");
 	int n_hop;
 
@@ -590,12 +677,6 @@ static mi_response_t *clusterer_list(const mi_params_t *params,
 
 			lock_get(n_info->lock);
 
-			if (add_mi_bool(node_item, MI_SSTR("Enabled"),
-				n_info->flags & NODE_STATE_ENABLED ? 1 : 0) < 0) {
-				lock_release(n_info->lock);
-				goto error;
-			}
-
 			if (n_info->link_state == LS_UP)
 				val = str_up;
 			else if (n_info->link_state == LS_DOWN)
@@ -609,10 +690,16 @@ static mi_response_t *clusterer_list(const mi_params_t *params,
 				goto error;
 			}
 
+			if (add_mi_string_fmt(node_item, MI_SSTR("state"), "%s",
+				n_info->flags&NODE_STATE_ENABLED ? "enabled" : "disabled") < 0) {
+				lock_release(n_info->lock);
+				goto error;
+			}
+
 			lock_release(n_info->lock);
 
 			n_hop = get_next_hop(n_info); 
-			if (n_hop <= 0)
+			if (!n_hop)
 				val = str_none;
 			else
 				val.s = int2str(n_hop, &val.len);
@@ -693,6 +780,12 @@ static mi_response_t *clusterer_list_cap(const mi_params_t *params,
 				goto error;
 			}
 
+			if (add_mi_string_fmt(cap_item, MI_SSTR("enabled"), "%s",
+				(cap->flags&CAP_STATE_ENABLED) ? "yes" : "no") < 0) {
+				lock_release(cl->lock);
+				goto error;
+			}
+
 			lock_release(cl->lock);
 	   }
 	}
@@ -755,7 +848,7 @@ static mi_response_t *clusterer_list_topology(const mi_params_t *params,
 			goto error;
 
 		for (neigh = cl->current_node->neighbour_list; neigh; neigh = neigh->next)
-			if (add_mi_number(node_item, 0,0, neigh->node->node_id) < 0)
+			if (add_mi_number(neigh_arr, 0,0, neigh->node->node_id) < 0)
 				goto error;
 
 		for (n_info = cl->node_list; n_info; n_info = n_info->next) {
@@ -772,14 +865,14 @@ static mi_response_t *clusterer_list_topology(const mi_params_t *params,
 
 			lock_get(n_info->lock);
 
-			for (neigh = cl->current_node->neighbour_list; neigh; neigh = neigh->next)
-				if (add_mi_number(node_item, 0,0, neigh->node->node_id) < 0) {
+			for (neigh = n_info->neighbour_list; neigh; neigh = neigh->next)
+				if (add_mi_number(neigh_arr, 0,0, neigh->node->node_id) < 0) {
 					lock_release(n_info->lock);
 					goto error;
 				}
 
 			if (n_info->link_state == LS_UP)
-				if (add_mi_number(node_item, 0,0, current_id) < 0) {
+				if (add_mi_number(neigh_arr, 0,0, current_id) < 0) {
 					lock_release(n_info->lock);
 					goto error;
 				}
@@ -796,202 +889,286 @@ error:
 	return NULL;
 }
 
-/*
-static struct mi_root *run_mi_cmd_local(struct mi_cmd *f, str *cmd_params, int nr_params,
-									struct mi_handler *async_hdl)
+static mi_response_t *cl_run_mi_cmd(str *cmd_name, mi_item_t *item_params_arr,
+										str *str_params_arr, int no_params)
 {
-	struct mi_root *cmd_root = NULL, *cmd_rpl;
+	struct mi_cmd *cmd = NULL;
+	mi_response_t *resp = NULL;
+	mi_request_t req_item;
+	mi_item_t *param_item;
 	int i;
+	str val;
 
-	if (f->flags & MI_NO_INPUT_FLAG && nr_params)
-		return init_mi_tree(400, MI_SSTR(MI_MISSING_PARM_S));
+	memset(&req_item, 0, sizeof req_item);
 
-	if (!(f->flags & MI_NO_INPUT_FLAG)) {
-		cmd_root = init_mi_tree(0,0,0);
-		if (!cmd_root) {
-			LM_ERR("the MI tree for the command to be run cannot be initialized!\n");
-			return init_mi_tree(400, MI_SSTR(MI_INTERNAL_ERR));
-		}
-		cmd_root->async_hdl = async_hdl;
+	req_item.req_obj = cJSON_CreateObject();
+	if (!req_item.req_obj) {
+		LM_ERR("Failed to build temporary json request\n");
+		return NULL;
 	}
 
-	for (i = 0; i < nr_params; i++)
-		if (!add_mi_node_child(&cmd_root->node, 0, 0, 0,
-			cmd_params[i].s, cmd_params[i].len)) {
-			LM_ERR("cannot add child node to the tree of the MI command to be run\n");
-			free_mi_tree(cmd_root);
-			return init_mi_tree(400, MI_SSTR(MI_INTERNAL_ERR));
-		}
-
-	if ((cmd_rpl = run_mi_cmd(f, cmd_root, 0, 0)) == NULL) {
-		if (cmd_root)
-			free_mi_tree(cmd_root);
-		return init_mi_tree(400, MI_SSTR("MI command to be run failed"));
+	cmd = lookup_mi_cmd(cmd_name->s, cmd_name->len);
+	if (!cmd) {
+		resp = init_mi_error(400, MI_SSTR("Command to be run not found"));
+		goto out;
 	}
 
-	if (cmd_root)
-		free_mi_tree(cmd_root);
+	if (cmd->flags & MI_ASYNC_RPL_FLAG) {
+		resp = init_mi_error(400, MI_SSTR("Async commands not supported"));
+		goto out;
+	}
+	if (cmd->flags & MI_NAMED_PARAMS_ONLY) {
+		resp = init_mi_error(400, MI_SSTR("Commands requiring named params not supported"));
+		goto out;
+	}
 
-	return cmd_rpl;
+	if (no_params) {
+		req_item.params = cJSON_CreateArray();
+		if (!req_item.params) {
+			LM_ERR("Failed to add 'params' to temporary json request\n");
+			goto out;
+		}
+		cJSON_AddItemToObject(req_item.req_obj, JSONRPC_PARAMS_S,
+			req_item.params);
+	}
+
+	for (i = 0; i < no_params; i++) {
+		if (item_params_arr) {
+			if (get_mi_arr_param_string(item_params_arr, i, &val.s, &val.len) < 0) {
+				resp = init_mi_param_error();
+				goto out;
+			}
+		} else {
+			val.s = str_params_arr[i].s;
+			val.len = str_params_arr[i].len;
+		}
+
+		param_item = cJSON_CreateStr(val.s, val.len);
+		if (!param_item) {
+			LM_ERR("Failed to create string item in temporary json request\n");
+			goto out;
+		}
+
+		cJSON_AddItemToArray(req_item.params, param_item);
+	}
+
+	resp = handle_mi_request(&req_item, cmd, NULL);
+	LM_DBG("got mi response = [%p]\n", resp);
+
+out:
+	cJSON_Delete(req_item.req_obj);
+	return resp;
 }
-*/
 
-/*
-struct mi_root *run_rcv_mi_cmd(str *cmd_name, str *cmd_params, int nr_params)
+static mi_response_t *run_mi_cmd_local(str *cmd_name, mi_item_t *cmd_params_arr,
+									int no_params)
 {
-	struct mi_cmd *f;
-	struct mi_root *cmd_root = NULL, *cmd_rpl;
-	int i;
-
-	f = lookup_mi_cmd(cmd_name->s, cmd_name->len);
-	if (!f) {
-		LM_ERR("MI command to be run not found\n");
-		return NULL;
-	}
-
-	if (f->flags & MI_NO_INPUT_FLAG && nr_params) {
-		LM_ERR("MI command should not have parameters\n");
-		return NULL;
-	}
-
-	if (!(f->flags & MI_NO_INPUT_FLAG)) {
-		cmd_root = init_mi_tree(0,0,0);
-		if (!cmd_root) {
-			LM_ERR("the MI tree for the command to be run cannot be initialized!\n");
-			return NULL;
-		}
-	}
-
-	for (i = 0; i < nr_params; i++)
-		if (!add_mi_node_child(&cmd_root->node, 0, 0, 0,
-			cmd_params[i].s, cmd_params[i].len)) {
-			free_mi_tree(cmd_root);
-			LM_ERR("cannot add child node to the tree of the MI command to be run\n");
-			return NULL;
-		}
-
-	if ((cmd_rpl = run_mi_cmd(f, cmd_root, 0, 0)) == NULL) {
-		if (cmd_root)
-			free_mi_tree(cmd_root);
-		return NULL;
-	}
-
-	if (cmd_root)
-		free_mi_tree(cmd_root);
-
-	return cmd_rpl;
+	return cl_run_mi_cmd(cmd_name, cmd_params_arr, NULL, no_params);
 }
-*/
+
+int run_rcv_mi_cmd(str *cmd_name, str *cmd_params_arr, int no_params)
+{
+	mi_response_t *resp;
+	mi_item_t *err_item;
+
+	resp = cl_run_mi_cmd(cmd_name, NULL, cmd_params_arr, no_params);
+
+	if (resp) {
+		err_item = cJSON_GetObjectItem(resp, JSONRPC_ERROR_S);
+		free_mi_response(resp);
+		return err_item ? 1 : 0;
+	} else {
+		LM_ERR("Failed to build MI command response\n");
+		return -1;
+	}
+}
 
 static mi_response_t *cluster_send_mi(const mi_params_t *params,
 								struct mi_handler *async_hdl)
 {
-	/*
-	struct mi_node *node, *cmd_params_n;
-	unsigned int cluster_id, node_id;
+	int cluster_id, node_id;
 	int rc;
-	str cl_cmd_name;
-	str cl_cmd_params[MI_CMD_MAX_NR_PARAMS];
+	str cmd_name;
+	mi_item_t *cmd_params_arr = NULL;
 	int no_params = 0;
 
-	node = cmd->node.kids;
+	if (get_mi_int_param(params, "cluster_id", &cluster_id) < 0)
+		return init_mi_param_error();
+	if (cluster_id < 1)
+		return init_mi_error(400, MI_SSTR("Bad value for 'cluster_id'"));
 
-	if (node == NULL || node->next == NULL || node->next->next == NULL)
-		return init_mi_tree(400, MI_SSTR(MI_MISSING_PARM));
-
-	rc = str2int(&node->value, &cluster_id);
-	if (rc < 0 || cluster_id < 1)
-		return init_mi_tree(400, MI_SSTR(MI_BAD_PARM));
-
-	rc = str2int(&node->next->value, &node_id);
-	if (rc < 0 || node_id < 1)
-		return init_mi_tree(400, MI_SSTR(MI_BAD_PARM));
+	if (get_mi_int_param(params, "destination", &node_id) < 0)
+		return init_mi_param_error();
+	if (node_id < 1)
+		return init_mi_error(400, MI_SSTR("Bad value for 'destination'"));
 	if (node_id == current_id)
-		return init_mi_tree(400, MI_SSTR("Local node specified as destination"));
+		return init_mi_error(400, MI_SSTR("Local node specified as destination"));
 
-	cl_cmd_name = node->next->next->value;
+	if (get_mi_string_param(params, "cmd_name", &cmd_name.s, &cmd_name.len) < 0)
+		return init_mi_param_error();
 
-	cmd_params_n = node->next->next->next;
-	for (; cmd_params_n; cmd_params_n = cmd_params_n->next, no_params++)
-		cl_cmd_params[no_params] = cmd_params_n->value;
+	rc = try_get_mi_array_param(params, "cmd_params", &cmd_params_arr, &no_params);
+	if (rc < 0) {
+		cmd_params_arr = NULL;
+		if (rc == -2)
+			return init_mi_param_error();
+	}
 
-	rc = send_mi_cmd(cluster_id, node_id, cl_cmd_name, cl_cmd_params, no_params);
+	rc = send_mi_cmd(cluster_id, node_id, cmd_name, cmd_params_arr, no_params);
 	switch (rc) {
-		case CLUSTERER_SEND_SUCCES:
-			LM_DBG("MI command <%.*s> sent\n", cl_cmd_name.len, cl_cmd_name.s);
-			break;
+		case CLUSTERER_SEND_SUCCESS:
+			LM_DBG("MI command <%.*s> sent\n", cmd_name.len, cmd_name.s);
+			return init_mi_result_ok();
 		case CLUSTERER_CURR_DISABLED:
 			LM_INFO("Local node disabled, MI command <%.*s> not sent\n",
-				cl_cmd_name.len, cl_cmd_name.s);
-			break;
+				cmd_name.len, cmd_name.s);
+			return init_mi_result_string(MI_SSTR("Local node disabled"));
 		case CLUSTERER_DEST_DOWN:
 			LM_ERR("Destination down, MI command <%.*s> not sent\n",
-				cl_cmd_name.len, cl_cmd_name.s);
-			break;
+				cmd_name.len, cmd_name.s);
+			return init_mi_error(400, MI_SSTR("Destination down"));
 		case CLUSTERER_SEND_ERR:
 			LM_ERR("Error sending MI command <%.*s>+\n",
-				cl_cmd_name.len, cl_cmd_name.s);
-			break;
+				cmd_name.len, cmd_name.s);
+			return init_mi_error(400, MI_SSTR("Send error"));
+		default:
+			LM_BUG("Bad send error code\n");
+			return init_mi_error(400, MI_SSTR("Internal error"));
 	}
-	*/
-
-	return init_mi_result_ok();
 }
 
 static mi_response_t *cluster_bcast_mi(const mi_params_t *params,
 								struct mi_handler *async_hdl)
 {
-	/*
-	struct mi_node *node, *cmd_params_n;
-	struct mi_cmd *f;
-	unsigned int cluster_id;
+	int cluster_id;
 	int rc;
-	str cl_cmd_name;
-	str cl_cmd_params[MI_CMD_MAX_NR_PARAMS];
+	str cmd_name;
+	mi_item_t *cmd_params_arr = NULL;
 	int no_params = 0;
 
-	node = cmd->node.kids;
+	if (get_mi_int_param(params, "cluster_id", &cluster_id) < 0)
+		return init_mi_param_error();
+	if (cluster_id < 1)
+		return init_mi_error(400, MI_SSTR("Bad value for 'cluster_id'"));
 
-	if (node == NULL || node->next == NULL || node->next->next == NULL)
-		return init_mi_tree(400, MI_SSTR(MI_MISSING_PARM));
+	if (get_mi_string_param(params, "cmd_name", &cmd_name.s, &cmd_name.len) < 0)
+		return init_mi_param_error();
 
-	rc = str2int(&node->value, &cluster_id);
-	if (rc < 0 || cluster_id < 1)
-		return init_mi_tree(400, MI_SSTR(MI_BAD_PARM));
+	rc = try_get_mi_array_param(params, "cmd_params", &cmd_params_arr, &no_params);
+	if (rc < 0) {
+		cmd_params_arr = NULL;
+		if (rc == -2)
+			return init_mi_param_error();
+	}
 
-	cl_cmd_name = node->next->value;
-
-	f = lookup_mi_cmd(cl_cmd_name.s, cl_cmd_name.len);
-	if (!f)
-		return init_mi_tree(400, MI_SSTR("MI command to be run not found"));
-
-	cmd_params_n = node->next->next;
-	for (; cmd_params_n; cmd_params_n = cmd_params_n->next, no_params++)
-		cl_cmd_params[no_params] = cmd_params_n->value;
-
-	rc = send_mi_cmd(cluster_id, 0, cl_cmd_name, cl_cmd_params, no_params);
+	rc = send_mi_cmd(cluster_id, 0, cmd_name, cmd_params_arr, no_params);
 	switch (rc) {
-		case CLUSTERER_SEND_SUCCES:
-			LM_DBG("MI command <%.*s> sent\n", cl_cmd_name.len, cl_cmd_name.s);
+		case CLUSTERER_SEND_SUCCESS:
+			LM_DBG("MI command <%.*s> sent\n", cmd_name.len, cmd_name.s);
 			break;
 		case CLUSTERER_CURR_DISABLED:
 			LM_INFO("Local node disabled, MI command <%.*s> not sent\n",
-				cl_cmd_name.len, cl_cmd_name.s);
+				cmd_name.len, cmd_name.s);
 			break;
 		case CLUSTERER_DEST_DOWN:
 			LM_ERR("All nodes down, MI command <%.*s> not sent\n",
-				cl_cmd_name.len, cl_cmd_name.s);
+				cmd_name.len, cmd_name.s);
 			break;
 		case CLUSTERER_SEND_ERR:
 			LM_ERR("Error sending MI command <%.*s>+\n",
-				cl_cmd_name.len, cl_cmd_name.s);
+				cmd_name.len, cmd_name.s);
 			break;
 	}
 
-	return run_mi_cmd_local(f, cl_cmd_params, no_params, cmd->async_hdl);
-	*/
+	return run_mi_cmd_local(&cmd_name, cmd_params_arr, no_params);
+}
+
+static mi_response_t *cluster_remove_node(const mi_params_t *params,
+								struct mi_handler *async_hdl)
+{
+	int cluster_id, node_id;
+	int rc;
+	cluster_info_t *cl;
+	node_info_t *node;
+	mi_response_t *resp;
+
+	if (db_mode)
+		return init_mi_error(400, MI_SSTR("Running in DB mode"));
+
+	if (get_mi_int_param(params, "cluster_id", &cluster_id) < 0)
+		return init_mi_param_error();
+	if (cluster_id < 1)
+		return init_mi_error(400, MI_SSTR("Bad value for 'cluster_id'"));
+
+	lock_start_read(cl_list_lock);
+
+	cl = get_cluster_by_id(cluster_id);
+	if (!cl) {
+		LM_ERR("Unknown cluster id [%d]\n", cluster_id);
+		resp = init_mi_error(400, MI_SSTR("Unknown cluster id"));
+		goto error;
+	}
+
+	if (get_mi_int_param(params, "node_id", &node_id) < 0) {
+		resp = init_mi_param_error();
+		goto error;
+	}
+	if (node_id < 1) {
+		resp = init_mi_error(400, MI_SSTR("Bad value for 'node_id'"));
+		goto error;
+	}
+
+	node = get_node_by_id(cl, node_id);
+	if (!node) {
+		LM_ERR("Unknown node id [%d]\n", node_id);
+		resp = init_mi_error(400, MI_SSTR("Unknown node id"));
+		goto error;
+	}
+
+	lock_stop_read(cl_list_lock);
+
+	rc = bcast_remove_node(cluster_id, node_id);
+	switch (rc) {
+		case CLUSTERER_SEND_SUCCESS:
+			LM_DBG("Remove node <%d> command sent\n", node_id);
+			break;
+		case CLUSTERER_CURR_DISABLED:
+			LM_INFO("Local node disabled, remove node <%d> command not sent\n",
+				node_id);
+			break;
+		case CLUSTERER_DEST_DOWN:
+			LM_ERR("All nodes down, remove node <%d> command not sent\n",
+				node_id);
+			break;
+		case CLUSTERER_SEND_ERR:
+			LM_ERR("Error sending remove node <%d> command\n", node_id);
+			break;
+	}
+
+	lock_start_write(cl_list_lock);
+
+	cl = get_cluster_by_id(cluster_id);
+	if (!cl) {
+		LM_ERR("Unknown cluster id [%d]\n", cluster_id);
+		lock_stop_write(cl_list_lock);
+		return init_mi_error(400, MI_SSTR("Unknown cluster id"));
+	}
+
+	node = get_node_by_id(cl, node_id);
+	if (!node) {
+		LM_ERR("Unknown node id [%d]\n", node_id);
+		lock_stop_write(cl_list_lock);
+		return init_mi_error(400, MI_SSTR("Unknown node id"));
+	}
+
+	remove_node(cl, node);
+
+	lock_stop_write(cl_list_lock);
 
 	return init_mi_result_ok();
+error:
+	lock_stop_read(cl_list_lock);
+	return resp;
 }
 
 static void heartbeats_timer_handler(unsigned int ticks, void *param)
@@ -1002,45 +1179,6 @@ static void heartbeats_timer_handler(unsigned int ticks, void *param)
 static void heartbeats_utimer_handler(utime_t ticks, void *param)
 {
 	heartbeats_timer();
-}
-
-static int fixup_broadcast(void ** param, int param_no)
-{
-	if (param_no == 1)
-		return fixup_igp(param);
-	else if (param_no == 2)
-		return fixup_spve(param);
-	else if (param_no == 3)
-		return fixup_pvar(param);
-
-	LM_CRIT("Unknown parameter number %d\n", param_no);
-	return E_UNSPEC;
-}
-
-static int fixup_send(void ** param, int param_no)
-{
-	if (param_no == 1 || param_no == 2)
-		return fixup_igp(param);
-	else if (param_no == 3)
-		return fixup_spve(param);
-	else if (param_no == 4)
-		return fixup_pvar(param);
-
-	LM_CRIT("Unknown parameter number %d\n", param_no);
-	return E_UNSPEC;
-}
-
-static int fixup_check_addr(void ** param, int param_no)
-{
-	if (param_no == 1)
-		return fixup_igp(param);
-	else if (param_no == 2)
-		return fixup_spve(param);
-	else if (param_no == 3)
-		return fixup_spve(param);
-
-	LM_CRIT("Unknown parameter number %d\n", param_no);
-	return E_UNSPEC;
 }
 
 static inline void generate_msg_tag(pv_value_t *tag_val, int cluster_id)
@@ -1073,33 +1211,21 @@ static inline void generate_msg_tag(pv_value_t *tag_val, int cluster_id)
 	}
 }
 
-int cmd_broadcast_req(struct sip_msg *msg, char *param_cluster, char *param_msg,
-									char *param_tag)
+int cmd_broadcast_req(struct sip_msg *msg, int *cluster_id, str *gen_msg,
+									pv_spec_t *param_tag)
 {
-	int cluster_id;
-	str gen_msg;
 	pv_value_t tag_val;
 	int rc;
 
-	if (fixup_get_ivalue(msg, (gparam_p)param_cluster, &cluster_id) < 0) {
-		LM_ERR("Failed to fetch cluster id parameter\n");
-		return -1;
-	}
-
-	if (fixup_get_svalue(msg, (gparam_p)param_msg, &gen_msg) < 0) {
-		LM_ERR("Failed to fetch message parameter\n");
-		return -1;
-	}
-
 	/* generate tag */
-	generate_msg_tag(&tag_val, cluster_id);
+	generate_msg_tag(&tag_val, *cluster_id);
 
-	if (param_tag && pv_set_value(msg, (pv_spec_p)param_tag, 0, &tag_val) < 0) {
+	if (param_tag && pv_set_value(msg, param_tag, 0, &tag_val) < 0) {
 		LM_ERR("Unable to set tag pvar\n");
 		return -1;
 	}
 
-	rc = bcast_gen_msg(cluster_id, &gen_msg, &tag_val.rs);
+	rc = bcast_gen_msg(*cluster_id, gen_msg, &tag_val.rs);
 	switch (rc) {
 		case 0:
 			return 1;
@@ -1114,37 +1240,21 @@ int cmd_broadcast_req(struct sip_msg *msg, char *param_cluster, char *param_msg,
 	}
 }
 
-int cmd_send_req(struct sip_msg *msg, char *param_cluster, char *param_node,
-								char *param_msg, char *param_tag)
+int cmd_send_req(struct sip_msg *msg, int *cluster_id, int *node_id,
+								str *gen_msg, pv_spec_t *param_tag)
 {
-	int cluster_id, node_id;
-	str gen_msg;
 	pv_value_t tag_val;
 	int rc;
 
-	if (fixup_get_ivalue(msg, (gparam_p)param_cluster, &cluster_id) < 0) {
-		LM_ERR("Failed to fetch cluster id parameter\n");
-		return -1;
-	}
-	if (fixup_get_ivalue(msg, (gparam_p)param_node, &node_id) < 0) {
-		LM_ERR("Failed to fetch node id parameter\n");
-		return -1;
-	}
-
-	if (fixup_get_svalue(msg, (gparam_p)param_msg, &gen_msg) < 0) {
-		LM_ERR("Failed to fetch message parameter\n");
-		return -1;
-	}
-
 	/* generate tag */
-	generate_msg_tag(&tag_val, cluster_id);
+	generate_msg_tag(&tag_val, *cluster_id);
 
-	if (param_tag && pv_set_value(msg, (pv_spec_p)param_tag, 0, &tag_val) < 0) {
+	if (param_tag && pv_set_value(msg, param_tag, 0, &tag_val) < 0) {
 		LM_ERR("Unable to set tag pvar\n");
 		return -1;
 	}
 
-	rc = send_gen_msg(cluster_id, node_id, &gen_msg, &tag_val.rs, 1);
+	rc = send_gen_msg(*cluster_id, *node_id, gen_msg, &tag_val.rs, 1);
 	switch (rc) {
 		case 0:
 			return 1;
@@ -1159,29 +1269,13 @@ int cmd_send_req(struct sip_msg *msg, char *param_cluster, char *param_node,
 	}
 }
 
-int cmd_send_rpl(struct sip_msg *msg, char *param_cluster, char *param_node,
-								char *param_msg, char *param_tag)
+int cmd_send_rpl(struct sip_msg *msg, int *cluster_id, int *node_id,
+								str *gen_msg, pv_spec_t *param_tag)
 {
-	int cluster_id, node_id;
-	str gen_msg;
 	pv_value_t tag_val;
 	int rc;
 
-	if (fixup_get_ivalue(msg, (gparam_p)param_cluster, &cluster_id) < 0) {
-		LM_ERR("Failed to fetch cluster id parameter\n");
-		return -1;
-	}
-	if (fixup_get_ivalue(msg, (gparam_p)param_node, &node_id) < 0) {
-		LM_ERR("Failed to fetch node id parameter\n");
-		return -1;
-	}
-
-	if (fixup_get_svalue(msg, (gparam_p)param_msg, &gen_msg) < 0) {
-		LM_ERR("Failed to fetch message parameter\n");
-		return -1;
-	}
-
-	if (pv_get_spec_value(msg, (pv_spec_p)param_tag, &tag_val) < 0) {
+	if (pv_get_spec_value(msg, param_tag, &tag_val) < 0) {
 		LM_ERR("Failed to fetch tag parameter\n");
 		return -1;
 	}
@@ -1191,7 +1285,7 @@ int cmd_send_rpl(struct sip_msg *msg, char *param_cluster, char *param_node,
 		return -1;
 	}
 
-	rc = send_gen_msg(cluster_id, node_id, &gen_msg, &tag_val.rs, 0);
+	rc = send_gen_msg(*cluster_id, *node_id, gen_msg, &tag_val.rs, 0);
 	switch (rc) {
 		case 0:
 			return 1;
@@ -1206,34 +1300,17 @@ int cmd_send_rpl(struct sip_msg *msg, char *param_cluster, char *param_node,
 	}
 }
 
-int cmd_check_addr(struct sip_msg *msg, char *param_cluster, char *param_ip,
-					char *param_addr_type)
+int cmd_check_addr(struct sip_msg *msg, int *cluster_id, str *ip_str,
+					str *addr_type_str)
 {
-	int cluster_id;
-	str ip_str;
-	str addr_type_str;
 	static str bin_addr_t = str_init("bin");
 	static str sip_addr_t = str_init("sip");
 	enum node_addr_type check_type;
 
-	if (fixup_get_ivalue(msg, (gparam_p)param_cluster, &cluster_id) < 0) {
-		LM_ERR("Failed to fetch cluster id parameter\n");
-		return -1;
-	}
-	if (fixup_get_svalue(msg, (gparam_p)param_ip, &ip_str) < 0) {
-		LM_ERR("Failed to fetch ip parameter\n");
-		return -1;
-	}
-	if (param_addr_type &&
-		fixup_get_svalue(msg, (gparam_p)param_addr_type, &addr_type_str) < 0) {
-		LM_ERR("Failed to fetch address type parameter\n");
-		return -1;
-	}
-
-	if (param_addr_type) {
-		if (!str_strcasecmp(&addr_type_str, &bin_addr_t))
+	if (addr_type_str) {
+		if (!str_strcasecmp(addr_type_str, &bin_addr_t))
 			check_type = NODE_BIN_ADDR;
-		else if (!str_strcasecmp(&addr_type_str, &sip_addr_t))
+		else if (!str_strcasecmp(addr_type_str, &sip_addr_t))
 			check_type = NODE_SIP_ADDR;
 		else {
 			LM_ERR("Bad address type, should be 'bin' or 'sip'\n");
@@ -1242,7 +1319,7 @@ int cmd_check_addr(struct sip_msg *msg, char *param_cluster, char *param_ip,
 	} else
 		check_type = NODE_SIP_ADDR;
 
-	if (clusterer_check_addr(cluster_id, &ip_str, check_type) == 0)
+	if (clusterer_check_addr(*cluster_id, ip_str, check_type) == 0)
 		return -1;
 	else
 		return 1;
@@ -1250,12 +1327,6 @@ int cmd_check_addr(struct sip_msg *msg, char *param_cluster, char *param_ip,
 
 static void destroy(void)
 {
-	if (db_hdl) {
-		/* close DB connection */
-		dr_dbf.close(db_hdl);
-		db_hdl = NULL;
-	}
-
 	/* destroy data */
 	if (cluster_list) {
 		if (*cluster_list)
@@ -1299,6 +1370,9 @@ int load_clusterer(struct clusterer_binds *binds)
 	binds->shtag_activate = shtag_activate;
 	binds->shtag_get_all_active = shtag_get_all_active;
 	binds->shtag_register_callback = shtag_register_callback;
+	binds->shtag_get_sync_status = shtag_get_sync_status;
+	binds->shtag_set_sync_status = shtag_set_sync_status;
+	binds->shtag_sync_all_backup = shtag_sync_all_backup;
 
 	return 1;
 }

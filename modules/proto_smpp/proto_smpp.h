@@ -39,6 +39,8 @@ typedef struct smpp_session {
 	gen_lock_t sequence_number_lock;
 	uint32_t sequence_number;
 
+	uint8_t chunk_identifier;
+
 	struct ip_addr ip;
 	int port;
 
@@ -63,14 +65,12 @@ extern struct tm_binds tmb;
 
 /* exposed by proto_smpp.c */
 int smpp_sessions_init(void);
-struct tcp_connection* smpp_sync_connect(struct socket_info* send_sock,
-		union sockaddr_union* server, int *fd);
 
 void enquire_link(unsigned int ticks, void *param);
 void rpc_bind_sessions(int sender_id, void *param);
 void handle_smpp_msg(char *buffer, smpp_session_t *session, struct receive_info *rcv);
-void send_submit_or_deliver_request(str *msg, str *src, str *dst,
-		smpp_session_t *session);
+int send_submit_or_deliver_request(str *msg, int msg_type, str *src, str *dst,
+		smpp_session_t *session,int *delivery_confirmation);
 smpp_session_t *smpp_session_new(str *name, struct ip_addr *ip, int port,
 		str *system_id, str *password, str *system_type, int src_addr_ton,
 		int src_addr_npi, int dst_addr_ton, int dst_addr_npi, int stype);

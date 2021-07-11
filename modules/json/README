@@ -20,8 +20,7 @@ JSON Module
 
         1.5. Exported Functions
 
-              1.5.1. json_link("$json(dest_id)",
-                      "$json(source_id)")
+              1.5.1. json_link($json(dest_id), $json(source_id))
 
    2. Contributors
 
@@ -299,7 +298,7 @@ $json(object/array) := $json(array) ;
 
 1.5. Exported Functions
 
-1.5.1.  json_link("$json(dest_id)", "$json(source_id)")
+1.5.1.  json_link($json(dest_id), $json(source_id))
 
    This function can be used to link json objects together. This
    will work simillar to setting a value to an object, the only
@@ -320,7 +319,7 @@ $json(object/array) := $json(array) ;
    modifying the variable itsef will not cause any changes to
    other objects.
 
-   WARNING: You should be carefull when using references. If you
+   WARNING: You should be careful when using references. If you
    accidentally create a circular reference and try to get the
    value from the object you will crash OPENSIPS.
 
@@ -329,7 +328,7 @@ $json(object/array) := $json(array) ;
 
 $json(b) := "[{},{},{}]";
 
-json_link("$json(stub)","$json(b[0])");
+json_link($json(stub), $json(b[0]));
 
 $json(stub/ana) = "are"; #add to the stub
 $json(stub/ar) := "[]";
@@ -376,7 +375,7 @@ $json(b) := "[1]";
 
 /* NEVER do this, it is meant only to show where problems might occur  *
 /
-json_link("$json(b[0])","$json(b)"); # replace 1 with a reference to b
+json_link($json(b[0]), $json(b)); # replace 1 with a reference to b
 
 xlog("\nTest link :\n$json(stub)\n$json(b)\n\n");
 
@@ -393,19 +392,19 @@ Chapter 2. Contributors
    Table 2.1. Top contributors by DevScore^(1), authored
    commits^(2) and lines added/removed^(3)
      Name DevScore Commits Lines ++ Lines --
-   1. Andrei Dragus 18 4 1556 12
-   2. Liviu Chircu (@liviuchircu) 16 13 43 82
-   3. Razvan Crainea (@razvancrainea) 11 8 42 74
-   4. Bogdan-Andrei Iancu (@bogdan-iancu) 7 5 23 28
-   5. Vlad Patrascu (@rvlad-patrascu) 6 3 185 38
+   1. Liviu Chircu (@liviuchircu) 19 16 50 89
+   2. Andrei Dragus 18 4 1556 12
+   3. Razvan Crainea (@razvancrainea) 14 11 48 76
+   4. Bogdan-Andrei Iancu (@bogdan-iancu) 8 6 27 30
+   5. Vlad Patrascu (@rvlad-patrascu) 8 4 195 75
    6. Vlad Paiu (@vladpaiu) 5 3 29 11
-   7. Björn Esser 4 2 124 44
+   7. Björn Esser (@besser82) 5 2 124 44
    8. Ovidiu Sas (@ovidiusas) 4 2 17 4
    9. Nick Altmann (@nikbyte) 3 1 47 15
-   10. Anca Vamanu 3 1 3 1
+   10. Maksym Sobolyev (@sobomax) 3 1 4 4
 
-   All remaining contributors: Peter Lemenkov (@lemenkov), Julián
-   Moreno Patiño.
+   All remaining contributors: Anca Vamanu, Peter Lemenkov
+   (@lemenkov), Julián Moreno Patiño.
 
    (1) DevScore = author_commits + author_lines_added /
    (project_lines_added / project_commits) + author_lines_deleted
@@ -427,18 +426,19 @@ Chapter 2. Contributors
 
    Table 2.2. Most recently active contributors^(1) to this module
                       Name                   Commit Activity
-   1.  Liviu Chircu (@liviuchircu)         Oct 2013 - Nov 2018
-   2.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - Oct 2018
-   3.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
-   4.  Nick Altmann (@nikbyte)             Jan 2018 - Jan 2018
-   5.  Björn Esser                         Dec 2017 - Dec 2017
-   6.  Razvan Crainea (@razvancrainea)     Feb 2012 - Dec 2017
-   7.  Julián Moreno Patiño                Feb 2016 - Feb 2016
-   8.  Vlad Paiu (@vladpaiu)               Jul 2014 - May 2015
-   9.  Bogdan-Andrei Iancu (@bogdan-iancu) Dec 2010 - Oct 2014
-   10. Ovidiu Sas (@ovidiusas)             Mar 2013 - Mar 2013
+   1.  Liviu Chircu (@liviuchircu)         Oct 2013 - Jan 2021
+   2.  Maksym Sobolyev (@sobomax)          Jan 2021 - Jan 2021
+   3.  Razvan Crainea (@razvancrainea)     Feb 2012 - Sep 2019
+   4.  Bogdan-Andrei Iancu (@bogdan-iancu) Dec 2010 - Apr 2019
+   5.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - Apr 2019
+   6.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
+   7.  Nick Altmann (@nikbyte)             Jan 2018 - Jan 2018
+   8.  Björn Esser (@besser82)             Dec 2017 - Dec 2017
+   9.  Julián Moreno Patiño                Feb 2016 - Feb 2016
+   10. Vlad Paiu (@vladpaiu)               Jul 2014 - May 2015
 
-   All remaining contributors: Anca Vamanu, Andrei Dragus.
+   All remaining contributors: Ovidiu Sas (@ovidiusas), Anca
+   Vamanu, Andrei Dragus.
 
    (1) including any documentation-related commits, excluding
    merge commits
@@ -447,8 +447,8 @@ Chapter 3. Documentation
 
 3.1. Contributors
 
-   Last edited by: Vlad Patrascu (@rvlad-patrascu), Liviu Chircu
-   (@liviuchircu), Peter Lemenkov (@lemenkov), Nick Altmann
+   Last edited by: Liviu Chircu (@liviuchircu), Vlad Patrascu
+   (@rvlad-patrascu), Peter Lemenkov (@lemenkov), Nick Altmann
    (@nikbyte), Bogdan-Andrei Iancu (@bogdan-iancu), Razvan Crainea
    (@razvancrainea), Andrei Dragus.
 

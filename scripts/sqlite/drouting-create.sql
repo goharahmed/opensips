@@ -14,7 +14,7 @@ CREATE TABLE dr_gateways (
     CONSTRAINT dr_gateways_dr_gw_idx  UNIQUE (gwid)
 );
 
-INSERT INTO version (table_name, table_version) values ('dr_rules','3');
+INSERT INTO version (table_name, table_version) values ('dr_rules','4');
 CREATE TABLE dr_rules (
     ruleid INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     groupid CHAR(255) NOT NULL,
@@ -22,17 +22,20 @@ CREATE TABLE dr_rules (
     timerec CHAR(255) DEFAULT NULL,
     priority INTEGER DEFAULT 0 NOT NULL,
     routeid CHAR(255) DEFAULT NULL,
-    gwlist CHAR(255) NOT NULL,
+    gwlist CHAR(255),
+    sort_alg CHAR(1) DEFAULT 'N' NOT NULL,
+    sort_profile INTEGER DEFAULT NULL,
     attrs CHAR(255) DEFAULT NULL,
     description CHAR(128) DEFAULT NULL
 );
 
-INSERT INTO version (table_name, table_version) values ('dr_carriers','2');
+INSERT INTO version (table_name, table_version) values ('dr_carriers','3');
 CREATE TABLE dr_carriers (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     carrierid CHAR(64) NOT NULL,
     gwlist CHAR(255) NOT NULL,
     flags INTEGER DEFAULT 0 NOT NULL,
+    sort_alg CHAR(1) DEFAULT 'N' NOT NULL,
     state INTEGER DEFAULT 0 NOT NULL,
     attrs CHAR(255) DEFAULT NULL,
     description CHAR(128) DEFAULT NULL,

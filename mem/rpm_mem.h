@@ -37,6 +37,7 @@
 #include "../dprint.h"
 #include "../globals.h"
 #include "../lock_ops.h" /* we don't include locking.h on purpose */
+#include "mem_funcs.h"
 #include "common.h"
 
 #include "../mi/mi.h"
@@ -223,13 +224,9 @@ inline static void* _rpm_realloc(void *ptr, unsigned int size,
 inline static void _rpm_free(void *ptr,
 		const char* file, const char* function, unsigned int line)
 {
-#ifdef HP_MALLOC
-	RPM_FREE(rpm_block, ptr, file, function, line);
-#else /* HP_MALLOC */
 	rpm_lock();
 	RPM_FREE(rpm_block, ptr, file, function, line);
-	shm_unlock();
-#endif /* HP_MALLOC */
+	rpm_unlock();
 }
 
 #define rpm_malloc_func _rpm_malloc
@@ -308,6 +305,13 @@ inline static void rpm_free(void *_p)
 
 inline static void rpm_status(void)
 {
+	if (!rpm_block
+#ifndef INLINE_ALLOC
+		|| !gen_rpm_status
+#endif
+			)
+		return;
+
 	rpm_lock();
 	RPM_STATUS(rpm_block);
 	rpm_unlock();

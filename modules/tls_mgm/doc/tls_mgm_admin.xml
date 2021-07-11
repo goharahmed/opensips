@@ -35,6 +35,24 @@
 	</section>
 
 	<section>
+		<title>TLS libraries</title>
+		<para>
+			Besides TLS certificates and parameters, this module also acts as
+			an inteface between the actual TLS implemenation (provided by
+			<emphasis>openSSL</emphasis> or <emphasis>wolfSSL</emphasis> libraries)
+			and transport protocol modules like <emphasis>proto_tls</emphasis> or
+			<emphasis>proto_wss</emphasis>. The <emphasis>tls_mgm</emphasis> module
+			transparently exposes the TLS operations implemented by
+			<emphasis>tls_openssl</emphasis> and <emphasis>tls_wolfssl</emphasis> modules
+			to the higher-level OpenSIPS transport modules.
+		</para>
+		<para>
+			The TLS library selection ca be configured through the
+			<xref linkend="param_tls_library"/> module parameter.
+		</para>
+	</section>
+
+	<section>
 		<title>TLS domains</title>
 		<para>
 		The wording 'TLS domain' means that this TLS connection will have different
@@ -46,7 +64,7 @@
 		</para>
 		<para>
 		If you run several SIP domains you can specify some parameters for each of them
-		separately (regardless if you have only one or multiple listen=tls:ip:port entries
+		separately (regardless if you have only one or multiple socket=tls:ip:port entries
 		in the config file).
 		</para>
 		<para>
@@ -84,7 +102,7 @@
 			You can define domains both in the DB and script at the same time.
 		</para>
 		<para>
-			For any TLS domain (defined through script or DB, default or virtual) if not specified otherwise, the default settings are:
+			For any TLS domain (defined through script or DB) if not specified otherwise, the default settings are:
 			<itemizedlist>
 				<listitem><para>method - <emphasis>SSLv23</emphasis></para></listitem>
 				<listitem><para>verify_cert - <emphasis>1</emphasis></para></listitem>
@@ -103,37 +121,35 @@
 	</section>
 
 	<section id="dependencies" xreflabel="Dependencies">
+	<title>Dependencies</title>
+	<section>
+		<title>&osips; Modules</title>
+		<para>
+		The following modules must be loaded before this module:
+         <itemizedlist>
+			<listitem>
+			<para>
+				<emphasis>tls_openssl</emphasis> or <emphasis>tls_wolfssl</emphasis>,
+				unless <xref linkend="param_tls_library"/> is set to 'none'.
+			</para>
+			</listitem>
+        </itemizedlist>
+		</para>
+	</section>
+	<section>
 		<title>Dependencies of external libraries</title>
 		<para>
-			&osips; TLS v1.0 support requires the following packages:
+		The following libraries or applications must be installed before
+		running &osips; with this module loaded:
 			<itemizedlist>
-				<listitem>
-				<para><emphasis>openssl</emphasis> or
-					<emphasis>libssl</emphasis> >= 0.9.6
-				</para>
-				</listitem>
-				<listitem>
-				<para><emphasis>openssl-dev</emphasis> or
-					<emphasis>libssl-dev</emphasis>
-				</para>
-				</listitem>
+			<listitem>
+			<para>
+				<emphasis>None</emphasis>.
+			</para>
+			</listitem>
 			</itemizedlist>
 		</para>
-		<para>
-			&osips; TLS v1.1/1.2 support requires the following packages:
-			<itemizedlist>
-				<listitem>
-				<para><emphasis>openssl</emphasis> or
-					<emphasis>libssl</emphasis> >= 1.0.1e
-				</para>
-				</listitem>
-				<listitem>
-				<para><emphasis>openssl-dev</emphasis> or
-					<emphasis>libssl-dev</emphasis>
-				</para>
-				</listitem>
-			</itemizedlist>
-		</para>
+	</section>
 	</section>
 
 	<section id="exported_functions" xreflabel="exported_functions">
@@ -180,7 +196,9 @@ if (is_peer_verified()) {
 		<function moreinfo="none">tls_reload</function>
                 </title>
                 <para>
-                Reloads the TLS domains information from the database. The previous DB defined domains are discarded but the script defined domains are preserved. If no new default client or server domains is loaded and previously the default was DB defined, the standard default domain is reinstated.
+                Reloads the TLS domains information from the database.
+                The previous DB defined domains are discarded but the
+                script defined domains are preserved.
                 </para>
             </section>
         </section>
@@ -203,7 +221,53 @@ if (is_peer_verified()) {
 				<title>Set <varname>listen</varname> variable</title>
 				<programlisting format="linespecific">
 ...
-listen = tls:1.2.3.4:5061
+socket= tls:1.2.3.4:5061
+...
+				</programlisting>
+			</example>
+		</section>
+
+		<section id="param_tls_library" xreflabel="tls_library">
+			<title><varname>tls_library</varname> (string)</title>
+			<para>
+				Selects which TLS library to use. Possible values are:
+			</para>
+			<itemizedlist>
+				<listitem>
+				<para><emphasis>auto</emphasis> - auto-detect which TLS library
+				module (<emphasis>tls_openssl</emphasis> or <emphasis>tls_wolfssl</emphasis>)
+				was loaded. OpenSIPS will not start if no module, or both modules are
+				found.
+				</para>
+				</listitem>
+				<listitem>
+				<para><emphasis>none</emphasis> - do not use any TLS library; this
+				is useful when the <emphasis>tls_mgm</emphasis> module is required only
+				for the management of TLS certificates and parameters by modules like
+				<emphasis>db_mysql</emphasis>, <emphasis>rabbitmq</emphasis> etc. (
+				and not for TLS operations by transport modules like
+				<emphasis>proto_tls</emphasis> etc.)
+				</para>
+				</listitem>
+				<listitem>
+				<para><emphasis>openssl</emphasis> - use the <emphasis>openSSL</emphasis>
+				library through the <emphasis>tls_openssl</emphasis> module.
+				</para>
+				</listitem>
+				<listitem>
+				<para><emphasis>wolfssl</emphasis> - use the <emphasis>wolfSSL</emphasis>
+				library through the <emphasis>tls_wolfssl</emphasis> module.
+				</para>
+				</listitem>
+			</itemizedlist>
+			<para>
+				Default value is <emphasis>auto</emphasis>.
+			</para>
+			<example>
+				<title>Set <varname>tls_library</varname> variable</title>
+				<programlisting format="linespecific">
+...
+modparam("tls_mgm", "tls_library", "none")
 ...
 				</programlisting>
 			</example>
@@ -217,6 +281,12 @@ listen = tls:1.2.3.4:5061
 			</para>
 			<itemizedlist>
 				<listitem>
+				<para><emphasis>TLSv1_3</emphasis> - means &osips; will
+				accept only TLSv1.3 connections. This version is only
+				available starting with OpenSSL 1.1.1 version.
+				</para>
+				</listitem>
+				<listitem>
 				<para><emphasis>TLSv1_2</emphasis> - means &osips; will
 				accept only TLSv1.2 connections (rfc3261 conformant).
 				</para>
@@ -224,17 +294,6 @@ listen = tls:1.2.3.4:5061
 				<listitem>
 				<para><emphasis>TLSv1</emphasis> - means &osips; will
 				accept only TLSv1 connections (rfc3261 conformant).
-				</para>
-				</listitem>
-				<listitem>
-				<para><emphasis>SSLv3</emphasis> - means &osips; will
-				accept only SSLv3 connections
-				</para>
-				</listitem>
-				<listitem>
-				<para><emphasis>SSLv2</emphasis> - means &osips; will
-				accept only SSLv2 connections (almost all old clients
-				support this).
 				</para>
 				</listitem>
 				<listitem>
@@ -249,13 +308,20 @@ listen = tls:1.2.3.4:5061
 				</listitem>
 			</itemizedlist>
 			<para><emphasis>
+				If you are using an OpenSSL library newer than 1.1.0, you can
+				also specify a range of accepted TLS versions as [VLOW]-[VHIGH].
+				If VLOW is not specified it will use the minimum supported
+				protocol version and if VHIGH is not specified it will use
+				the maximum supported protocol version. This means that using
+				a range where both the low and high values are missing, will
+				accept all the supported methods, but unlike SSLv23 will not
+				require the initial hello to be SSLv2.
+			</emphasis></para>
+			<para><emphasis>
 				Default value is SSLv23.
 			</emphasis></para>
 			<warning><para>
-			Best is to use SSLv23, for extended compatibility. Using any
-			of the other will restrict the version to just that one
-			version. In fact, SSLv2 is disabled in the source code; to
-			use it, you need to edit tls/tls_init.c
+			For extended compatibility with older system, best use SSLv23.
 			</para></warning>
 			<para>
 			If you want RFC3261 conformance and all your clients support
@@ -269,6 +335,17 @@ listen = tls:1.2.3.4:5061
 				<programlisting format="linespecific">
 ...
 modparam("tls_mgm", "tls_method", "[dom]TLSv1")
+...
+				</programlisting>
+			</example>
+			<example>
+				<title>Set <varname>tls_method</varname> range variable</title>
+				<programlisting format="linespecific">
+...
+modparam("tls_mgm", "tls_method", "[dom]TLSv1-TLSv1_3")  # between v1 and v1.3
+modparam("tls_mgm", "tls_method", "[dom]TLSv1-")         # v1 or higher
+modparam("tls_mgm", "tls_method", "[dom]-TLSv1_2")       # up to v1.2
+modparam("tls_mgm", "tls_method", "[dom]-")              # all supported
 ...
 				</programlisting>
 			</example>
@@ -341,10 +418,12 @@ modparam("tls_mgm", "ca_list", "[dom]/mycerts/certs/ca_list.pem")
 		<section id="param_ca_dir" xreflabel="ca_dir">
 			<title><varname>ca_dir</varname> ([domain](string)</title>
 			<para>
-			Directory storing trusted CAs. The path contains the
-			certificates accepted, each as hash which is linked to
-			certificate file. The domain part represents
-			the name of the TLS domain.
+			Directory storing trusted CAs. The certificates in the directory
+			must be in hashed form, as described in the
+			<ulink url="https://www.openssl.org/docs/manmaster/man3/X509_LOOKUP_hash_dir.html">
+			<citetitle>openssl documentation</citetitle></ulink> for the
+			<emphasis>Hashed Directory Method</emphasis>. The domain part
+			represents the name of the TLS domain.
 			</para>
 			<para><emphasis>
 				Default value is "/etc/pki/CA/".
@@ -354,6 +433,45 @@ modparam("tls_mgm", "ca_list", "[dom]/mycerts/certs/ca_list.pem")
 				<programlisting format="linespecific">
 ...
 modparam("tls_mgm", "ca_dir", "[dom]/mycerts/certs")
+...
+				</programlisting>
+			</example>
+		</section>
+
+		<section id="param_crl_dir" xreflabel="crl_dir">
+			<title><varname>crl_dir</varname> ([domain](string)</title>
+			<para>
+			Directory storing certificate revocation lists (CRLs). The domain
+			part represents the name of the TLS domain.
+			</para>
+			<para><emphasis>
+				If this parameter is not set, no CRLs will be used.
+			</emphasis></para>
+			<example>
+				<title>Set <varname>crl_dir</varname> variable</title>
+				<programlisting format="linespecific">
+...
+modparam("tls_mgm", "crl_dir", "[dom]/mycerts/crls")
+...
+				</programlisting>
+			</example>
+		</section>
+
+		<section id="param_crl_check_all" xreflabel="crl_check_all">
+			<title><varname>crl_check_all</varname> ([domain](string)</title>
+			<para>
+			Setting this parameter with a non-zero integer value enables CRL
+			checking for the entire certificate chain.
+			</para>
+			<para><emphasis>
+				By default, only the leaf certificate in the certificate chain
+				is checked.
+			</emphasis></para>
+			<example>
+				<title>Set <varname>crl_check_all</varname> variable</title>
+				<programlisting format="linespecific">
+...
+modparam("tls_mgm", "crl_check_all", "[dom]1")
 ...
 				</programlisting>
 			</example>
@@ -431,80 +549,42 @@ modparam("tls_mgm", "dh_params", "[dom]/etc/pki/CA/dh1024.pem")
 		</section>
 
 		<section id="param_verify_cert" xreflabel="verify_cert">
-			<title><varname>verify_cert</varname> ([domain](string) and
-				<varname>require_cert</varname> ([domain](string)</title>
+			<title><varname>verify_cert</varname> ([domain](string)</title>
 			<para>
-			Technically, verify_cert activates SSL_VERIFY_PEER in the
-			ssl_context. 'require_cert' does the same with
-			SSL_VERIFY_FAIL_IF_NO_PEER_CERT, which is only possible if
-			SSL_VERIFY_PEER is also turned on. Since version 2.1, these 
-			parameters act have been reduced to only one. The domain part
-			represents the name of the TLS domain.
+			Activates SSL_VERIFY_PEER in the ssl_context. For a detailed
+			explanation, check the <emphasis>openssl</emphasis> documentation.
 			</para>
+			<para>The domain part represents the name of the TLS domain.</para>
 			<para>
-			These two parameters are used for incoming TLS connections, where
-			&osips; acts as server.
+				Default value is <emphasis>1</emphasis>.
 			</para>
-			<para>
-			It's usable only if TLS support was compiled.
-			</para>
-			<para><emphasis>
-				Default value for both is 1.
-			</emphasis></para>
 			<example>
-				<title>Set <varname>verify_cert &amp; require_cert
-					</varname> variable</title>
+				<title>Set <varname>verify_cert</varname> variable</title>
 				<programlisting format="linespecific">
 ...
-# turn on the strictest and strongest authentication possible
-modparam("tls_mgm", "require_cert", "[dom]0")
 modparam("tls_mgm", "verify_cert", "[dom]0")
 ...
 				</programlisting>
 			</example>
 		</section>
 
-		<section id="param_tls_handshake_timeout" xreflabel="tls_handshake_timeout">
-			<title><varname>tls_handshake_timeout</varname> (integer)</title>
+		<section id="param_require_cert" xreflabel="require_cert">
+			<title><varname>require_cert</varname> ([domain](string)</title>
 			<para>
-			Sets the timeout (in milliseconds) for the handshake sequence to complete.
-				It may be necessary to increase this value when using a CPU intensive cipher
-				for the connection to allow time for keys to be generated and processed.
+			Activates SSL_VERIFY_FAIL_IF_NO_PEER_CERT in the ssl_context. For a
+			detailed explanation, check the <emphasis>openssl</emphasis>
+			documentation. This parameter only makes sense for server domains
+			and if the <xref linkend="param_verify_cert"/> parameter is also set.
 			</para>
+			<para>The domain part represents the name of the TLS domain.</para>
 			<para>
-			The timeout is invoked during acceptance of a new connection (inbound) and
-				during the wait period when a new session is being initiated (outbound).
+				Default value is <emphasis>1</emphasis>.
 			</para>
-			<para><emphasis>
-				Default value is 100.
-			</emphasis></para>
 			<example>
-				<title>Set <varname>tls_handshake_timeout</varname> variable</title>
+				<title>Set <varname>require_cert</varname> variable</title>
 				<programlisting format="linespecific">
 ...
-modparam("tls_mgm", "tls_handshake_timeout", 200) # number of milliseconds
-...
-				</programlisting>
-			</example>
-		</section>
-
-		<section id="param_tls_send_timeout" xreflabel="tls_send_timeout">
-			<title><varname>tls_send_timeout</varname> (integer)</title>
-			<para>
-				Sets the timeout (in milliseconds) for the send operations to complete
-			</para>
-			<para>
-				The send timeout is invoked for all TLS write operations, excluding
-				the handshake process (see: tls_handshake_timeout)
-			</para>
-			<para><emphasis>
-				Default value is 100.
-			</emphasis></para>
-			<example>
-				<title>Set <varname>tls_send_timeout</varname> variable</title>
-				<programlisting format="linespecific">
-...
-modparam("tls_mgm", "tls_send_timeout", 200) # number of milliseconds
+modparam("tls_mgm", "require_cert", "[dom]0")
 ...
 				</programlisting>
 			</example>
@@ -539,7 +619,7 @@ modparam("tls_mgm", "client_tls_domain_avp", "tls_match_dom")
 			<title><varname>client_sip_domain_avp</varname> (string)</title>
 			<para>
 			Name of the AVP that sets the SIP domain used in the TLS client
-			domain mathcing process.
+			domain matching process.
 			</para>
 			<para>
 			Note: If there is already an existing TLS connection to the remote target,
@@ -937,7 +1017,7 @@ modparam("tls_mgm", "match_sip_domain", "[default_dom]*")
 					</title>
 				<programlisting format="linespecific">
 ...
-listen=tls:10.0.0.10:5061
+socket=tls:10.0.0.10:5061
 ...
 # set the TLS client domain AVP
 modparam("tls_mgm", "client_sip_domain_avp", "tls_sip_dom")
@@ -955,13 +1035,13 @@ modparam("tls_mgm", "tls_method", "[dom1]tlsv1")
 modparam("tls_mgm", "verify_cert", "[dom1]1")
 modparam("tls_mgm", "require_cert", "[dom1]1")
 
-#'biloxy' server domain
+#'biloxi' server domain
 modparam("tls_mgm", "server_domain", "dom2")
 modparam("tls_mgm", "match_ip_address", "[dom2]10.0.0.10:5061")
-modparam("tls_mgm", "match_sip_domain", "[dom2]biloxy.com")
+modparam("tls_mgm", "match_sip_domain", "[dom2]biloxi.com")
 
-modparam("tls_mgm", "certificate", "[dom2]/certs/biloxy.com/cert.pem")
-modparam("tls_mgm", "private_key", "[dom2]/certs/biloxy.com/privkey.pem")
+modparam("tls_mgm", "certificate", "[dom2]/certs/biloxi.com/cert.pem")
+modparam("tls_mgm", "private_key", "[dom2]/certs/biloxi.com/privkey.pem")
 modparam("tls_mgm", "ca_list", "[dom2]/certs/wellknownCAs")
 modparam("tls_mgm", "tls_method", "[dom2]tlsv1")
 modparam("tls_mgm", "verify_cert", "[dom2]1")
@@ -992,13 +1072,13 @@ modparam("tls_mgm", "tls_method", "[dom4]tlsv1")
 modparam("tls_mgm", "verify_cert", "[dom4]1")
 modparam("tls_mgm", "require_cert", "[dom4]1")
 
-# 'biloxy' client domain
+# 'biloxi' client domain
 modparam("tls_mgm", "client_domain", "dom5")
 modparam("tls_mgm", "match_ip_address", "[dom5]*")
-modparam("tls_mgm", "match_sip_domain", "[dom5]biloxy.com")
+modparam("tls_mgm", "match_sip_domain", "[dom5]biloxi.com")
 
-modparam("tls_mgm", "certificate", "[dom5]/certs/biloxy.com/cert.pem")
-modparam("tls_mgm", "private_key", "[dom5]/certs/biloxy.com/privkey.pem")
+modparam("tls_mgm", "certificate", "[dom5]/certs/biloxi.com/cert.pem")
+modparam("tls_mgm", "private_key", "[dom5]/certs/biloxi.com/privkey.pem")
 modparam("tls_mgm", "ca_list", "[dom5]/certs/wellknownCAs")
 modparam("tls_mgm", "tls_method", "[dom5]tlsv1")
 modparam("tls_mgm", "verify_cert", "[dom5]1")
@@ -1263,9 +1343,9 @@ route{
   check_via=no
   dns=no
   rev_dns=no
-  listen=udp:your_serv_IP:5060
-  listen=tls:your_serv_IP:5061
-  children=4
+  socket=udp:your_serv_IP:5060
+  socket=tls:your_serv_IP:5061
+  udp_workers=4
 
   # ------------------ module loading ----------------------------------
 

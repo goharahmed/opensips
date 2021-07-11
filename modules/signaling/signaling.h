@@ -30,11 +30,13 @@
 #include "../../sr_module.h"
 #include "../../parser/msg_parser.h"
 
-typedef int (*sig_send_reply_f)(struct sip_msg *msg, int code, str *reason,
+typedef int (*sig_send_reply_f)(struct sip_msg *msg, int code, const str *reason,
 		str *tag);
+typedef int (*sig_gen_totag_f)(struct sip_msg *msg, str *tag);
 
 struct sig_binds {
 	sig_send_reply_f reply;
+	sig_gen_totag_f  gen_totag;
 	};
 
 int load_sig( struct sig_binds *sigb);
@@ -45,7 +47,7 @@ static inline int load_sig_api( struct sig_binds *sigb)
 	load_sig_f load_sig;
 
 	/* import the SL auto-loading function */
-	if ( !(load_sig=(load_sig_f)find_export("load_sig", 1, 0))) {
+	if ( !(load_sig=(load_sig_f)find_export("load_sig", 0))) {
 		LM_ERR("can't import load_sig\n");
 		return -1;
 	}

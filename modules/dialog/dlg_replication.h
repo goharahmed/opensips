@@ -1,7 +1,5 @@
 /*
- * dialog module - basic support for dialog tracking
- *
- * Copyright (C) 2013 OpenSIPS Solutions
+ * Copyright (C) 2013-2020 OpenSIPS Solutions
  *
  * This file is part of opensips, a free SIP server.
  *
@@ -17,11 +15,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
- *
- * History:
- * --------
- *  2013-04-12 initial version (Liviu)
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include "../../ut.h"
@@ -37,8 +31,9 @@
 #define REPLICATION_DLG_CREATED		1
 #define REPLICATION_DLG_UPDATED		2
 #define REPLICATION_DLG_DELETED		3
+#define REPLICATION_DLG_CSEQ		4
 
-#define BIN_VERSION 1
+#define BIN_VERSION 2
 
 extern int dialog_repl_cluster;
 extern int profile_repl_cluster;
@@ -50,12 +45,15 @@ extern struct clusterer_binds clusterer_api;
 
 extern str shtag_dlg_val;
 
+extern int cluster_auto_sync;
+
 void replicate_dialog_created(struct dlg_cell *dlg);
 void replicate_dialog_updated(struct dlg_cell *dlg);
 void replicate_dialog_deleted(struct dlg_cell *dlg);
+void replicate_dialog_cseq_updated(struct dlg_cell *dlg, int leg);
 
 int dlg_replicated_create(bin_packet_t *packet, struct dlg_cell *cell, str *ftag,
-							str *ttag, int safe);
+							str *ttag, int safe, int from_sync);
 int dlg_replicated_update(bin_packet_t *packet);
 int dlg_replicated_delete(bin_packet_t *packet);
 

@@ -32,6 +32,7 @@
 #include "../reactor.h"
 #include "../timer.h"
 #include "../pt_load.h"
+#include "../cfg_reload.h"
 #include "net_udp.h"
 
 
@@ -67,8 +68,10 @@ int udp_count_processes(unsigned int *extra)
 	struct socket_info *si;
 	unsigned int n, e, i;
 
-	if (udp_disabled)
+	if (udp_disabled) {
+		if (extra) *extra = 0;
 		return 0;
+	}
 
 	for( i=0,n=0,e=0 ; i<PROTO_LAST ; i++)
 		if (protos[i].id!=PROTO_NONE && is_udp_based_proto(i))
@@ -261,6 +264,9 @@ inline static int handle_io(struct fd_map* fm, int idx,int event_type)
 	int read;
 
 	pt_become_active();
+
+	pre_run_handle_script_reload(fm->app_flags);
+
 	switch(fm->type){
 		case F_UDP_READ:
 			n = protos[((struct socket_info*)fm->data)->proto].net.
@@ -270,7 +276,8 @@ inline static int handle_io(struct fd_map* fm, int idx,int event_type)
 			handle_timer_job();
 			break;
 		case F_SCRIPT_ASYNC:
-			async_script_resume_f( fm->fd, fm->data);
+			async_script_resume_f( fm->fd, fm->data,
+				(event_type==IO_WATCH_TIMEOUT)?1:0 );
 			break;
 		case F_FD_ASYNC:
 			async_fd_resume( fm->fd, fm->data);
@@ -293,6 +300,8 @@ inline static int handle_io(struct fd_map* fm, int idx,int event_type)
 		if (reactor_is_empty())
 			dynamic_process_final_exit();
 	}
+
+	post_run_handle_script_reload();
 
 	pt_become_idle();
 	return n;
@@ -344,7 +353,8 @@ static int fork_dynamic_udp_process(void *si_filter)
 	struct socket_info *si = (struct socket_info*)si_filter;
 	int p_id;
 
-	if ((p_id=internal_fork( "UDP receiver", OSS_PROC_DYNAMIC, TYPE_UDP))<0) {
+	if ((p_id=internal_fork( "UDP receiver",
+	OSS_PROC_DYNAMIC|OSS_PROC_NEEDS_SCRIPT, TYPE_UDP))<0) {
 		LM_CRIT("cannot fork UDP process\n");
 		return(-1);
 	} else if (p_id==0) {
@@ -440,7 +450,8 @@ int udp_start_processes(int *chd_rank, int *startup_done)
 
 			for (i=0;i<si->workers;i++) {
 				(*chd_rank)++;
-				if ( (p_id=internal_fork( "UDP receiver", 0, TYPE_UDP))<0 ) {
+				if ( (p_id=internal_fork( "UDP receiver",
+				OSS_PROC_NEEDS_SCRIPT, TYPE_UDP))<0 ) {
 					LM_CRIT("cannot fork UDP process\n");
 					goto error;
 				} else if (p_id==0) {

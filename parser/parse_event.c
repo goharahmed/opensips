@@ -66,6 +66,12 @@
 #define LINE_SEIZE_STR "line-seize"
 #define LINE_SEIZE_STR_LEN 10
 
+#define AS_FEATURE_STR "as-feature-event"
+#define AS_FEATURE_LEN 16
+
+#define REFER_STR "refer"
+#define REFER_STR_LEN 5
+
 
 static inline char* skip_token(char* _b, int _l)
 {
@@ -132,6 +138,12 @@ int event_parser(char* _s, int _l, event_t* _e)
 	} else if ((_e->text.len == LINE_SEIZE_STR_LEN) &&
 		   !strncasecmp(LINE_SEIZE_STR, tmp.s, _e->text.len)) {
 		_e->parsed = EVENT_LINE_SEIZE;
+	} else if ((_e->text.len == AS_FEATURE_LEN) &&
+		   !strncasecmp(AS_FEATURE_STR, tmp.s, _e->text.len)) {
+		_e->parsed = EVENT_AS_FEATURE;
+	} else if ((_e->text.len == REFER_STR_LEN) &&
+		   !strncasecmp(REFER_STR, tmp.s, _e->text.len)) {
+		_e->parsed = EVENT_REFER;
 	} else {
 		_e->parsed = EVENT_OTHER;
 	}

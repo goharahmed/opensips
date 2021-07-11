@@ -50,17 +50,37 @@ static void mod_destroy(void);
 struct dlg_binds dlgb;
 struct rr_binds rr_api;
 
+struct tm_binds eme_tm;
+
+str db_url;
+str *db_table;
+db_func_t db_funcs;
+db_con_t *db_con;
+
+struct esrn_routing **db_esrn_esgwri;
+struct service_provider **db_service_provider;
+
 str callid_aux;
+char* url_vpc;
+
+int emet_size;
+int subst_size;
+
+char *empty;
+char *mandatory_parm;
+
+struct call_htable *call_htable;
+struct subs_htable *subs_htable;
 
 /*
  * Exported functions
  */
 static cmd_export_t cmds[] = {
-	{"emergency_call", (cmd_function) emergency_call, 0, 0, 0,
+	{"emergency_call", (cmd_function) emergency_call, {{0, 0, 0}},
 		REQUEST_ROUTE | BRANCH_ROUTE },
-	{"failure", (cmd_function) failure, 0, 0, 0,
+	{"failure", (cmd_function) failure, {{0, 0, 0}},
 		FAILURE_ROUTE | ONREPLY_ROUTE },
-	{ 0, 0, 0, 0, 0, 0}
+	{ 0, 0, {{0, 0, 0}}, 0}
 };
 
 
@@ -72,9 +92,9 @@ static param_export_t params[] = {
 	{ "emergency_codes", STR_PARAM | USE_FUNC_PARAM, (void *) &set_codes},
 	{ "timer_interval", INT_PARAM, &timer_interval},
 	{ "db_url", STR_PARAM, &db_url.s},
-	{ "db_table_routing", STR_PARAM, &table_name},
-	{ "db_table_report", STR_PARAM, &table_report},
-	{ "db_table_provider", STR_PARAM, &table_provider},
+	{ "db_table_routing", STR_PARAM, &table_name.s},
+	{ "db_table_report", STR_PARAM, &table_report.s},
+	{ "db_table_provider", STR_PARAM, &table_provider.s},
 	{ "url_vpc", STR_PARAM, &url_vpc},
 	{ "contingency_hostname", STR_PARAM, &contingency_hostname},
 	{ "emergency_call_server", STR_PARAM, &call_server_hostname},
@@ -107,6 +127,7 @@ struct module_exports exports = {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION, /* module version */
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	&deps,           /* OpenSIPS module dependencies */
 	cmds, /* Exported functions */
 	NULL,      /* Exported async functions */
@@ -116,10 +137,12 @@ struct module_exports exports = {
 	0, /* exported pseudo-variables */
 	0, /* exported transformations */
 	0, /* extra processes */
+	0, /* module pre-initialization function */
 	mod_init, /* module initialization function */
 	0, /* response function*/
 	mod_destroy,
-	child_init /* per-child init function */
+	child_init,/* per-child init function */
+	0          /* reload confirm function */
 };
 
 /*
@@ -195,6 +218,10 @@ void destroy_codes(struct code_number *codes){
 static int mod_init(void) {
 
 	LM_DBG("Initializing module\n");
+
+	table_name.len = strlen(table_name.s);
+	table_report.len = strlen(table_report.s);
+	table_provider.len = strlen(table_provider.s);
 
 	// checks for mandatory fields
 	mandatory_parm = shm_malloc(2);
@@ -342,7 +369,7 @@ static int mod_init(void) {
 static int child_init(int rank) {
 	LM_DBG("Initializing child\n");
 
-	if (db_url.s && rank>PROC_MAIN) {
+	if (db_url.s && rank>=1) {
 		/* open a test connection */
 
 		if ((db_con = db_funcs.init(&db_url)) == 0) {
@@ -368,9 +395,6 @@ static int child_init(int rank) {
  */
 static void mod_destroy(void) {
 	curl_global_cleanup();
-
-	if (db_con != NULL && db_funcs.close != 0)
-		db_funcs.close(db_con);
 
 	if(ref_lock){
 		lock_destroy_rw( ref_lock );
@@ -418,7 +442,7 @@ void routing_timer(unsigned int ticks, void *attr) {
 static void libera_esqk(void) {
 
 	time_t rawtime;
-	struct tm * timeinfo;
+	struct tm timeinfo;
 	int resp = 1;
 	char* response;
 	char* esct_callid;
@@ -454,8 +478,8 @@ static void libera_esqk(void) {
 
 						//send esctRequest to the VPC
 						time(&rawtime);
-						timeinfo = localtime(&rawtime);
-						strftime(free_cell->esct->datetimestamp, MAX_TIME_SIZE, "%Y-%m-%dT%H:%M:%S%Z", timeinfo);
+						localtime_r(&rawtime, &timeinfo);
+						strftime(free_cell->esct->datetimestamp, MAX_TIME_SIZE, "%Y-%m-%dT%H:%M:%S%Z", &timeinfo);
 
 						xml = buildXmlFromModel(free_cell->esct);
 						resp = post(url_vpc, xml, &response);
@@ -716,7 +740,7 @@ void reply_in_redirect( struct cell* t, int type, struct tmcb_params *params){
 		}
 	}
 
-	hash_code= core_hash(&reply->callid->body, 0, emet_size);
+	hash_code= core_hash(&reply->callid->body, NULL, emet_size);
 	LM_DBG("********************************************HASH_CODE%d\n", hash_code);
 
 	if(insert_ehtable(call_htable,hash_code,call_cell)< 0){
@@ -878,7 +902,7 @@ static int failure(struct sip_msg *msg) {
 	memset(from_tag, 0, pfrom->tag_value.len + 1);
 	strncpy(from_tag, pfrom->tag_value.s, pfrom->tag_value.len);
 
-	hash_code= core_hash(&msg->callid->body, 0, emet_size);
+	hash_code= core_hash(&msg->callid->body, NULL, emet_size);
 	LM_DBG("********************************************HASH_CODE%d\n", hash_code);
 
 	// find the cell with the callid from the list calls_cell
@@ -1343,7 +1367,7 @@ int create_call_cell(PARSED *parsed,struct sip_msg* msg, char* callidHeader, str
 
 		// insert calls_eme in call_htable hash with key source ip address
 
-		hash_code= core_hash(&msg->callid->body, 0, emet_size);
+		hash_code= core_hash(&msg->callid->body, NULL, emet_size);
 		LM_DBG("********************************************HASH_CODE%d\n", hash_code);
 
 		if(insert_ehtable(call_htable, hash_code,call_cell)< 0){
@@ -1650,7 +1674,7 @@ int routing_ack(struct sip_msg *msg) {
 	strncpy(from_tag, pfrom->tag_value.s, pfrom->tag_value.len);
 	LM_DBG("PFROM_TAGIII: %s \n ", from_tag );
 
-	hash_code= core_hash(&msg->callid->body, 0, emet_size);
+	hash_code= core_hash(&msg->callid->body, NULL, emet_size);
 	LM_DBG("********************************************HASH_CODE%d\n", hash_code);
 
 	LM_DBG(" ---TREATMENT ACK  callid=%s \n", callidHeader);
@@ -1700,7 +1724,7 @@ int bye(struct sip_msg *msg, int dir) {
 	char* response;
 	char* esct_callid;
 	time_t rawtime;
-	struct tm * timeinfo;
+	struct tm timeinfo;
 	NODE* info_call;
 	char* xml;
 	struct sm_subscriber*  cell_notif;
@@ -1712,7 +1736,7 @@ int bye(struct sip_msg *msg, int dir) {
 	LM_DBG(" --- BYE \n \n");
 
 	time(&rawtime);
-	timeinfo = localtime(&rawtime);
+	localtime_r(&rawtime, &timeinfo);
 	time_now = (int)rawtime;
 
 	if (proxy_role == 2) {
@@ -1818,7 +1842,7 @@ int bye(struct sip_msg *msg, int dir) {
 
 	}
 
-	hash_code= core_hash(&msg->callid->body, 0, emet_size);
+	hash_code= core_hash(&msg->callid->body, NULL, emet_size);
 	LM_DBG("********************************************HASH_CODE%d\n", hash_code);
 
 	// search call hash with hash_code, callidHeader and from/to_tag params
@@ -1865,7 +1889,7 @@ int bye(struct sip_msg *msg, int dir) {
 
 			LM_DBG(" --- SEND ESQK =%s\n \n",info_call->esct->esqk);
 
-			strftime(info_call->esct->datetimestamp, MAX_TIME_SIZE, "%Y-%m-%dT%H:%M:%S%Z", timeinfo);
+			strftime(info_call->esct->datetimestamp, MAX_TIME_SIZE, "%Y-%m-%dT%H:%M:%S%Z", &timeinfo);
 
 			xml = buildXmlFromModel(info_call->esct);
 			LM_DBG(" --- TREAT BYE - XML ESCT %s \n \n", xml);
@@ -1971,8 +1995,10 @@ int check_myself(struct sip_msg *msg) {
 		LM_ERR("cannot parse msg URI\n");
 		return 0;
 	}
-	LM_DBG(" --- opensips host %.*s \n \n", msg->parsed_uri.host.len, msg->parsed_uri.host.s);
-	ret = check_self_op(EQUAL_OP, &msg->parsed_uri.host, 0);
+	LM_DBG(" --- opensips host %.*s \n \n",
+		msg->parsed_uri.host.len, msg->parsed_uri.host.s);
+
+	ret=check_self(&msg->parsed_uri.host, 0, 0);
 	return ret;
 }
 
@@ -2005,7 +2031,7 @@ char* formatted_xml(struct sip_msg *msg, char* lie, char* callidHeader, char* cb
 	char* xml;
 	char formated_time[80];
 	time_t rawtime;
-	struct tm * timeinfo;
+	struct tm timeinfo;
 	struct service_provider* source_provider;
 	struct service_provider* vpc_provider;
 	struct service_provider* vsp_provider;
@@ -2027,8 +2053,8 @@ char* formatted_xml(struct sip_msg *msg, char* lie, char* callidHeader, char* cb
 	vsp_cert_uri = empty;
 
 	time(&rawtime);
-	timeinfo = localtime(&rawtime);
-	strftime(formated_time, 80, "%Y-%m-%dT%H:%M:%S%Z", timeinfo);
+	localtime_r(&rawtime, &timeinfo);
+	strftime(formated_time, 80, "%Y-%m-%dT%H:%M:%S%Z", &timeinfo);
 	LM_DBG(" --- INIT  send_request_vpc\n \n");
 	LM_DBG(" --- FORMAT XML \n \n");
 

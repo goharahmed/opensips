@@ -57,12 +57,15 @@ else
 makefile_defs=1
 export makefile_defs
 
+_makefile_defs_path := $(lastword $(MAKEFILE_LIST))
+TOP_SRCDIR?=    $(shell realpath `dirname $(_makefile_defs_path)`)
+
 # main binary name
 MAIN_NAME=opensips
 
 #version number
 VERSION_MAJOR = 3
-VERSION_MINOR = 0
+VERSION_MINOR = 2
 VERSION_SUBMINOR = 0
 VERSION_BUILD = dev
 
@@ -170,8 +173,7 @@ ifneq (,$(findstring clang, $(CC_LONGVER)))
 else ifneq (,$(findstring gcc, $(CC_LONGVER)))
 	CC_NAME=gcc
 	CC_VER=$(word 1,$(CC)) $(shell $(CC) - -dumpversion|head -n 1|cut -d" " -f 3|\
-			 sed -e 's/^.*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/' \
-			 	 -e 's/^[^0-9].*\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/')
+			 sed -e 's/^[^0-9]*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)[^0-9]*/\1/')
 	# sun sed is a little brain damaged => this complicated expression
 	MKDEP=$(CC) -MM
 	CC_SHORTVER=$(shell echo "$(CC_VER)" | cut -d" " -f 2| \
@@ -181,7 +183,7 @@ else ifneq (,$(findstring gcc, $(CC_LONGVER)))
 	#XXX: for now treat 4+.x the same as 4.x
 	CC_CLASS=$(shell echo "$(CC_SHORTVER)" | \
 				 sed -e 's/2\.9.*/2.9x/' -e 's/3\.[0-9]/3.x/' \
-				 -e 's/[4-9]\(\.[0-9]\)\?/4.x/')
+				 -e 's/\([4-9]\|10\)\(\.[0-9]\)\?/4.x/')
 endif
 
 ifneq (, $(findstring Sun, $(CC_LONGVER)))
@@ -228,6 +230,8 @@ arm_macros= __arm__ __thumb__
 arm6_macros= __ARM_ARCH_6__
 arm7_macros= __ARM_ARCH_7__
 
+arm64_macros= __AARCH64EL__
+
 ppc_macros= __powerpc __powerpc__ __POWERPC__ __ppc__ _ARCH_PPC
 ppc64_macros= __ppc64__ _ARCH_PPC64
 
@@ -239,10 +243,16 @@ mips64_macros= _MIPS_ISA_MIPS64 _MIPS_ARCH_MIPS64
 
 alpha_macros= __alpha__ __alpha _M_ALPHA_
 
-ifeq ($(CC_NAME),gcc)
+ifeq ($(CC_NAME:clang=gcc),gcc)
 #if gcc use gcc arch
 predef_macros:=$(shell $(CC) -dM -E -x c $(CC_EXTRA_OPTS) $(extra_defs) \
 					$(CFLAGS) /dev/null)
+stdatomics_support:=$(shell printf '\43include <stdatomic.h>' | $(CC) -dM -E -x c $(CC_EXTRA_OPTS) $(extra_defs) \
+					$(CFLAGS) - >/dev/null 2>/dev/null && printf '\55DHAVE_STDATOMIC')
+generics_support:=$(shell printf '\43include <unistd.h>\n\43define m(x) _Generic((x),default:sleep)(x)\nint main(void){(int)m(0);}\n' | \
+	$(CC) -dM -c -x c $(CC_EXTRA_OPTS) $(extra_defs) \
+					$(CFLAGS) -o /dev/null - >/dev/null 2>/dev/null && printf '\55DHAVE_GENERICS')
+DEFS+=$(stdatomics_support) $(generics_support)
 
 ifneq ($(strip $(filter $(i386_macros), $(predef_macros))),)
 CC_ARCH=i386
@@ -284,6 +294,8 @@ endif # mips64_macros
 
 else ifneq ($(strip $(filter $(alpha_macros), $(predef_macros))),)
 CC_ARCH=alpha
+else ifneq ($(strip $(filter $(arm64_macros), $(predef_macros))),)
+CC_ARCH=aarch64
 else
 
 $(warn "Unknown target compiler architecture")
@@ -333,8 +345,8 @@ CROSS_COMPILE ?=
 SYSBASE ?= /usr
 
 # dirs
-cfg_dir = etc/$(MAIN_NAME)/
-bin_dir = sbin/
+cfg_dir ?= etc/$(MAIN_NAME)/
+bin_dir ?= sbin/
 
 ARCH_B = $(shell echo $(ARCH) | sed -e 's/.*64.*/64b/')
 ifeq ($(OS),freebsd)
@@ -450,11 +462,11 @@ endif
 
 INSTALL_TOUCH = touch          # used to create the file first (good to
                                #  make solaris install work)
-INSTALL_CFG = $(INSTALL) -m 644
-INSTALL_BIN = $(INSTALL) -m 755
-INSTALL_MODULES = $(INSTALL) -m 755
-INSTALL_DOC = $(INSTALL) -m 644
-INSTALL_MAN = $(INSTALL) -m 644
+INSTALL_CFG ?= $(INSTALL) -m 644
+INSTALL_BIN ?= $(INSTALL) -m 755
+INSTALL_MODULES ?= $(INSTALL) -m 755
+INSTALL_DOC ?= $(INSTALL) -m 644
+INSTALL_MAN ?= $(INSTALL) -m 644
 
 
 ifeq ($(VERSIONTYPE),)
@@ -517,8 +529,8 @@ endif
 
 ifneq (,$(MEM_STATS_HDR))
 EXPECTED_MD5=$(shell [ -f $(MEM_STATS_HDR) ] && tail -n 1 $(MEM_STATS_HDR) | awk '{print $$4}')
-MODULES_MD5=$(shell find $(dir $(MEM_STATS_HDR))/../modules -name "[Mm]akefile" | \
-			awk -F/ '{print $$(NF - 1)}' | sort | $(md5sum_cmd) | awk '{print $$1}')
+MODULES_MD5=$(shell find $(dir $(MEM_STATS_HDR))/../modules -maxdepth 2 -name "[Mm]akefile" | \
+			awk -F/ '{print $$(NF - 1)}' | sort -u | $(md5sum_cmd) | awk '{print $$1}')
 ifneq ($(EXPECTED_MD5),$(MODULES_MD5))
 REGENERATE_MEM_STATS=remove-mem-stats
 endif
@@ -535,8 +547,11 @@ endif
 #DBHTMLXSL = /usr/share/xml/docbook/stylesheet/nwalsh/html/docbook.xsl
 # On CentOS, this is the right path:
 #DBHTMLXSL = /usr/share/sgml/docbook/xsl-stylesheets/xhtml/docbook.xsl
+
 DBHTMLXSL=$(shell \
-	if [ -e /usr/share/xml/docbook/stylesheet/nwalsh/html/docbook.xsl ]; then \
+	if   [ -e /usr/share/xml/docbook/xsl-stylesheets-1.79.2-nons/xhtml/docbook.xsl ]; then \
+		echo "/usr/share/xml/docbook/xsl-stylesheets-1.79.2-nons/xhtml/docbook.xsl"; \
+	elif [ -e /usr/share/xml/docbook/stylesheet/nwalsh/html/docbook.xsl ]; then \
 		echo "/usr/share/xml/docbook/stylesheet/nwalsh/html/docbook.xsl"; \
 	elif [ -e /usr/share/sgml/docbook/xsl-stylesheets/xhtml/docbook.xsl ]; then \
 		echo "/usr/share/sgml/docbook/xsl-stylesheets/xhtml/docbook.xsl"; \
@@ -808,13 +823,13 @@ ifeq	($(CC_NAME), clang)
 	CC_OPTIMIZE_FLAG?=-O3
 endif
 
+ifeq ($(mode), release)
 ifeq (,$(CFLAGS))
 
 #common stuff
 CFLAGS+=$(DEBUGSYM)
 
 # setting more CFLAGS
-ifeq ($(mode), release)
 
 #if i386
 ifeq	($(ARCH), i386)
@@ -838,6 +853,7 @@ endif
 					CFLAGS+=-minline-all-stringops \
 							-falign-loops \
 							-ftree-vectorize \
+							-fno-common \
 							-mtune=$(CPU_TYPE) \
 					-Wold-style-definition -Wmissing-field-initializers -Wredundant-decls
 
@@ -883,7 +899,8 @@ ifeq		($(CC_NAME), suncc)
 			# -Dinline="" # add this if cc < 5.3 (define inline as null)
 else
 ifeq		($(CC_NAME), clang)
-			CFLAGS+=$(CC_OPTIMIZE_FLAG) -Wall -funroll-loops
+			CFLAGS+=-m32 $(CC_OPTIMIZE_FLAG) -Wall -funroll-loops -fno-common
+			LDFLAGS+=-m32
 else
 				#other compilers
 $(error 			Unsupported compiler ($(CC):$(CC_NAME)), try gcc)
@@ -910,6 +927,7 @@ ifeq			($(CC_CLASS), 4.x)
 					CFLAGS+=-minline-all-stringops \
 							-falign-loops \
 							-ftree-vectorize \
+							-fno-common \
 							-mtune=$(CPU_TYPE) \
 					-Wold-style-definition -Wmissing-field-initializers -Wredundant-decls
 else
@@ -950,7 +968,7 @@ ifeq		($(CC_NAME), suncc)
 				# -Dinline="" # add this if cc < 5.3 (define inline as null)
 else
 ifeq		($(CC_NAME), clang)
-			CFLAGS+=$(CC_OPTIMIZE_FLAG) -Wall -funroll-loops
+			CFLAGS+=$(CC_OPTIMIZE_FLAG) -Wall -funroll-loops -fno-common
 else
 				#other compilers
 $(error 			Unsupported compiler ($(CC):$(CC_NAME)), try gcc)
@@ -1367,6 +1385,10 @@ ifeq	($(CC_NAME), suncc)
 		LDFLAGS+=$(PROFILE)
 		MOD_LDFLAGS=-G $(LDFLAGS)
 endif
+ifeq    ($(CC_NAME), clang)
+		LDFLAGS+=-Wl,-O2 -Wl,-E $(PROFILE)
+		MOD_LDFLAGS=-shared -fPIC -DPIC $(LDFLAGS)
+endif
 
 endif #mode=release
 
@@ -1649,8 +1671,29 @@ $(warning	No locking method found so far, trying SYS V sems)
 		found_lock_method=yes
 endif
 
+# override pthread functions for libssl >= 1.1
+TWEAK_DEFS=
+TWEAK_LIBS=
+ifeq ($(CROSS_COMPILE),)
+SSL_BUILDER=$(shell \
+	if pkg-config --exists libssl; then \
+		echo 'pkg-config libssl'; \
+	fi)
+endif
+
+ifneq ($(SSL_BUILDER),)
+	VER = $(shell $(SSL_BUILDER) --modversion | \
+	      awk -F. '{print $$1 * 100 + $$2}')
+# test if we have a version higher or equal than 1.1
+ifeq ($(shell test $(VER) -ge 101; echo $$?),0)
+	TWEAK_DEFS = -pthread
+	TWEAK_LIBS = -pthread -rdynamic -ldl -Wl,-Bsymbolic-functions
+endif
+endif
+
+
 ## Unit Testing - required extensions
-ifeq (1,$(shell grep -c '^\DEFS+= -DUNIT_TESTS' Makefile.conf))
+ifeq (1,$(shell grep -c '^\DEFS+= -DUNIT_TESTS' $(TOP_SRCDIR)/Makefile.conf))
 DEFS := $(DEFS) -DUNIT_TESTS
 LIBS := $(LIBS) -ltap
 test_src := $(shell find . -wholename "*/test/*\.c" | grep -v "^./modules/")

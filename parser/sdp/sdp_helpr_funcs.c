@@ -229,7 +229,6 @@ int extract_sendrecv_mode(str *body, str *sendrecv_mode, int *is_on_hold)
 		} else {
 			*is_on_hold = RFC3264_HOLD;
 		}
-		return -1;
 	}
 
 	sendrecv_mode->s = body->s + 2; /* skip `a=' */
@@ -381,6 +380,7 @@ int extract_media_attr(str *body, str *mediamedia, str *mediaport, str *mediatra
 	mediaport->s = cp;
 	cp = eat_token_end(mediaport->s, mediaport->s + mediaport->len);
 	mediatransport->len = mediaport->len - (cp - mediaport->s);
+	/* coverity[copy_paste_error] false positive CID #40557 */
 	if (mediatransport->len <= 0 || cp == mediaport->s) {
 		LM_ERR("no port in `m='\n");
 		return -1;

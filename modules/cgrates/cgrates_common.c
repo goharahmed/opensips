@@ -253,7 +253,7 @@ int cgrates_set_reply_with_values(json_object *jobj)
 			break;
 		}
 	}
-	return 0;
+	return 1;
 }
 
 /* message builder */
@@ -292,6 +292,7 @@ struct cgr_msg *cgr_get_generic_msg(str *method, struct cgr_session *s)
 	static struct cgr_msg cmsg;
 	struct cgr_kv *kv;
 	struct list_head *l;
+	struct json_tokener* tok;
 
 	json_object *jtmp = NULL;
 	json_object *jarr = NULL;
@@ -314,15 +315,26 @@ struct cgr_msg *cgr_get_generic_msg(str *method, struct cgr_session *s)
 		if (s) {
 			list_for_each(l, &s->req_kvs) {
 				kv = list_entry(l, struct cgr_kv, list);
-				if (kv->flags & CGR_KVF_TYPE_NULL) {
-					jtmp = NULL;
-				} else if (kv->flags & CGR_KVF_TYPE_INT) {
-					/* XXX: we treat here int values as booleans */
-					jtmp = json_object_new_boolean(kv->value.n);
-					JSON_CHECK(jtmp, kv->key.s);
-				} else {
-					jtmp = json_object_new_string_len(kv->value.s.s, kv->value.s.len);
-					JSON_CHECK(jtmp, kv->key.s);
+				jtmp = NULL;
+				if (kv->flags & CGR_KVF_TYPE_JSON) {
+					tok = json_tokener_new();
+					jtmp = json_tokener_parse_ex(tok, kv->value.s.s,
+							kv->value.s.len);
+					if(tok->err != json_tokener_success)
+						jtmp = NULL;
+					json_tokener_free(tok);
+				}
+				if (!jtmp) {
+					if (kv->flags & CGR_KVF_TYPE_NULL) {
+						jtmp = NULL;
+					} else if (kv->flags & CGR_KVF_TYPE_INT) {
+						/* XXX: we treat here int values as booleans */
+						jtmp = json_object_new_boolean(kv->value.n);
+						JSON_CHECK(jtmp, kv->key.s);
+					} else {
+						jtmp = json_object_new_string_len(kv->value.s.s, kv->value.s.len);
+						JSON_CHECK(jtmp, kv->key.s);
+					}
 				}
 				json_object_object_add(cmsg.params, kv->key.s, jtmp);
 			}
@@ -340,14 +352,25 @@ struct cgr_msg *cgr_get_generic_msg(str *method, struct cgr_session *s)
 	if (s) {
 		list_for_each(l, &s->event_kvs) {
 			kv = list_entry(l, struct cgr_kv, list);
-			if (kv->flags & CGR_KVF_TYPE_NULL) {
-				jtmp = NULL;
-			} else if (kv->flags & CGR_KVF_TYPE_INT) {
-				jtmp = json_object_new_int(kv->value.n);
-				JSON_CHECK(jtmp, kv->key.s);
-			} else {
-				jtmp = json_object_new_string_len(kv->value.s.s, kv->value.s.len);
-				JSON_CHECK(jtmp, kv->key.s);
+			jtmp = NULL;
+			if (kv->flags & CGR_KVF_TYPE_JSON) {
+				tok = json_tokener_new();
+				jtmp = json_tokener_parse_ex(tok, kv->value.s.s,
+						kv->value.s.len);
+				if(tok->err != json_tokener_success)
+					jtmp = NULL; /* fallback as int/string */
+				json_tokener_free(tok);
+			}
+			if (!jtmp) {
+				if (kv->flags & CGR_KVF_TYPE_NULL) {
+					jtmp = NULL;
+				} else if (kv->flags & CGR_KVF_TYPE_INT) {
+					jtmp = json_object_new_int(kv->value.n);
+					JSON_CHECK(jtmp, kv->key.s);
+				} else {
+					jtmp = json_object_new_string_len(kv->value.s.s, kv->value.s.len);
+					JSON_CHECK(jtmp, kv->key.s);
+				}
 			}
 			json_object_object_add(cmsg.params, kv->key.s, jtmp);
 		}
@@ -597,7 +620,8 @@ static int cgrates_async_resume_repl(int fd,
 
 	ret = cgrc_async_read(c, cp->reply_f, cp->reply_p);
 
-	if (async_status == ASYNC_DONE) {
+	switch (async_status) {
+	case ASYNC_DONE:
 		/* processing done - remove the FD and replace the handler */
 		async_status = ASYNC_DONE_NO_IO;
 		reactor_del_reader(c->fd, -1, 0);
@@ -606,6 +630,9 @@ static int cgrates_async_resume_repl(int fd,
 			ret = -1;
 			goto end;
 		}
+		break;
+	case ASYNC_CONTINUE:
+		return 1;
 	}
 end:
 	/* done with this connection */
@@ -690,6 +717,7 @@ int cgrc_async_read(struct cgr_conn *c,
 	struct cgr_engine *e = c->engine;
 	int ret = -1; /* if return is 0, we need to continue */
 	int final_ret = ret;
+	char *json_buf;
 
 	LM_DBG("Event on fd %d from %.*s:%d\n", c->fd, e->host.len, e->host.s, e->port);
 
@@ -716,6 +744,8 @@ try_again:
 
 	/* try to parse them */
 	jobj = json_tokener_parse_ex(c->jtok, buffer, bytes_read);
+	json_buf = buffer;
+	len = bytes_read;
 reprocess:
 	if (jobj) {
 		ret = cgrates_process(jobj, c, f, p);
@@ -744,12 +774,13 @@ reprocess:
 	/* now we need to see if there are any other bytes to read */
 	/* XXX: for now there is no other way to check if there are bytes left but
 	 * looking into the json tokener */
-	if (c->jtok->char_offset < bytes_read) {
-		len = c->jtok->char_offset;
+	if (c->jtok->char_offset < len) {
+		json_buf += c->jtok->char_offset;
+		len -= c->jtok->char_offset;
 		json_tokener_reset(c->jtok);
 		LM_DBG("%d more bytes to process in the new request: [%.*s]\n",
-				len, bytes_read - len, buffer + len);
-		jobj = json_tokener_parse_ex(c->jtok, buffer + len, bytes_read - len);
+				len, len, json_buf);
+		jobj = json_tokener_parse_ex(c->jtok, json_buf, len);
 		/* ret = 0 means that we are waiting for a reply
 		 * but did not get one yet */
 		if (ret)
@@ -759,6 +790,15 @@ reprocess:
 	}
 	/* all done */
 	json_tokener_reset(c->jtok);
+	/* if a request was processed and we were waiting for a reply, indicate
+	 * that we shold continue reading from this socket, otherwise we will
+	 * wrongfully waiting for a reply
+	 */
+	if (ret == 0 && f) {
+		LM_DBG("processed a request - continue waiting for a reply!\n");
+		async_status = ASYNC_CONTINUE;
+		return 1;
+	}
 done:
 	async_status = ASYNC_DONE;
 	return final_ret;
@@ -773,7 +813,7 @@ disable:
 int cgrates_async_resume_req(int fd, void *param)
 {
 	cgrc_async_read((struct cgr_conn *)param, NULL, NULL);
-	/* if successfull, just continue listening */
+	/* if successful, just continue listening */
 	if (async_status == ASYNC_DONE)
 		async_status = ASYNC_CONTINUE;
 
@@ -1000,18 +1040,15 @@ void cgr_free_local_ctx(void *param)
 
 
 /* functions related to parameters fix */
-str *cgr_get_acc(struct sip_msg *msg, char *acc_p)
+str *cgr_get_acc(struct sip_msg *msg, str *acc_p)
 {
 	static str acc;
 	struct to_body *from;
 	struct sip_uri  uri;
 
-	if (acc_p) {
-		if (fixup_get_svalue(msg, (gparam_p)acc_p, &acc) < 0)
-			goto error;
-		else
-			return &acc;
-	}
+	if (acc_p)
+		return acc_p;
+
 	/* get the username from FROM_HDR */
 	if (parse_from_header(msg) != 0) {
 		LM_ERR("unable to parse from hdr\n");
@@ -1022,36 +1059,23 @@ str *cgr_get_acc(struct sip_msg *msg, char *acc_p)
 		LM_ERR("unable to parse from uri\n");
 		goto error;
 	}
+
+	acc = uri.user;
+	return &acc;
+
 error:
 	LM_ERR("failed fo fetch account's name\n");
 	return NULL;
 }
 
-str *cgr_get_dst(struct sip_msg *msg, char *dst_p)
+str *cgr_get_dst(struct sip_msg *msg, str *dst_p)
 {
-	static str dst;
+	if (dst_p)
+		return dst_p;
 
-	if (dst_p) {
-		if (fixup_get_svalue(msg, (gparam_p)dst_p, &dst) < 0)
-			goto error;
-		else
-			return &dst;
-	}
 	if(msg->parsed_uri_ok == 0 && parse_sip_msg_uri(msg)<0) {
 		LM_ERR("cannot parse Request URI!\n");
 		return NULL;
 	}
 	return &msg->parsed_uri.user;
-error:
-	LM_ERR("failed fo fetch destination\n");
-	return NULL;
-}
-
-str *cgr_get_tag(struct sip_msg *msg, char *tag_p)
-{
-	static str tag;
-
-	if (tag_p && fixup_get_svalue(msg, (gparam_p)tag_p, &tag) >= 0)
-		return &tag;
-	return NULL;
 }

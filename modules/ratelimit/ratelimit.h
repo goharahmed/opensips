@@ -32,10 +32,24 @@
 #define RL_PIPE_PENDING		(1<<0)
 #define BIN_VERSION         1
 
+#ifndef RL_DEBUG_PIPES
+# define RL_DBG(...)
+#else
+# define RL_DBG(pipe, format, args...) do { \
+	struct timeval __tv; \
+	gettimeofday(&__tv, NULL); \
+	LM_INFO("%.*s@%lu: " format "\n", (pipe)->name.len, (pipe)->name.s, \
+			(__tv.tv_sec * 1000 + __tv.tv_usec / 1000), ##args); \
+} while(0)
+#endif
+
 
 #include "../../map.h"
 #include "../clusterer/api.h"
 #include "../../forward.h"
+
+#define RL_PIPE_REPLICATE_BIN	(1<<0) /* replicate the pipe over bin */
+#define RL_PIPE_REPLICATE_CACHE	(1<<1) /* replicate the pipe over cache */
 
 /* copied from old ratelimit module */
 typedef enum {
@@ -66,6 +80,10 @@ typedef struct rl_window {
 } rl_window_t;
 
 typedef struct rl_pipe {
+#ifdef RL_DEBUG_PIPES
+	str name;
+#endif
+	unsigned int flags;			/* pipe's flags */
 	int limit;					/* limit used by algorithm */
 	int counter;				/* countes the accesses */
 	int my_counter;				/* countes the accesses of this instance */
@@ -99,6 +117,7 @@ extern int rl_timer_interval;
 extern int rl_limit_per_interval;
 extern int rl_expire_time;
 extern unsigned int rl_hash_size;
+extern int *rl_feedback_limit;
 extern int *rl_network_count;
 extern int *rl_network_load;
 extern str rl_default_algo_s;
@@ -114,10 +133,9 @@ void mod_destroy(void);
 int init_rl_table(unsigned int size);
 
 /* exported functions */
-int w_rl_check_2(struct sip_msg*, char *, char *);
-int w_rl_check_3(struct sip_msg*, char *, char *, char *);
-int w_rl_dec(struct sip_msg*, char *);
-int w_rl_reset(struct sip_msg*, char *);
+int w_rl_check(struct sip_msg*, str *, int *, str *);
+int w_rl_dec(struct sip_msg*, str *);
+int w_rl_reset(struct sip_msg*, str *);
 int w_rl_set_count(str, int);
 int rl_stats(mi_item_t *, str *);
 int rl_pipe_check(rl_pipe_t *);
@@ -147,6 +165,6 @@ int hist_get_count(rl_pipe_t *pipe);
 
 #define RL_PIPE_COUNTER		0
 #define RL_EXPIRE_TIMER		10
-#define RL_BUF_THRESHOLD	1400
+#define RL_BUF_THRESHOLD	32767
 
 #endif /* _RATELIMIT_H_ */

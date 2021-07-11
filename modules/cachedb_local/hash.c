@@ -105,18 +105,7 @@ void lcache_htable_destroy(lcache_t** cache_htable_p, int size)
 
 int lcache_htable_insert(cachedb_con *con,str* attr, str* value, int expires)
 {
-	return _lcache_htable_insert(con, attr, value, expires, 0);
-}
-
-int _lcache_htable_insert(cachedb_con *con,str* attr, str* value, int expires, int isrepl)
-{
-	lcache_entry_t* me, *it;
-	int hash_code;
-	int size;
-	struct timeval start;
-
-	lcache_t* cache_htable;
-	lcache_col_t* cache_col;
+	lcache_col_t *cache_col;
 
 	cache_col = ((lcache_con*)con->data)->col;
 	if ( !cache_col ) {
@@ -124,6 +113,18 @@ int _lcache_htable_insert(cachedb_con *con,str* attr, str* value, int expires, i
 				con->url.len, con->url.s);
 		return -1;
 	}
+
+	return _lcache_htable_insert(cache_col, attr, value, expires, 0);
+}
+
+int _lcache_htable_insert(lcache_col_t *cache_col, str* attr, str* value,
+	int expires, int isrepl)
+{
+	lcache_entry_t* me, *it;
+	int hash_code;
+	int size;
+	struct timeval start;
+	lcache_t* cache_htable;
 
 	cache_htable = cache_col->col_htable;
 
@@ -149,7 +150,7 @@ int _lcache_htable_insert(cachedb_con *con,str* attr, str* value, int expires, i
 	if( expires != 0)
 		me->expires = get_ticks() + expires;
 
-	hash_code= core_hash( attr, 0, cache_col->size);
+	hash_code= core_hash( attr, NULL, cache_col->size);
 	lock_get(&cache_htable[hash_code].lock);
 
 	it = cache_htable[hash_code].entries;
@@ -162,11 +163,12 @@ int _lcache_htable_insert(cachedb_con *con,str* attr, str* value, int expires, i
 
 	lock_release(&cache_htable[hash_code].lock);
 
-	stop_expire_timer(start,local_exec_threshold,
-	"cachedb_local insert",attr->s,attr->len,0);
+	_stop_expire_timer(start,local_exec_threshold,
+		"cachedb_local insert",attr->s,attr->len,0,
+		cdb_slow_queries, cdb_total_queries);
 
 	/* replicate */
-	if (cluster_id && isrepl != 1)
+	if (cluster_id && isrepl != 1 && cache_col->replicated)
 		replicate_cache_insert(&cache_col->col_name, attr, value, expires);
 
 	return 1;
@@ -199,16 +201,7 @@ void lcache_htable_remove_safe(str attr, lcache_entry_t** it_p)
 
 int lcache_htable_remove(cachedb_con *con,str* attr)
 {
-	return _lcache_htable_remove(con, attr, 0);
-}
-
-int _lcache_htable_remove(cachedb_con *con,str* attr, int isrepl)
-{
-	int hash_code;
-	struct timeval start;
-
-	lcache_t* cache_htable;
-	lcache_col_t* cache_col;
+	lcache_col_t *cache_col;
 
 	cache_col = ((lcache_con*)con->data)->col;
 	if ( !cache_col ) {
@@ -217,22 +210,32 @@ int _lcache_htable_remove(cachedb_con *con,str* attr, int isrepl)
 		return -1;
 	}
 
+	return _lcache_htable_remove(cache_col, attr, 0);
+}
+
+int _lcache_htable_remove(lcache_col_t *cache_col, str* attr, int isrepl)
+{
+	int hash_code;
+	struct timeval start;
+	lcache_t* cache_htable;
+
 	cache_htable = cache_col->col_htable;
 
 
 	start_expire_timer(start,local_exec_threshold);
 
-	hash_code= core_hash( attr, 0, cache_col->size);
+	hash_code= core_hash( attr, NULL, cache_col->size);
 	lock_get(&cache_htable[hash_code].lock);
 
 	lcache_htable_remove_safe( *attr, &cache_htable[hash_code].entries);
 
 	lock_release(&cache_htable[hash_code].lock);
 
-	stop_expire_timer(start,local_exec_threshold,
-	"cachedb_local remove",attr->s,attr->len,0);
+	_stop_expire_timer(start,local_exec_threshold,
+		"cachedb_local remove",attr->s,attr->len,0,
+		cdb_slow_queries, cdb_total_queries);
 
-	if (cluster_id && isrepl != 1)
+	if (cluster_id && isrepl != 1 && cache_col->replicated)
 		replicate_cache_remove(&cache_col->col_name, attr);
 
 	return 0;
@@ -262,7 +265,7 @@ int lcache_htable_add(cachedb_con *con,str *attr,int val,int expires,int *new_va
 
 	start_expire_timer(start,local_exec_threshold);
 
-	hash_code = core_hash(attr,0,cache_col->size);
+	hash_code = core_hash(attr, NULL,cache_col->size);
 	lock_get(&cache_htable[hash_code].lock);
 
 	it = cache_htable[hash_code].entries;
@@ -282,16 +285,18 @@ int lcache_htable_add(cachedb_con *con,str *attr,int val,int expires,int *new_va
 				ins_val.s = sint2str(val,&ins_val.len);
 				if (lcache_htable_insert(con,attr,&ins_val,expires) < 0) {
 					LM_ERR("failed to insert value\n");
-					stop_expire_timer(start,local_exec_threshold,
-					"cachedb_local add",attr->s,attr->len,0);
+					_stop_expire_timer(start,local_exec_threshold,
+						"cachedb_local add",attr->s,attr->len,0,
+						cdb_slow_queries, cdb_total_queries);
 					return -1;
 				}
 
 				if (new_val)
 					*new_val = val;
 
-				stop_expire_timer(start,local_exec_threshold,
-				"cachedb_local add",attr->s,attr->len,0);
+				_stop_expire_timer(start,local_exec_threshold,
+					"cachedb_local add",attr->s,attr->len,0,
+					cdb_slow_queries, cdb_total_queries);
 				return 0;
 			}
 
@@ -299,8 +304,9 @@ int lcache_htable_add(cachedb_con *con,str *attr,int val,int expires,int *new_va
 			if (str2sint(&it->value,&old_value) < 0) {
 				LM_ERR("not an integer\n");
 				lock_release(&cache_htable[hash_code].lock);
-				stop_expire_timer(start,local_exec_threshold,
-				"cachedb_local add",attr->s,attr->len,0);
+				_stop_expire_timer(start,local_exec_threshold,
+					"cachedb_local add",attr->s,attr->len,0,
+					cdb_slow_queries, cdb_total_queries);
 				return -1;
 			}
 
@@ -311,8 +317,9 @@ int lcache_htable_add(cachedb_con *con,str *attr,int val,int expires,int *new_va
 			if (it == NULL) {
 				LM_ERR("failed to realloc struct\n");
 				lock_release(&cache_htable[hash_code].lock);
-				stop_expire_timer(start,local_exec_threshold,
-				"cachedb_local add",attr->s,attr->len,0);
+				_stop_expire_timer(start,local_exec_threshold,
+					"cachedb_local add",attr->s,attr->len,0,
+					cdb_slow_queries, cdb_total_queries);
 				return -1;
 			}
 
@@ -330,8 +337,9 @@ int lcache_htable_add(cachedb_con *con,str *attr,int val,int expires,int *new_va
 			lock_release(&cache_htable[hash_code].lock);
 			if (new_val)
 				*new_val = old_value;
-			stop_expire_timer(start,local_exec_threshold,
-			"cachedb_local add",attr->s,attr->len,0);
+			_stop_expire_timer(start,local_exec_threshold,
+				"cachedb_local add",attr->s,attr->len,0,
+				cdb_slow_queries, cdb_total_queries);
 			return 0;
 		}
 
@@ -345,15 +353,17 @@ int lcache_htable_add(cachedb_con *con,str *attr,int val,int expires,int *new_va
 	ins_val.s = sint2str(val,&ins_val.len);
 	if (lcache_htable_insert(con,attr,&ins_val,expires) < 0) {
 		LM_ERR("failed to insert value\n");
-		stop_expire_timer(start,local_exec_threshold,
-		"cachedb_local add",attr->s,attr->len,0);
+		_stop_expire_timer(start,local_exec_threshold,
+			"cachedb_local add",attr->s,attr->len,0,
+			cdb_slow_queries, cdb_total_queries);
 		return -1;
 	}
 
 	if (new_val)
 		*new_val = val;
-	stop_expire_timer(start,local_exec_threshold,
-	"cachedb_local add",attr->s,attr->len,0);
+	_stop_expire_timer(start,local_exec_threshold,
+		"cachedb_local add",attr->s,attr->len,0,
+		cdb_slow_queries, cdb_total_queries);
 	return 0;
 }
 
@@ -390,7 +400,7 @@ int lcache_htable_fetch(cachedb_con *con,str* attr, str* res)
 
 	start_expire_timer(start,local_exec_threshold);
 
-	hash_code= core_hash( attr, 0, cache_col->size);
+	hash_code= core_hash( attr, NULL, cache_col->size);
 	lock_get(&cache_htable[hash_code].lock);
 
 	it = cache_htable[hash_code].entries;
@@ -411,8 +421,9 @@ int lcache_htable_fetch(cachedb_con *con,str* attr, str* res)
 				shm_free(it);
 
 				lock_release(&cache_htable[hash_code].lock);
-				stop_expire_timer(start,local_exec_threshold,
-				"cachedb_local fetch",attr->s,attr->len,0);
+				_stop_expire_timer(start,local_exec_threshold,
+					"cachedb_local fetch",attr->s,attr->len,0,
+					cdb_slow_queries, cdb_total_queries);
 				return -2;
 			}
 			value = (char*)pkg_malloc(it->value.len);
@@ -420,16 +431,18 @@ int lcache_htable_fetch(cachedb_con *con,str* attr, str* res)
 			{
 				LM_ERR("no more memory\n");
 				lock_release(&cache_htable[hash_code].lock);
-				stop_expire_timer(start,local_exec_threshold,
-				"cachedb_local fetch",attr->s,attr->len,0);
+				_stop_expire_timer(start,local_exec_threshold,
+					"cachedb_local fetch",attr->s,attr->len,0,
+					cdb_slow_queries, cdb_total_queries);
 				return -1;
 			}
 			memcpy(value, it->value.s, it->value.len);
 			res->len = it->value.len;
 			res->s = value;
 			lock_release(&cache_htable[hash_code].lock);
-			stop_expire_timer(start,local_exec_threshold,
-			"cachedb_local fetch",attr->s,attr->len,0);
+			_stop_expire_timer(start,local_exec_threshold,
+				"cachedb_local fetch",attr->s,attr->len,0,
+				cdb_slow_queries, cdb_total_queries);
 			return 1;
 		}
 
@@ -438,8 +451,9 @@ int lcache_htable_fetch(cachedb_con *con,str* attr, str* res)
 	}
 
 	lock_release(&cache_htable[hash_code].lock);
-	stop_expire_timer(start,local_exec_threshold,
-	"cachedb_local fetch",attr->s,attr->len,0);
+	_stop_expire_timer(start,local_exec_threshold,
+		"cachedb_local fetch",attr->s,attr->len,0,
+		cdb_slow_queries, cdb_total_queries);
 	return -2;
 }
 
@@ -464,7 +478,7 @@ int lcache_htable_fetch_counter(cachedb_con* con,str* attr,int *val)
 
 	start_expire_timer(start,local_exec_threshold);
 
-	hash_code= core_hash( attr, 0, cache_col->size);
+	hash_code= core_hash( attr, NULL, cache_col->size);
 	lock_get(&cache_htable[hash_code].lock);
 
 	it = cache_htable[hash_code].entries;
@@ -485,22 +499,25 @@ int lcache_htable_fetch_counter(cachedb_con* con,str* attr,int *val)
 				shm_free(it);
 
 				lock_release(&cache_htable[hash_code].lock);
-				stop_expire_timer(start,local_exec_threshold,
-				"cachedb_local fetch_counter",attr->s,attr->len,0);
+				_stop_expire_timer(start,local_exec_threshold,
+					"cachedb_local fetch_counter",attr->s,attr->len,0,
+					cdb_slow_queries, cdb_total_queries);
 				return -2;
 			}
 			if (str2sint(&it->value,&ret) != 0) {
 				LM_ERR("Not a counter key\n");
 				lock_release(&cache_htable[hash_code].lock);
-				stop_expire_timer(start,local_exec_threshold,
-				"cachedb_local fetch_counter",attr->s,attr->len,0);
+				_stop_expire_timer(start,local_exec_threshold,
+					"cachedb_local fetch_counter",attr->s,attr->len,0,
+					cdb_slow_queries, cdb_total_queries);
 				return -3;
 			}
 			if (val)
 				*val = ret;
 			lock_release(&cache_htable[hash_code].lock);
-			stop_expire_timer(start,local_exec_threshold,
-			"cachedb_local fetch_counter",attr->s,attr->len,0);
+			_stop_expire_timer(start,local_exec_threshold,
+				"cachedb_local fetch_counter",attr->s,attr->len,0,
+				cdb_slow_queries, cdb_total_queries);
 			return 1;
 		}
 
@@ -509,7 +526,8 @@ int lcache_htable_fetch_counter(cachedb_con* con,str* attr,int *val)
 	}
 
 	lock_release(&cache_htable[hash_code].lock);
-	stop_expire_timer(start,local_exec_threshold,
-	"cachedb_local fetch_counter",attr->s,attr->len,0);
+	_stop_expire_timer(start,local_exec_threshold,
+		"cachedb_local fetch_counter",attr->s,attr->len,0,
+		cdb_slow_queries, cdb_total_queries);
 	return -2;
 }

@@ -42,8 +42,8 @@
 
 /*!< TCP connection lifetime, in seconds */
 #define DEFAULT_TCP_CONNECTION_LIFETIME 120
-/*!< TCP listen backlog count */
-#define DEFAULT_TCP_LISTEN_BACKLOG 10
+/*!< TCP socket backlog count */
+#define DEFAULT_TCP_SOCKET_BACKLOG 10
 /*!< If a connect doesn't complete in more than 100ms, timeout */
 #define DEFAULT_TCP_CONNECT_TIMEOUT 100
 /*!< Maximum number of connections */
@@ -58,8 +58,8 @@
 
 
 /* fd communication commands - internal usage ONLY */
-enum conn_cmds { CONN_DESTROY=-3, CONN_ERROR=-2, CONN_EOF=-1, CONN_RELEASE,
-		CONN_GET_FD, CONN_NEW, ASYNC_CONNECT, ASYNC_WRITE, CONN_RELEASE_WRITE };
+enum conn_cmds { CONN_DESTROY=-4, CONN_ERROR=-3,CONN_ERROR2=-2, CONN_EOF=-1, CONN_RELEASE,
+		CONN_GET_FD, CONN_NEW, ASYNC_CONNECT, ASYNC_WRITE, ASYNC_WRITE2, CONN_RELEASE_WRITE };
 /* CONN_RELEASE, EOF, ERROR, DESTROY can be used by "reader" processes
  * CONN_GET_FD, NEW, ERROR only by writers */
 

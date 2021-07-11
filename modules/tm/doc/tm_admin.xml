@@ -621,7 +621,7 @@ modparam("tm", "syn_branch", 0)
 		</para>
 		<para>
 		In mode 1, you can see the AVPs you set in request route, branch route
-		or failure route. The side efect is performance as more locking is 
+		or failure route. The side effect is performance as more locking is 
 		required in order to keep the AVP's list integrity.
 		</para>
 		<para>
@@ -868,7 +868,7 @@ modparam("tm", "cluster_auto_cancel", no)
 	<title>Exported Functions</title>
 	<section id="func_t_relay" xreflabel="t_relay()">
 		<title>
-		<function moreinfo="none">t_relay([flags])</function>
+		<function moreinfo="none">t_relay([flags],[outbound_proxy])</function>
 		</title>
 		<para>
 		Relay a message statefully to destination indicated in current URI. 
@@ -882,7 +882,10 @@ modparam("tm", "cluster_auto_cancel", no)
 		yet created, the function will automatically create it.
 		</para>
 		<para>
-		The function may take as parameter an optional set of flags for 
+		The function may take two optional parameters.
+		</para>
+		<para>
+		The first parameter is a number representing a set of flags for 
 		controlling the internal behaviour. The flags may be given in decimal 
 		or hexa format; supported flags are:
 		</para>
@@ -935,6 +938,14 @@ modparam("tm", "cluster_auto_cancel", no)
 
 		</itemizedlist>
 		<para>
+		The second parameter is a string representing an outbound proxy
+		(a fixed destination) where the message should be sent. The
+		destination is specified as <quote>[proto:]host[:port]</quote>. If a 
+		destination URI <quote>$du</quote> for this message was set before the
+		function is called then this value will be used as the destination 
+		instead of the function parameter.
+		</para>
+		<para>
 		In case of error, the function returns the following codes:
 		</para>
 		<itemizedlist>
@@ -978,36 +989,9 @@ if (!t_relay()) {
     exit;
 }
 ...
-</programlisting>
-		</example>
-	</section>
-
-	<section id="func_t_relay_2" xreflabel="t_relay()">
-		<title>
-		<function moreinfo="none">t_relay(proto:host:port,[flags])</function>
-		</title>
-		<para>
-		Relay a message statefully to a fixed destination. The destination is
-		specified as <quote>[proto:]host[:port]</quote>. If a destination URI
-		<quote>$du</quote> for this message was set before the function
-		is called then this value will be used as the destination instead of the
-		function parameter.
-		</para>
-		<para>
-		The function may take as parameter an optional set of flags for 
-		controlling the internal behaviour - for details see the above 
-		<quote>t_relay([flags])</quote> function.
-		</para>
-		<para>
-		This functions can be used from REQUEST_ROUTE, FAILURE_ROUTE.
-		</para>
-		<example>
-		<title><function>t_relay</function> usage</title>
-		<programlisting format="linespecific">
+t_relay( ,"tcp:192.168.1.10:5060");
 ...
-t_relay("tcp:192.168.1.10:5060");
-t_relay("mydomain.com:5070","0x1");
-t_relay("udp:mydomain.com");
+t_relay(0x1, "mydomain.com:5070");
 ...
 </programlisting>
 		</example>
@@ -1026,17 +1010,14 @@ t_relay("udp:mydomain.com");
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>code</emphasis> - Reply code number.
+			<para><emphasis>code (int)</emphasis> - Reply code number.
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>reason_phrase</emphasis> - Reason string.
+			<para><emphasis>reason_phrase (string)</emphasis> - Reason string.
 			</para>
 		</listitem>
 		</itemizedlist>
-		<para>
-		Both parameters accept any kind of variables.
-		</para>
 		<para>
 		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE.
 		</para>
@@ -1044,7 +1025,7 @@ t_relay("udp:mydomain.com");
 		<title><function>t_reply</function> usage</title>
 		<programlisting format="linespecific">
 ...
-t_reply("404", "Use $rU not found");
+t_reply(404, "Use $rU not found");
 ...
 </programlisting>
 		</example>
@@ -1063,24 +1044,21 @@ t_reply("404", "Use $rU not found");
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>code</emphasis> - Reply code number.
+			<para><emphasis>code (int)</emphasis> - Reply code number.
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>reason_phrase</emphasis> - Reason string.
+			<para><emphasis>reason_phrase (string)</emphasis> - Reason string.
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>body</emphasis> - Reply body.
+			<para><emphasis>body (string)</emphasis> - Reply body.
 			</para>
 		</listitem>
 		</itemizedlist>
 
 		<para>
-		All parameters accept any kind of variables.
-		</para>
-		<para>
-		This function can be used from REQUEST_ROUTE, FAILURE_ROUTE.
+		This function can be used from REQUEST_ROUTE and FAILURE_ROUTE.
 		</para>
 		<example>
 		<title><function>t_reply_with_body</function> usage</title>
@@ -1090,7 +1068,7 @@ t_reply("404", "Use $rU not found");
 	{
 		append_to_reply("Contact: $var(contact)\r\n"
 				"Content-Type: application/sdp\r\n");
-		t_reply_with_body("200", "Ok", "$var(body)");
+		t_reply_with_body(200, "Ok", $var(body));
 		exit;
 	}
 ...
@@ -1286,7 +1264,7 @@ if (t_was_cancelled()) {
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>flags</emphasis> - (optional) - set of flags 
+			<para><emphasis>flags (string, optional)</emphasis> - set of flags 
 			(char based flags) to control what branches to be cancelled:
 			</para>
 			<itemizedlist>
@@ -1317,7 +1295,7 @@ if (t_was_cancelled()) {
 		<programlisting format="linespecific">
 onreply_route[3] {
 ...
-	if (t_check_status("183")) {
+	if (t_check_status(183)) {
 		# no support for early media
 		t_cancel_branch();
 	}
@@ -1338,33 +1316,33 @@ onreply_route[3] {
 		<para>Meaning of the parameters is as follows (all do accept variables):</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>method</emphasis> - the SIP method
+			<para><emphasis>method (string)</emphasis> - the SIP method
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>RURI</emphasis> - the SIP Request URI (the request 
+			<para><emphasis>RURI (string)</emphasis> - the SIP Request URI (the request 
 			will be sent out to this destination)
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>from</emphasis> - the SIP From hdr information as
+			<para><emphasis>from (string)</emphasis> - the SIP From hdr information as
 			"[display ]URI"
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>from</emphasis> - the SIP To hdr information as
+			<para><emphasis>to (string)</emphasis> - the SIP To hdr information as
 			"[display ]URI"
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>body</emphasis> - (optional) the SIP body content
+			<para><emphasis>body (string, optional)</emphasis> - the SIP body content
 			starting with the content type string: "conten_type body"
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>ctx</emphasis> - a context string that will be added to the
-			new transaction as an AVP with name "uac_ctx" (it may be visible in local
-			route)
+			<para><emphasis>ctx (string, optional)</emphasis> - a context string that will
+			be added to the new transaction as an AVP with name "uac_ctx" (it may be visible
+			in local route)
 			</para>
 		</listitem>
 		</itemizedlist>
@@ -1410,7 +1388,7 @@ onreply_route[3] {
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>failure_route</emphasis> - Reply route block to be 
+			<para><emphasis>failure_route (string)</emphasis> - Reply route block to be 
 			called.
 			</para>
 		</listitem>
@@ -1474,7 +1452,7 @@ failure_route[1] {
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>reply_route</emphasis> - Reply route block to be 
+			<para><emphasis>reply_route (string)</emphasis> - Reply route block to be 
 			called.
 			</para>
 		</listitem>
@@ -1547,7 +1525,7 @@ onreply_route[global] {
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>branch_route</emphasis> - Branch route block to be 
+			<para><emphasis>branch_route (string)</emphasis> - Branch route block to be 
 			called.
 			</para>
 		</listitem>
@@ -1605,7 +1583,7 @@ branch_route[1] {
 		<para>Parameters: </para>
 		<itemizedlist>
 			<listitem><para>
-				<emphasis>source</emphasis> - where to take the description
+				<emphasis>source (string)</emphasis> - where to take the description
 				for the new branches to be injected. It can be
 				<itemizedlist>
 					<listitem>
@@ -1621,14 +1599,21 @@ branch_route[1] {
 				</itemizedlist>
 			</para></listitem>
 			<listitem><para>
-				<emphasis>flags</emphasis> - (optional) some additional flags 
+				<emphasis>flags (string, optional)</emphasis> - some additional flags 
 				related to the injection process:
 				<itemizedlist>
 					<listitem>
-					<emphasis>cancel</emphasis> - cancel all the ongoing 
+					<emphasis>cancel</emphasis> or <emphasis>c</emphasis> 
+					- cancel all the ongoing 
 					existing branches from the transaction before injecting
 					the new branches.
 					</listitem>
+					<listitem>
+					<emphasis>l</emphasis> (last) - this is the last injected
+					branch on this transaction, do not wait for any other
+					branches to be injected.
+					</listitem>
+
 				</itemizedlist>
 			</para></listitem>
 		</itemizedlist>
@@ -1646,15 +1631,16 @@ route[event_notification] {
 
 	<section id="func_t_wait_for_new_branches" xreflabel="t_wait_for_new_branches()">
 		<title>
-		<function moreinfo="none">t_wait_for_new_branches()</function>
+		<function moreinfo="none">t_wait_for_new_branches([branches])</function>
 		</title>
 		<para>
 		This function instructs the existing SIP transaction to wait for new
 		branches to be injected even after the completion of the existing 
 		branches. This waiting will be done until the Final Response INVITE 
-		timer (fr_inv_timeout) will hit for the transaction; of course, the
-		waiting will be terminated if the transaction gets a 2xx final reply
-		from one of the branches.
+		timer (fr_inv_timeout) will hit for the transaction OR until the 
+		maximum number of branches were injected (see parameter); of course,
+		the waiting will be terminated if the transaction gets a 2xx final
+		reply from one of the branches.
 		</para>
 		<para>
 		Normally if you have a transaction with two branches and 
@@ -1667,6 +1653,13 @@ route[event_notification] {
 		<xref linkend="func_t_inject_branches"/> function) until the fr_inv timer
 		hits.
 		</para>
+		<para>Parameters: </para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>branches (integer, options)</emphasis> - what is the
+				maximum number of branches to be waited for.
+			</para></listitem>
+		</itemizedlist>
 		<example>
 		<title><function>t_wait_for_new_branches</function> usage</title>
 		<programlisting format="linespecific">
@@ -1674,6 +1667,34 @@ route[event_notification] {
 t_newtran();
 t_wait_for_new_branches();
 t_relay();
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_t_wait_no_more_branches" xreflabel="t_wait_no_more_branches()">
+		<title>
+		<function moreinfo="none">t_wait_no_more_branches()</function>
+		</title>
+		<para>
+		This function instructs the existing SIP transaction to stop wait
+		for new any new branches to be injected. This functions should be 
+		used for a transaction that is waiting for dynamic branches, via the
+		<xref linkend="func_t_wait_for_new_branches"/> function.
+		</para>
+		<para>
+		Usage scenario: your transaction is waiting for dynamic new branches
+		(as a reusult of Push Notification). To a point, on an ongoing
+		branch you receive a final reply - and the fact that the branch fails
+		translates into stop waiting for any more branche (this is an example
+		of a logic on deciding how long to wait for more branches, depending 
+		on the answers you get from various devices, fix or mobile).
+		</para>
+		<example>
+		<title><function>t_wait_no_more_branches</function> usage</title>
+		<programlisting format="linespecific">
+...
+t_wait_no_more_branches();
 ...
 </programlisting>
 		</example>
@@ -1688,6 +1709,12 @@ t_relay();
 		will be appended to all requests related to the transaction (outgoing
 		branches, local ACKS, CANCELs).
 		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>sip_hdrs (string)</emphasis>
+			</para></listitem>
+		</itemizedlist>
 		<example>
 		<title><function>t_add_hdrs</function> usage</title>
 		<programlisting format="linespecific">
@@ -1702,6 +1729,7 @@ t_add_hdrs("X-origin: 1.1.1.1\r\n");
 		<title>
 		<function moreinfo="none">t_add_cancel_reason("Reason_hdr")</function>
 		</title>
+		<para>
 		This function is used to enforce from the script level a custom
 		"Reason" header into a CANCEL request. Normally, the Reason header is
 		inherited form the received CANCEL (note that CANCEL propagates in a
@@ -1709,8 +1737,13 @@ t_add_hdrs("X-origin: 1.1.1.1\r\n");
 		can overwrite it. It must be called before relaying the CANCEL request
 		and its input must be a fully formated Reason header with name, body 
 		and CRLF.
-		<para>
 		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>reason_hdr (string)</emphasis>
+			</para></listitem>
+		</itemizedlist>
 		<example>
 		<title><function>t_add_cancel_reason</function> usage</title>
 		<programlisting format="linespecific">
@@ -1736,12 +1769,18 @@ t_relay();
 		The destination is specified by a SIP URI. If multiple destinations are
 		to be used, the additional SIP URIs have to be set as branches.
 		</para>
-		<para>
-		The function may take as parameter an optional set of flags for 
-		controlling the internal behaviour - for description see the above 
-		<quote>t_relay([flags])</quote> function. Note that only 0x4 is 
-		applicable here.
-		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>uri (string)</emphasis>
+			</para></listitem>
+			<listitem><para>
+				<emphasis>flags (int, optional)</emphasis> - a set of flags for 
+				controlling the internal behaviour - for description see the above 
+				<quote>t_relay([flags])</quote> function. Note that only 0x4 is 
+				applicable here.
+			</para></listitem>
+		</itemizedlist>
 		<para>
 		This functions can be used from REQUEST_ROUTE.
 		</para>
@@ -1751,7 +1790,7 @@ t_relay();
 ...
 t_replicate("sip:1.2.3.4:5060");
 t_replicate("sip:1.2.3.4:5060;transport=tcp");
-t_replicate("sip:1.2.3.4","0x4");
+t_replicate("sip:1.2.3.4",0x4);
 ...
 </programlisting>
 		</example>
@@ -1767,6 +1806,15 @@ t_replicate("sip:1.2.3.4","0x4");
 		request. Which information should be written may be control via the
 		<quote>tw_append</quote> parameter.
 		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>info (string)</emphasis>
+			</para></listitem>
+			<listitem><para>
+				<emphasis>path (string)</emphasis>
+			</para></listitem>
+		</itemizedlist>
 		<para>
 		This functions can be used from REQUEST_ROUTE, FAILURE_ROUTE and 
 		BRANCH_ROUTE.
@@ -1966,7 +2014,7 @@ if (is_method("ACK|CANCEL") &amp;&amp; !t_check_trans()) {
 		MI FIFO Command Format:
 		</para>
 		<programlisting  format="linespecific">
-		opensips-cli -x mi t_uac_dlg INVITE "sip:123456@127.0.0.1:5060 SIP/2.0" . . "\"From: sipp:6024151234@127.0.0.1:5090>\r\nTo: sip:test@127.0.0.1:5060\r\nContact: sip:sipp@127.0.0.1:5090\r\n"\"
+		opensips-cli -x mi t_uac_dlg method=INVITE ruri="sip:alice@127.0.0.1:7050" headers="From: sip:bobster@127.0.0.1:1337\r\nTo: sip:alice@127.0.0.1:7050\r\nContact: sip:bobster@127.0.0.1:1337\r\n"
 		</programlisting>
 	</section>
 

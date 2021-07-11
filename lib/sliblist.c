@@ -75,8 +75,7 @@ void *slinkedl_prepend(slinkedl_list_t *list, size_t e_size)
 	element->next = list->head;
 	element->data = (void*)(element + 1);
 	list->head = element;
-	if (element->next) {
-	} else {
+	if (!element->next) {
 		/* This is an empty list */
 		list->tail = element;
 	}
@@ -106,6 +105,18 @@ void *slinkedl_append(slinkedl_list_t *list, size_t e_size)
 	return (element->data);
 }
 
+void slinkedl_append_element(slinkedl_list_t *list, slinkedl_element_t *element)
+{
+	if (list->tail) {
+		list->tail->next = element;
+		list->tail = element;
+	} else {
+		/* This is an empty list */
+		list->head = element;
+		list->tail = element;
+	}
+}
+
 
 int slinkedl_traverse(slinkedl_list_t *list,
 		slinkedl_run_data_f func, void *data, void *r_data)
@@ -125,9 +136,62 @@ int slinkedl_traverse(slinkedl_list_t *list,
 	return 0;
 }
 
+slinkedl_element_t *slinkedl_new_element(slinkedl_alloc_f *alloc,
+	size_t e_size, void **e_data)
+{
+	slinkedl_element_t *element;
+
+	if (!alloc || !e_size) return NULL;
+
+	element = (slinkedl_element_t*)(alloc(sizeof(slinkedl_element_t) +
+			e_size));
+	if (!element) return NULL;
+
+	element->next = NULL;
+	element->data = (void*)(element + 1);
+
+	*e_data = element->data;
+
+	return element;
+}
+
+int slinkedl_replace(slinkedl_list_t *list, slinkedl_match_f func,
+	void *data, slinkedl_element_t *new_element)
+{
+	slinkedl_element_t *prev = NULL, *element;
+	int ret = 0;
+
+	if (!list || !func || !new_element) return 0;
+
+	element = list->head;
+	while(element){
+		ret = (*func)(element->data, data, new_element->data);
+		if (ret) {
+			if (prev)
+				prev->next = new_element;
+			else
+				list->head = new_element;
+
+			if (element == list->tail)
+				list->tail = new_element;
+
+			new_element->next = element->next;
+
+			list->dealloc(element);
+
+			return ret;
+		} else {
+			prev = element;
+			element = element->next;
+		}
+	}
+
+	return ret;
+}
+
 void *slinkedl_peek(slinkedl_list_t *list)
 {
-	if (!list)
+	if (!list || !list->head)
 		return NULL;
 
 	return list->head->data;

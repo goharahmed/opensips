@@ -390,7 +390,7 @@ modparam("pua_dialoginfo", "publish_on_trying", 1)
 		</section>
 
 		<section id="param_nopublish_flag" xreflabel="nopublish_flag">
-		<title><varname>nopublish_flag</varname> (int)</title>
+		<title><varname>nopublish_flag</varname> (str)</title>
 		<para>
 			By default, reINVITEs will trigger a PUBLISH. They are actually
 			the only in-dialog request for which it makes sense.
@@ -404,7 +404,7 @@ modparam("pua_dialoginfo", "publish_on_trying", 1)
 			<title>Set <varname>nopublish_flag</varname> parameter</title>
 			<programlisting format="linespecific">
 ...
-modparam("pua_dialoginfo", "nopublish_flag", 5)
+modparam("pua_dialoginfo", "nopublish_flag", "no_publish")
 ...
 </programlisting>
 		</example>
@@ -507,7 +507,7 @@ modparam("pua_dialoginfo", "osips_ps", 0)
 		</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>side</emphasis> (optional) - can be "A" or/and "B"
+			<para><emphasis>side</emphasis> (string, optional) - can be "A" or/and "B"
 			for caller or callee PUBLISH only - if missing, both sides will
 			be published.</para>
 		</listitem>
@@ -543,7 +543,7 @@ modparam("pua_dialoginfo", "osips_ps", 0)
 		</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>callee</emphasis> - a SIP nams addr description of
+			<para><emphasis>callee</emphasis> (string) - a SIP nams addr description of
 			the callee (the name_addr format is '[display] &lt;uri&gt;' or 
 			'uri', as in the To or From headers)
 			</para>
@@ -564,6 +564,38 @@ branch_route[out]
 		</example>
 	</section>
 
+	<section id="func_dialoginfo_mute_branch" xreflabel="dialoginfo_mute_branch()">
+		<title>
+		<function moreinfo="none">dialoginfo_mute_branch([side])</function>
+		</title>
+		<para>
+		This function must be called for INVITE messages, in the branch route
+		only, in order to mute the publishing of the dialoginfo information
+		for caller/callee/both parties involved in that branch.
+		</para>
+		<para>
+		Meaning of the parameters:
+		</para>
+		<itemizedlist>
+		<listitem>
+			<para><emphasis>side</emphasis> (string, optional) - can be
+			"A" or/and "B" for caller or callee muting only - if missing,
+			both sides will be muted.</para>
+		</listitem>
+		</itemizedlist>
+		<example>
+		<title><function>dialoginfo_mute_branch</function> usage</title>
+		<programlisting format="linespecific">
+...
+	branch_route[out] {
+		# mute publishing for callee side if not a local domain
+		if (!is_domain_local("$rd"))
+			dialoginfo_mute_branch("B");
+	}
+...
+		</programlisting>
+		</example>
+	</section>
 
 	</section>
 

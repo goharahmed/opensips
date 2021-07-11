@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE table PUBLIC "-//opensips.org//DTD DBSchema V1.1//EN" 
-  "http://opensips.org/pub/opensips/dbschema/dtd/1.1/dbschema.dtd" [
+  "https://opensips.org/pub/opensips/dbschema/dtd/1.1/dbschema.dtd" [
 
 <!ENTITY % entities SYSTEM "entities.xml">
 %entities;
@@ -9,7 +9,7 @@
 
 <table id="dr_carriers" xmlns:db="http://docbook.org/ns/docbook">
 	<name>dr_carriers</name>
-	<version>2</version>
+	<version>3</version>
 	<type db="mysql">&MYSQL_TABLE_TYPE;</type>
 	<description>
 		<db:para>This table is used by the Dynamic Routing module to define
@@ -41,7 +41,7 @@
 		<name>gwlist</name>
 		<type>string</type>
 		<size>255</size>
-		<description>Reference to the GWs/destinations from the list.
+		<description>A comma-separated list of GW unique IDs (e.g. GW-5).
 		</description>
 	</column>
 
@@ -50,7 +50,22 @@
 		<type>unsigned int</type>
 		<size>&flag_len;</size>
 		<default>0</default>
-		<description>Flags (for different purposes) of the carriers
+		<description>Flags of the carriers (for different purposes: 
+					use only first gw from cr (set the first bit of the flag); 
+					disable gateway (set the second bit of the flag);
+		</description>
+	</column>
+	
+	<column id="sorting_alg">
+		<name>sort_alg</name>
+		<type>string</type>
+		<default>N</default>
+		<size>1</size>
+		<description>The sorting algorithm to be employed for the carriers's
+			destinations when do_routing() is called.  Possible values:
+			'N' (default; no sorting, preserve given order),
+			'W' (weight based sorting),
+			'Q' (quality-based sorting, provided by the qrouting module)
 		</description>
 	</column>
 

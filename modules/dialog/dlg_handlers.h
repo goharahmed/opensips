@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2008-2020 OpenSIPS Solutions
  * Copyright (C) 2006 Voice System SRL
  *
  * This file is part of opensips, a free SIP server.
@@ -15,13 +16,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
- *
- * History:
- * --------
- * 2006-04-14  initial version (bogdan)
- * 2007-03-06  syncronized state machine added for dialog state. New tranzition
- *             design based on events; removed num_1xx and num_2xx (bogdan)
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 
@@ -62,7 +57,8 @@ static inline int dlg_match_mode_str_to_int(const str *in)
 	return SEQ_MATCH_DEFAULT;
 }
 
-#define RR_DLG_PARAM_SIZE  (2*2*sizeof(int)+3+MAX_DLG_RR_PARAM_NAME)
+#define DLG_DID_SIZE       (2*2*sizeof(int)+1)
+#define RR_DLG_PARAM_SIZE  (DLG_DID_SIZE+2+MAX_DLG_RR_PARAM_NAME)
 #define DLG_SEPARATOR      '.'
 
 struct _dlg_cseq{
@@ -101,6 +97,19 @@ extern int ctx_lastdstleg_idx;
 #define ctx_lastdstleg_set(_lastleg) \
 	context_put_int(CONTEXT_GLOBAL,current_processing_ctx, ctx_lastdstleg_idx, _lastleg+1)
 
+typedef int (*validate_dialog_f) (struct sip_msg* req, struct dlg_cell *dlg);
+typedef int (*fix_route_dialog_f) (struct sip_msg *req,struct dlg_cell *dlg);
+/* the dialog is identified by callid if provided,
+ * otherwise by h_entry and h_id */
+typedef int (*terminate_dlg_f)(const str *callid, unsigned int h_entry,
+		unsigned int h_id, const str *reason);
+typedef int (*indialog_reply_f) (struct sip_msg *msg, int statuscode,
+		void *param);
+typedef int (*send_indialog_req_f)(struct dlg_cell *dlg, str *method,
+		int leg, str *body, str *ct, str *hdrs, indialog_reply_f func,
+		void *param);
+
+
 void init_dlg_handlers(int default_timeout);
 
 void destroy_dlg_handlers();
@@ -113,35 +122,41 @@ void dlg_onroute(struct sip_msg* req, str *rr_param, void *param);
 
 void dlg_ontimeout( struct dlg_tl *tl);
 
-typedef int (*validate_dialog_f) (struct sip_msg* req, struct dlg_cell *dlg);
+str *dlg_get_did(struct dlg_cell *dlg);
+
 int dlg_validate_dialog( struct sip_msg* req, struct dlg_cell *dlg);
 
-typedef int (*fix_route_dialog_f) (struct sip_msg *req,struct dlg_cell *dlg);
 int fix_route_dialog(struct sip_msg *req,struct dlg_cell *dlg);
 
-int terminate_dlg(unsigned int h_entry, unsigned int h_id,str *reason);
-typedef int (*terminate_dlg_f)(unsigned int h_entry, unsigned int h_id,str *reason);
+int terminate_dlg(const str *callid, unsigned int h_entry, unsigned int h_id,
+		const str *reason);
+
+int send_indialog_request(struct dlg_cell *dlg, str *method,
+		int leg, str *body, str *ct, str *hdrs, indialog_reply_f func,
+		void *param);
 
 void unreference_dialog(void *dialog);
 
-static inline int parse_dlg_rr_param(char *p, char *end,
-								unsigned int *h_entry, unsigned int *h_id)
-{
-	char *s;
+int run_dlg_script_route(struct dlg_cell *dlg, int rt_idx);
 
-	for ( s=p ; p<end && *p!=DLG_SEPARATOR ; p++ );
+
+static inline int parse_dlg_did(str *did, unsigned int *h_entry, unsigned int *h_id)
+{
+	char *p, *end = did->s + did->len;
+
+	for ( p=did->s ; p<end && *p!=DLG_SEPARATOR ; p++ );
 	if (*p!=DLG_SEPARATOR) {
-		LM_ERR("malformed rr param '%.*s'\n", (int)(long)(end-s), s);
+		LM_DBG("malformed rr param '%.*s'\n", (int)(long)(end-did->s), did->s);
 		return -1;
 	}
 
-	if ( reverse_hex2int( s, p-s, h_entry)<0 ) {
-		LM_ERR("invalid hash entry '%.*s'\n", (int)(long)(p-s), s);
+	if ( reverse_hex2int( did->s, p-did->s, h_entry)<0 ) {
+		LM_DBG("invalid hash entry '%.*s'\n", (int)(long)(p-did->s), did->s);
 		return -1;
 	}
 
 	if ( reverse_hex2int( p+1, end-(p+1), h_id)<0 ) {
-		LM_ERR("invalid hash id '%.*s'\n", (int)(long)(end-(p+1)), p+1 );
+		LM_DBG("invalid hash id '%.*s'\n", (int)(long)(end-(p+1)), p+1 );
 		return -1;
 	}
 

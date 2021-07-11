@@ -21,10 +21,10 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,USA
 
 ### global OpenSIPS commit stats, self-generated on each "rebuild-proj-stats"
-__PROJ_COMMITS=15686
-__PROJ_LINES_ADD=2001541
-__PROJ_LINES_DEL=877383
-__LAST_REBUILD_SHA=736315e5c7f005d645883f2e968471fdaec9dda1
+__PROJ_COMMITS=17783
+__PROJ_LINES_ADD=2184345
+__PROJ_LINES_DEL=1089621
+__LAST_REBUILD_SHA=b6ef99633e17d0fac08b98364389678f8ae3a3d2
 
 TMP_FILE=/var/tmp/.opensips-build-contrib.tmp
 
@@ -46,12 +46,14 @@ TABLE_SIZE_ACTIVITY=${TABLE_SIZE_ACTIVITY:-10}
 declare -A author_aliases
 author_aliases=(
   ["AgalyaR <agalya.job@gmail.com>"]="Agalya Ramachandran <agalya.job@gmail.com>"
+  ["Alessio Garzi <agarzi@clouditalia.com>"]="Alessio Garzi <gun101@email.it>"
   ["Anca Vamanu"]="Anca Vamanu <anca@opensips.org>"
   ["Andreas Granig <andreas.granig@inode.info>"]="Andreas Granig <agranig@linguin.org>"
   ["Andreas Heise"]="Andreas Heise <aheise@gmx.de>"
   ["Andrei Pelinescu-Onciul"]="Andrei Pelinescu-Onciul <andrei@iptel.org>"
   ["Bogdan Andrei IANCU <bogdan@opensips.org>"]="Bogdan-Andrei Iancu <bogdan@opensips.org>"
   ["Bogdan-Andrei Iancu <bogdan@voice-system.ro>"]="Bogdan-Andrei Iancu <bogdan@opensips.org>"
+  ["Bogdan Iancu <bogdan@opensips.org>"]="Bogdan-Andrei Iancu <bogdan@opensips.org>"
   ["Carsten Bock"]="Carsten Bock <lists@bock.info>"
   ["Cerghit Ionel <ionel.cerghit@gmail.com>"]="Ionel Cerghit <ionel.cerghit@gmail.com>"
   ["Christian Schlatter <USERNAME@DOMAIN.COM>"]="Christian Schlatter <cs@unc.edu>"
@@ -86,6 +88,8 @@ author_aliases=(
   ["Răzvan Crainea <razvan.crainea@gmail.com>"]="Razvan Crainea <razvan@opensips.org>"
   ["Răzvan Crainea <razvancrainea@users.noreply.github.com>"]="Razvan Crainea <razvan@opensips.org>"
   ["Rob Gagnon <rgagnon@vcentos7.telepointglobal.com>"]="Rob Gagnon <rgagnon24@gmail.com>"
+  ["Sergey KHripchenko <shripchenko@intermedia.net>"]="Sergey Khripchenko <shripchenko@intermedia.net>"
+  ["shripchenko <shripchenko@intermedia.net>"]="Sergey Khripchenko <shripchenko@intermedia.net>"
   ["rgagnon24 <rgagnon24@gmail.com>"]="Rob Gagnon <rgagnon24@gmail.com>"
   ["Saúl Ibarra Corretgé <saul@ag-projects.com>"]="Saúl Ibarra Corretgé <saghul@gmail.com>"
   ["Stéphane Alnet"]="Stéphane Alnet <stephane@shimaore.net>"
@@ -102,6 +106,7 @@ author_aliases=(
   ["root <root@opensips.org>"]="Bogdan-Andrei Iancu <bogdan@opensips.org>"
   ["rvlad-patrascu <vladp@opensips.org>"]="Vlad Patrascu <vladp@opensips.org>"
   ["rvlad-patrascu <rvlad.patrascu@gmail.com>"]="Vlad Patrascu <vladp@opensips.org>"
+  ["Vlad Pătrașcu <vladp@opensips.org>"]="Vlad Patrascu <vladp@opensips.org>"
   ["tallicamike <mtiganus@gmail.com>"]="Mihai Tiganus <mtiganus@gmail.com>"
 )
 
@@ -112,12 +117,16 @@ author_aliases=(
 declare -A github_handles
 github_handles=(
   ["Agalya Ramachandran"]="AgalyaR"
+  ["Alessio Garzi"]="Ozzyboshi"
   ["Alexandr Dubovikov <voip@start4.info>"]="adubovikov"
   ["Alexey Vasilyev <alexei.vasilyev@gmail.com>"]="vasilevalex"
   ["Andrei Datcu <datcuandrei@gmail.com>"]="andrei-datcu"
   ["Andrey Vorobiev <andrey.o.vorobiev@gmail.com>"]="andrey-vorobiev"
+  ["Andriy Pylypenko <bamby@sippysoft.com>"]="bambyster"
   ["Aron Podrigal <aronp@guaranteedplus.com>"]="ar45"
+  ["Björn Esser <besser82@fedoraproject.org>"]="besser82"
   ["Bogdan-Andrei Iancu"]="bogdan-iancu"
+  ["Callum Guy <callum.guy@x-on.co.uk>"]="spacetourist"
   ["Chad Attermann"]="attermann"
   ["Christophe Sollet"]="csollet"
   ["Damien Sandras <dsandras@beip.be>"]="dsandras"
@@ -125,19 +134,25 @@ github_handles=(
   ["Dan Pascu <dan@ag-projects.com>"]="danpascu"
   ["Dave Sidwell"]="davesidwell"
   ["Di-Shi Sun <di-shi@transnexus.com>"]="di-shi"
+  ["Dusan Klinec <dusan.klinec@gmail.com>"]="ph4r05"
   ["Eric Tamme"]="etamme"
   ["Eseanu Marius Cristian <eseanu.cristian@gmail.com>"]="eseanucristian"
   ["Evandro Villaron"]="evillaron"
+  ["Ezequiel Lovelle <ezequiellovelle@gmail.com>"]="lovelle"
   ["Fabian Gast"]="fgast"
   ["Federico Edorna <fedorna@anura.com.ar>"]="fedorna"
   ["Gohar Ahmed <gahmed@saevolgo.ca>"]="goharahmed"
   ["Henning Westerholt"]="henningw"
   ["Ionel Cerghit"]="ionel-cerghit"
   ["Ionut Ionita"]="ionutrazvanionita"
+  ["Italo Rossi <italorossib@gmail.com>"]="italorossi"
   ["jamesabravo"]="jamesabravo"
   ["Jan Janak"]="janakj"
   ["Jarrod Baumann"]="jarrodb"
+  ["Jasper Hafkenscheid <hafkensite@users.noreply.github.com>"]="hafkensite"
+  ["Jeremy Martinez <jmarti70@harris.com>"]="JeremyMartinez51"
   ["Jiri Kuthan <jiri@iptel.org>"]="jiriatipteldotorg"
+  ["John Burke <john@voxtelesys.net>"]="john08burke"
   ["John Kiniston <johnk@simplybits.com>"]="SB-JohnK"
   ["Juha Heinanen"]="juha-h"
   ["Kobi Eshun <kobi@sightspeed.com>"]="ekobi"
@@ -156,12 +171,14 @@ github_handles=(
   ["Robison Tesini"]="rtesini"
   ["Ryan Bullock"]="rrb3942"
   ["Saúl Ibarra Corretgé"]="saghul"
+  ["Sergey Khripchenko"]="shripchenko"
   ["Stefan Pologov"]="sisoftrg"
   ["Stéphane Alnet"]="shimaore"
   ["Victor Ciurel <victor.ciurel@gmail.com>"]="victor-ciurel"
   ["Vlad Paiu"]="vladpaiu"
   ["Vlad Patrascu"]="rvlad-patrascu"
   ["Walter Doekes"]="wdoekes"
+  ["Zero King <l2dy@icloud.com>"]="l2dy"
 )
 
 # Commits which have been done on behalf of the original authors
@@ -293,6 +310,7 @@ fix_authors=(
 
   # db_postgres
   ["9e6730ec4d2e876f6b2372f1b5fb5703112079fc"]="Ruslan Bukin"
+  ["2d80fcf1cfed82680a016fe723da03a303f73aff"]="Norman Brandinger"
 
   # db_text
   ["e8c8262d23b26bdb45b8074c6e518825ea0ca6de"]="Henning Westerholt"
@@ -513,6 +531,9 @@ fix_authors=(
   ["1f14961143343b80e682f8436b353921b7309fb1"]="Christophe Sollet"
   ["034e61d1fed5c2e7ef3917f7e827a562486a0bf7"]="Ron Winacott <ronw@somanetworks.com>"
 
+  # stir_shaken
+  ["129834d125e3179ae60e56e4fc485b1ad74f9cc7"]="John Burke <john@voxtelesys.net>"
+
   # textops
   ["ad7f17082aef12211d85d2f1ec0694c4ff21bbef"]="Christophe Sollet"
   ["ca2a72ee03ce7886a3e47af78da72a8967100db5"]="Hugues Mitonneau"
@@ -589,8 +610,13 @@ mod_renames=(
   [auth_aaa]=auth_radius
   [cachedb_local]=localcache
   [uac_registrant]=registrant
+  [tracer]=siptrace
+  [stir_shaken]=stir
   [mi_http]=mi_json:1540473075:  # old_module:new_module_since:old_module_until
   [mi_html]=mi_http::1540473075
+  [event_stream]=event_jsonrpc
+  [b2b_logic]=b2b_logic:1605638778
+  [b2b_logic_xml]=b2b_logic::1605638778
 )
 
 mk_git_handle() {
@@ -691,8 +717,10 @@ _count_module_changes() {
     local old_mod="${arr[0]}"; local since="${arr[1]}"; local until="${arr[2]}"
     unset IFS
 
-    # this trick helps deal with the mi_html->mi_http, mi_http->mi_json rename
-    [ -z "$3" -o -z "$since" ] && \
+    # deal with renames, e.g.:
+    #   * mi_html->mi_http, mi_http->mi_json
+    #   * b2b_logic->b2b_logic_xml, NEW_MOD->b2b_logic
+    [[ $1 != $old_mod ]] && [ -z "$3" -o -z "$since" ] && \
         _count_module_changes "$old_mod" "$2" "recurse" "$until"
   fi
 
@@ -817,7 +845,7 @@ cat <<EOF >>modules/$1/doc/contributors.xml
 	</tbody>
 	</tgroup>
 	</table>
-	$side_authors_para
+$side_authors_para
 	<para>
 	    <emphasis>(1) DevScore = author_commits + author_lines_added / (project_lines_added / project_commits) + author_lines_deleted / (project_lines_deleted / project_commits)</emphasis>
 	</para>
@@ -885,7 +913,7 @@ cat <<EOF >>modules/$1/doc/contributors.xml
 	</tbody>
 	</tgroup>
 	</table>
-	$side_authors_para
+$side_authors_para
 	<para>
 	    <emphasis>(1) including any documentation-related commits, excluding merge commits</emphasis>
 	</para>
@@ -915,12 +943,18 @@ while read line; do
   doc_authors+="$(mk_author_xml_str "$(echo $line | awk -F'[,]' '{print $1}')"), "
 done < $tmp_file
 
+if [ -n "$doc_authors" ]; then
+  doc_authors_para="<para><emphasis role='bold'>Last edited by:</emphasis> ${doc_authors::-2}.</para>"
+else
+  doc_authors_para=
+fi
+
 cat <<EOF >>modules/$1/doc/contributors.xml
 <chapter id="documentation" xreflabel="documentation">
 	<title>Documentation</title>
 <section id="documentation_contributors" xreflabel="documentation_contributors">
 	<title>Contributors</title>
-	<para><emphasis role='bold'>Last edited by:</emphasis> ${doc_authors::-2}.</para>
+	$doc_authors_para
 </section>
 
 </chapter>

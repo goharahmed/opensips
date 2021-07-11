@@ -66,21 +66,6 @@
 #define WS_UPGRADE_HDR "Upgrade"
 #define WS_UPGRADE_HDR_LEN (sizeof(WS_UPGRADE_HDR) - 1)
 
-/* all flags for req */
-#define WS_ALL_REQ_F (WS_HOST_F | \
-					WS_UPGRADE_F | \
-					WS_CONN_F | \
-					WS_ORIGIN_F | \
-					WS_KEY_F | \
-					WS_VER_F | \
-					WS_PROTO_F)
-
-/* all flags for reply */
-#define WS_ALL_RPL_F (WS_UPGRADE_F | \
-					WS_CONN_F | \
-					WS_ACCEPT_F | \
-					WS_PROTO_F)
-
 #define GET_LOWER(_p) \
 	((*(_p)) | 0x20)
 #define GET_LOWER_DWORD(_p) \
@@ -156,6 +141,24 @@ static char ws_trace_buf[WS_TRACE_MAX];
 #ifndef _ws_common_write_tout
 #error "_ws_common_write_tout not defined!"
 #endif
+#ifndef _ws_common_require_origin
+#error "_ws_common_require_origin not defined!"
+#endif
+
+/* all flags for req */
+#define WS_ALL_REQ_F (WS_HOST_F | \
+					WS_UPGRADE_F | \
+					WS_CONN_F | \
+					(_ws_common_require_origin?WS_ORIGIN_F:0) | \
+					WS_KEY_F | \
+					WS_VER_F | \
+					WS_PROTO_F)
+
+/* all flags for reply */
+#define WS_ALL_RPL_F (WS_UPGRADE_F | \
+					WS_CONN_F | \
+					WS_ACCEPT_F | \
+					WS_PROTO_F)
 
 
 #define WS_KEY_LEN 24
@@ -171,8 +174,12 @@ static str ws_rand_key(void)
 	static str key = { ws_key, WS_KEY_LEN };
 	int i;
 
-	for (i = 0; i < WS_KEY_LEN; i++)
+	/* randomly selected 16-byte base64 encoded value requires
+	 * 22 characters and 2 paddings at the end */
+	for (i = 0; i < WS_KEY_LEN - 2; i++)
 		ws_key[i] = base64alphabet[rand() % BASE64ALPHABET_LEN];
+	ws_key[i++] = '=';
+	ws_key[i++] = '=';
 
 	return key;
 }
@@ -883,13 +890,13 @@ static int ws_parse_req_handshake(struct tcp_connection *c, char *msg, int len)
 			flags |= WS_CONN_F;
 			break;
 		case GET_DWORD('o', 'r', 'i', 'g'): /* Origin */
-			/* TODO: always check for origin? */
 			if (hf->name.len !=  HDR_LEN("Origin") ||
 					GET_LOWER(hf->name.s + 4) != 'i' ||
 					GET_LOWER(hf->name.s + 5) != 'n')
 				break;
 
-			flags |= WS_ORIGIN_F;
+			if (_ws_common_require_origin)
+				flags |= WS_ORIGIN_F;
 			break;
 		case GET_DWORD('s', 'e', 'c', '-'): /* Sec-* */
 			if (hf->name.len < HDR_LEN("Sec-Websocket-*") ||
@@ -912,10 +919,17 @@ static int ws_parse_req_handshake(struct tcp_connection *c, char *msg, int len)
 
 				str_trim_spaces_lr(hf->body);
 
-				/* the key is already in the buffer, so we can just copy it */
-				WS_KEY(c) = hf->body;
-
-				flags |= WS_KEY_F;
+				/* RFC-6455 4.1: Opening Handshake: Client Requirements
+				 * 7.  The request MUST include a header field with the name
+				 *     |Sec-WebSocket-Key|.  The value of this header field MUST be a
+				 *     nonce consisting of a randomly selected 16-byte value that has
+				 *     been base64-encoded (see Section 4 of [RFC4648]).  The nonce
+				 *     MUST be selected randomly for each connection. */
+				if (hf->body.len == WS_KEY_LEN) {
+					/* the key is already in the buffer, so we can just copy it */
+					WS_KEY(c) = hf->body;
+					flags |= WS_KEY_F;
+				}
 			} else if (hf->name.len == HDR_LEN("Sec-WebSocket-Version") &&
 					GET_LOWER(hf->name.s + 14) == 'v' &&
 					GET_LOWER(hf->name.s + 15) == 'e' &&
@@ -964,10 +978,11 @@ static int ws_parse_req_handshake(struct tcp_connection *c, char *msg, int len)
 			LM_ERR("Upgrade header not present!\n");
 		if (flags & WS_CONN_F)
 			LM_ERR("Connection header not present!\n");
-		if (flags & WS_ORIGIN_F)
+		if (_ws_common_require_origin && (flags & WS_ORIGIN_F))
 			LM_ERR("Origin header not present!\n");
 		if (flags & WS_KEY_F)
-			LM_ERR("Sec-WebSocket-Key header not present!\n");
+			LM_ERR("Sec-WebSocket-Key header not present or does not "
+					"have the desired length (%d)!\n", WS_KEY_LEN);
 		if (flags & WS_VER_F)
 			LM_ERR("Sec-WebSocket-Version header not present!\n");
 		if (flags & WS_PROTO_F)
@@ -1278,8 +1293,8 @@ static int ws_start_handshake(struct tcp_connection *c)
 	reset_tcp_vars(tcpthreshold);
 	start_expire_timer(get, tcpthreshold);
 
-	ip = ip_addr2a(&c->rcv.dst_ip);
-	port = int2str(c->rcv.dst_port, &port_len);
+	ip = ip_addr2a(&c->rcv.src_ip);
+	port = int2str(c->rcv.src_port, &port_len);
 	n = strlen(ip);
 	memcpy(host_orig_buf, ip, n);
 	host_orig_buf[n] = ':';

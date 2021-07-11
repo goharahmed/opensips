@@ -26,17 +26,24 @@
 
 #include "../../parser/msg_parser.h"
 
+#define QOP_TYPE_AUTH      QOP_AUTH_D
+#define QOP_TYPE_AUTH_INT  QOP_AUTHINT_D
+#define QOP_TYPE_BOTH      (QOP_AUTH_D + QOP_AUTHINT_D)
+
+int fixup_qop(void** param);
 
 /*
  * Challenge a user agent using WWW-Authenticate header field
  */
-int www_challenge(struct sip_msg* _msg, char* _realm, char* _str2);
+int www_challenge(struct sip_msg* _msg, str* _realm, void* _qop,
+    intptr_t alg_flgs);
 
 
 /*
  * Challenge a user agent using Proxy-Authenticate header field
  */
-int proxy_challenge(struct sip_msg* _msg, char* _realm, char* _str2);
+int proxy_challenge(struct sip_msg* _msg, str* _realm, void* _qop,
+    intptr_t alg_flgs);
 
 
 /*

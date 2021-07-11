@@ -62,7 +62,7 @@ static inline void run_resume_route( int resume_route, struct sip_msg *msg,
 {
 	/* run the resume route and if it ends the msg handling (no other aysnc
 	 * started), run the post script callbacks. */
-	if ( (run_top_route(rlist[resume_route].a, msg) & ACT_FL_TBCONT) == 0 )
+	if ( (run_top_route(sroutes->request[resume_route], msg) & ACT_FL_TBCONT) == 0 )
 		if (run_post_cb)
 			exec_post_req_cb(msg);
 }
@@ -70,7 +70,7 @@ static inline void run_resume_route( int resume_route, struct sip_msg *msg,
 
 /* function triggered from reactor in order to continue the processing
  */
-int t_resume_async(int fd, void *param)
+int t_resume_async(int fd, void *param, int was_timeout)
 {
 	static struct sip_msg faked_req;
 	static struct ua_client uac;
@@ -93,14 +93,18 @@ int t_resume_async(int fd, void *param)
 		abort();
 	}
 
-	/* prepare for resume route */
+	/* prepare for resume route, by filling in a phony UAC structure to
+	 * trigger the inheritance of the branch specific values */
 	uac.br_flags = getb0flags( t->uas.request ) ;
 	uac.uri = *GET_RURI( t->uas.request );
+	uac.duri = t->uas.request->dst_uri;
+	uac.path_vec = t->uas.request->path_vec;
+	uac.adv_address = t->uas.request->set_global_address;
+	uac.adv_port = t->uas.request->set_global_port;
 	if (!fake_req( &faked_req /* the fake msg to be built*/,
 		t->uas.request, /* the template msg saved in transaction */
 		&t->uas, /*the UAS side of the transaction*/
-		&uac, /* the fake UAC */
-		1 /* copy dst_uri too */)
+		&uac /* the fake UAC */)
 	) {
 		LM_ERR("fake_req failed\n");
 		return 0;
@@ -125,8 +129,10 @@ int t_resume_async(int fd, void *param)
 
 	async_status = ASYNC_DONE; /* assume default status as done */
 	/* call the resume function in order to read and handle data */
-	return_code = ((async_resume_module*)(ctx->async.resume_f))
-		( (valid_async_fd(fd) ? fd: ASYNC_FD_NONE), &faked_req, ctx->async.resume_param );
+	return_code = ((async_resume_module*)
+		(was_timeout ? ctx->async.timeout_f : ctx->async.resume_f))
+		( (valid_async_fd(fd) ? fd: ASYNC_FD_NONE), &faked_req,
+		ctx->async.resume_param );
 	if (async_status==ASYNC_CONTINUE) {
 		/* do not run the resume route */
 		goto restore;
@@ -207,7 +213,8 @@ restore:
 }
 
 
-int t_handle_async(struct sip_msg *msg, struct action* a , int resume_route)
+int t_handle_async(struct sip_msg *msg, struct action* a , int resume_route,
+										unsigned int timeout, void **params)
 {
 	async_tm_ctx *ctx = NULL;
 	struct cell *t;
@@ -253,9 +260,9 @@ int t_handle_async(struct sip_msg *msg, struct action* a , int resume_route)
 	async_status = ASYNC_NO_IO; /*assume default status "no IO done" */
 	return_code = ((acmd_export_t*)(a->elem[0].u.data))->function(msg,
 			(async_ctx*)ctx,
-			(char*)a->elem[1].u.data, (char*)a->elem[2].u.data,
-			(char*)a->elem[3].u.data, (char*)a->elem[4].u.data,
-			(char*)a->elem[5].u.data, (char*)a->elem[6].u.data );
+			params[0], params[1], params[2],
+			params[3], params[4], params[5],
+			params[6], params[7]);
 	/* what to do now ? */
 	if (async_status>=0) {
 		/* async I/O was successfully launched */
@@ -299,7 +306,7 @@ int t_handle_async(struct sip_msg *msg, struct action* a , int resume_route)
 	}
 
 	if (route_type!=REQUEST_ROUTE) {
-		LM_DBG("async detected in non-request route, switching to sync\n");
+		LM_WARN("async detected in non-request route, switching to sync\n");
 		goto sync;
 	}
 
@@ -318,9 +325,17 @@ int t_handle_async(struct sip_msg *msg, struct action* a , int resume_route)
 	reset_e2eack_t();
 
 	if (async_status!=ASYNC_NO_FD) {
-		LM_DBG("placing async job into reactor\n");
+		/* check if timeout should be used */
+		if (timeout && ctx->async.timeout_f==NULL) {
+			timeout = 0;
+			LM_ERR("this async function has no support for timeouts -- "
+			       "still using an infinite timeout!\n");
+		}
+
+		LM_DBG("placing async job into reactor with timeout %d\n", timeout);
 		/* place the FD + resume function (as param) into reactor */
-		if (reactor_add_reader(fd,F_SCRIPT_ASYNC,RCT_PRIO_ASYNC,(void*)ctx)<0){
+		if (reactor_add_reader_with_timeout( fd, F_SCRIPT_ASYNC,
+		RCT_PRIO_ASYNC, timeout, (void*)ctx)<0) {
 			LM_ERR("failed to add async FD to reactor -> act in sync mode\n");
 		 	/* as attaching to reactor failed, we have to run in sync mode,
 			 * so we have to restore the environment -- razvanc */
@@ -343,6 +358,8 @@ sync:
 			( fd, msg, ctx->async.resume_param );
 		if (async_status == ASYNC_CHANGE_FD)
 			fd = return_code;
+		if (async_status == ASYNC_DONE_CLOSE_FD)
+			close(fd);
 	} while(async_status==ASYNC_CONTINUE||async_status==ASYNC_CHANGE_FD);
 	/* get rid of the context, useless at this point further */
 	shm_free(ctx);

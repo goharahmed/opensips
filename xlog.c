@@ -31,6 +31,7 @@
 #include "sr_module.h"
 #include "dprint.h"
 #include "error.h"
+#include "socket_info.h"
 #include "mem/mem.h"
 #include "xlog.h"
 
@@ -168,9 +169,10 @@ static inline void add_xlog_data(trace_message message, void* param)
 {
 	str str_level;
 	xl_trace_t* xtrace_param = param;
+	static str sip_str = str_init("sip");
 
 
-	switch (xlog_print_level) {
+	switch (*xlog_level) {
 		case L_ALERT:
 			str_level.s = DP_ALERT_TEXT; break;
 		case L_CRIT:
@@ -202,16 +204,15 @@ static inline void add_xlog_data(trace_message message, void* param)
 
 	tprot.add_payload_part( message, "text", &xtrace_param->buf);
 
-	tprot.add_extra_correlation( message, "sip", &xtrace_param->msg->callid->body );
+	tprot.add_extra_correlation( message, &sip_str, &xtrace_param->msg->callid->body );
 }
 
 static inline int trace_xlog(struct sip_msg* msg, char* buf, int len)
 {
 	struct modify_trace mod_p;
-
 	xl_trace_t xtrace_param;
-
-	const int proto = IPPROTO_TCP;
+	str correlation_str;
+	union sockaddr_union su;
 
 	if (msg == NULL || buf == NULL) {
 		LM_ERR("bad input!\n");
@@ -230,8 +231,24 @@ static inline int trace_xlog(struct sip_msg* msg, char* buf, int len)
 
 	mod_p.param = &xtrace_param;
 
-	if (sip_context_trace(xlog_proto_id, 0, 0,
-				0, proto, &msg->callid->body, &mod_p) < 0) {
+	if (msg->callid && msg->callid->body.len) {
+		correlation_str = msg->callid->body;
+	} else {
+		correlation_str.s = "<null>";
+		correlation_str.len = 6;
+	}
+
+	if (msg->rcv.bind_address && msg->rcv.bind_address->port_no)
+		/* coverity[check_return] - CID #211391 */
+		init_su( &su, &msg->rcv.bind_address->address,
+			msg->rcv.bind_address->port_no);
+	else
+		su.s.sa_family = 0;
+
+	if (sip_context_trace(xlog_proto_id,
+	su.s.sa_family ? &su : NULL /*src*/, su.s.sa_family ? &su : NULL /*dst*/,
+	0, IPPROTO_TCP,
+	&correlation_str, &mod_p) < 0) {
 		LM_ERR("failed to trace xlog message!\n");
 		return -1;
 	}
@@ -260,7 +277,7 @@ int xlog_2(struct sip_msg* msg, char* lev, char* frm)
 	xl_level_p xlp;
 	pv_value_t value;
 
-	xlp = (xl_level_p)lev;
+	xlp = (xl_level_t*)(void*)lev;
 	if(xlp->type==1)
 	{
 		if(pv_get_spec_value(msg, &xlp->v.sp, &value)!=0
@@ -279,7 +296,7 @@ int xlog_2(struct sip_msg* msg, char* lev, char* frm)
 
 	log_len = xlog_buf_size;
 
-	ret = xl_print_log(msg, (pv_elem_t*)frm, &log_len);
+	ret = xl_print_log(msg, (pv_elem_t*)(void*)frm, &log_len);
 	if (ret == -1) {
 		LM_ERR("global print buffer too small, increase 'xlog_buf_size'\n");
 		return -1;
@@ -297,16 +314,18 @@ int xlog_2(struct sip_msg* msg, char* lev, char* frm)
 }
 
 
-int xlog_1(struct sip_msg* msg, char* frm, char* str2)
+int xlog_1(struct sip_msg* msg, char* frm)
 {
 	int log_len, ret;
+	pv_elem_t _frm;
 
 	if(!is_xlog_printable(xlog_print_level))
 		return 1;
 
 	log_len = xlog_buf_size;
 
-	ret = xl_print_log(msg, (pv_elem_t*)frm, &log_len);
+	memcpy(&_frm, frm, sizeof(pv_elem_t));
+	ret = xl_print_log(msg, &_frm, &log_len);
 	if (ret == -1) {
 		LM_ERR("global print buffer too small, increase 'xlog_buf_size'\n");
 		return -1;
@@ -325,16 +344,18 @@ int xlog_1(struct sip_msg* msg, char* frm, char* str2)
 
 /**
  */
-int xdbg(struct sip_msg* msg, char* frm, char* str2)
+int xdbg(struct sip_msg* msg, char* frm)
 {
 	int log_len, ret;
+	pv_elem_t _frm;
 
 	if(!is_xlog_printable(L_DBG))
 		return 1;
 
 	log_len = xlog_buf_size;
 
-	ret = xl_print_log(msg, (pv_elem_t*)frm, &log_len);
+	memcpy(&_frm, frm, sizeof(pv_elem_t));
+	ret = xl_print_log(msg, &_frm, &log_len);
 	if (ret == -1) {
 		LM_ERR("global print buffer too small, increase 'xlog_buf_size'\n");
 		return -1;
@@ -351,7 +372,7 @@ int xdbg(struct sip_msg* msg, char* frm, char* str2)
 	return ret;
 }
 
-int pv_parse_color_name(pv_spec_p sp, str *in)
+int pv_parse_color_name(pv_spec_p sp, const str *in)
 {
 
 	if(in==NULL || in->s==NULL || sp==NULL)

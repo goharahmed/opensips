@@ -20,7 +20,7 @@ usrloc Module
 
         1.5. Exported Parameters
 
-              1.5.1. nat_bflag (string/integer)
+              1.5.1. nat_bflag (string)
               1.5.2. contact_id_column (string)
               1.5.3. user_column (string)
               1.5.4. domain_column (string)
@@ -60,6 +60,7 @@ usrloc Module
               1.5.38. latency_event_min_us_delta (integer)
               1.5.39. pinging_mode (string)
               1.5.40. mi_dump_kv_store (integer)
+              1.5.41. contact_refresh_timer (boolean)
 
         1.6. Exported Functions
         1.7. Exported MI Functions
@@ -87,7 +88,8 @@ usrloc Module
               1.9.3. E_UL_CONTACT_INSERT
               1.9.4. E_UL_CONTACT_DELETE
               1.9.5. E_UL_CONTACT_UPDATE
-              1.9.6. E_UL_LATENCY_UPDATE
+              1.9.6. E_UL_CONTACT_REFRESH
+              1.9.7. E_UL_LATENCY_UPDATE
 
    2. Developer Guide
 
@@ -185,6 +187,7 @@ usrloc Module
    1.38. Set latency_event_min_us_delta parameter
    1.39. Set pinging_mode parameter
    1.40. Set mi_dump_kv_store parameter
+   1.41. Set contact_refresh_timer parameter
 
 Chapter 1. Admin Guide
 
@@ -234,19 +237,19 @@ Chapter 1. Admin Guide
    only publish some light "metadata" entries for any new
    Addresses-of-Record which are reachable from them. These
    entries will cause other nodes to also fork additional SIP
-   branches pointing to the above-mentioned registrar upon
-   receiving a call for the above-mentioned Addresses-of-Record.
+   branches pointing to the publisher registrar upon receiving
+   calls for its advertised Addresses-of-Record.
 
    The federation topology is an optimized solution for the
    following core problems:
-     * IP restrictions - In some cases, calls routed towards
-       registered contacts must necessarily egress through the
-       original registration nodes of these contacts. A classic
-       example of this situation is when an OpenSIPS registrar
-       sitting at the edge of the platform is directly facing a
-       NAT device on the way to the contact. Unless calls are sent
-       out from this exact registrar, they will not be able to
-       traverse the NAT device and reach the contact.
+     * IP address restrictions - In some cases, calls routed
+       towards registered contacts must necessarily pass through
+       the original registration nodes of these contacts. A
+       classic example of this situation is when an OpenSIPS
+       registrar sitting at the edge of the platform is directly
+       facing a NAT device on the way to the contact. Unless calls
+       are sent out from this exact registrar, they will not be
+       able to traverse the NAT device and reach the contact.
      * horizontal scalability - Avoiding global
        replication/contact broadcasting within the cluster not
        only dramatically improves contact storage performance, but
@@ -260,8 +263,6 @@ Chapter 1. Admin Guide
    databases which support key/multi-value column-like
    associations. Example known backends to support these
    abstractions at the time of writing are MongoDB and Cassandra.
-   Of these two, only the MongoDB OpenSIPS driver has been so far
-   extended to implement the required NoSQL API endpoints.
 
    The federated user location tutorial contains precise details
    on how to achieve this setup (including High Availability
@@ -294,13 +295,10 @@ Chapter 1. Admin Guide
    active-passive registrar nodes configuration, both of which
    make use of a shared virtual IP.
 
-   Currently, registrations may optionally be fully managed inside
-   NoSQL databases which support key/multi-value column-like
-   associations. Example known backends to support these
-   abstractions are MongoDB and Apache Cassandra. In OpenSIPS 2.4,
-   the MongoDB OpenSIPS driver is the only cache DB driver to
-   implement the required capabilities. The equivalent support for
-   Apache Cassandra 3.x was added for the 3.0 OpenSIPS release.
+   Registrations may optionally be fully managed inside NoSQL
+   databases which support key/multi-value column-like
+   associations. Example known backends to currently support these
+   abstractions are MongoDB and Apache Cassandra.
 
    The "full sharing" user location tutorial contains precise
    details on how to achieve this setup (including full NoSQL
@@ -374,15 +372,14 @@ Chapter 1. Admin Guide
 
 1.5. Exported Parameters
 
-1.5.1. nat_bflag (string/integer)
+1.5.1. nat_bflag (string)
 
    The name of the branch flag to be used as NAT marker (if the
    contact is or not natted). This is a branch flag and it will be
-   imported and used by all other modules depending of usrloc
+   imported and used by all other modules depending on the usrloc
    module.
 
-   WARNING: Setting INT flags is deprecated! Use quoted strings
-   instead! Default value is “NULL” (not set).
+   Default value is NULL (not set).
 
    Example 1.1. Set nat_bflag parameter
 ...
@@ -618,15 +615,17 @@ modparam("usrloc", "desc_time_order", 1)
 
 1.5.22. timer_interval (integer)
 
-   Number of seconds between two timer runs. The module uses timer
-   to delete expired contacts, synchronize with database and other
-   tasks, that need to be run periodically.
+   Number of seconds between two timer runs. During each run, the
+   module will update/delete dirty/expired contacts from memory
+   and/or mirror these operations to the database, if configured
+   to do so.
 
 Warning
 
-   In case of crash or restart contacts that are in memory only
-   and haven't been flushed yet will get lost. If you want
-   minimize the risk, use a shorter timer interval.
+   In case of an OpenSIPS shutdown or even a crash, contacts which
+   are in memory only and have not been flushed yet to disk will
+   NOT get lost! OpenSIPS will try its best to do a last-minute
+   sync to DB right before shutting down.
 
    Default value is 60.
 
@@ -703,9 +702,10 @@ modparam("usrloc", "db_mode", 2)
        all modified or new contacts to database. Use this scheme
        if you encounter high-load peaks and want them to process
        as fast as possible. The mode will not help at all if the
-       load is high all the time. Also, latency of this mode is
-       much lower than latency of mode 1, but slightly higher than
-       latency of mode 0.
+       load is high all the time. The added latency on the SIP
+       signaling when using this asynchronous preset is much lower
+       than the one added by the safe but blocking,
+       "single-instance-sql-write-through" preset.
      * "sql-only" - DB-Only scheme. No memory cache is kept, all
        operations being directly performed with the database. The
        timer deletes all expired contacts from database - cleans
@@ -757,21 +757,21 @@ modparam("usrloc", "working_mode_preset", "full-sharing-cachedb-cluster"
        cluster nodes can fork SIP traffic over to the current
        node. Consequently, the location_cluster and cachedb_url
        parameters are mandatory.
-     * "full-sharing" - Full contact data broadcasting (mirroring)
-       to all other OpenSIPS cluster participants. inside a NoSQL
-       database, so other cluster nodes are able to route SIP
-       traffic through the current node. Consequently, the
-       location_cluster parameter is mandatory.
+     * "full-sharing" - Broadcast contact updates (full-mesh
+       mirroring) to all other OpenSIPS cluster participants. Each
+       node will hold the entire user location dataset.
+       Consequently, the location_cluster parameter is mandatory.
      * "full-sharing-cachedb" - Full contact data management
        through the use of a NoSQL database (somewhat resembling
        the "sql-only" preset). The cluster layer is still required
        in order to be able to partition and spread the pinging
        workload evenly among participating OpenSIPS nodes.
-       Consequently, the location_cluster parameter is mandatory.
+       Consequently, the location_cluster and cachedb_url
+       parameters are mandatory.
      * "sql-only" - Multiple OpenSIPS boxes using a common db_url
        without necessarily being aware of each other.
 
-   Default value is none (single instance mode).
+   Default value is "none" (single instance mode).
 
    Example 1.27. Set cluster_mode parameter
 ...
@@ -1005,7 +1005,7 @@ modparam("usrloc", "latency_event_min_us_delta", 300000)
 
 1.5.39. pinging_mode (string)
 
-   Depending on the cluster_mode, the module will perform contact
+   Depending on the cluster_mode, the module can perform contact
    pinging using one of at most two possible heuristics:
      * "ownership" - this instance will only attempt to ping a
        contact if it decides it is the logical owner of the
@@ -1058,6 +1058,21 @@ modparam("usrloc", "pinging_mode", "ownership")
 modparam("usrloc", "mi_dump_kv_store", 1)
 ...
 
+1.5.41. contact_refresh_timer (boolean)
+
+   Enable a timer which will periodically scan a sorted list of
+   contacts and raise the E_UL_CONTACT_REFRESH for any of them
+   which are past their re-registration time interval limit. This
+   limit may given by registrar's pn_trigger_interval module
+   parameter, for example.
+
+   Default value is “false (disabled)”.
+
+   Example 1.41. Set contact_refresh_timer parameter
+...
+modparam("usrloc", "contact_refresh_timer", true)
+...
+
 1.6. Exported Functions
 
    There are no exported functions that could be used in scripts.
@@ -1096,7 +1111,9 @@ modparam("usrloc", "mi_dump_kv_store", 1)
 
 1.7.4.  ul_flush
 
-   Triggers the flush of USRLOC memory cache into DB.
+   Force a flush of all pending usrloc cache changes to the
+   database. Normally, this routine runs every timer_interval
+   seconds.
 
 1.7.5.  ul_add
 
@@ -1126,17 +1143,18 @@ modparam("usrloc", "mi_dump_kv_store", 1)
 
 1.7.7.  ul_sync
 
-   Synchronizes the contacts from memory with the ones from
-   database. Note that this can not be used when no database is
-   specified or with the DB-Only scheme. Important: make sure that
-   all your contacts are in memory (ul_dump MI function) before
-   executing this command. If the AOR is not specified, the whole
-   table will be synchronized.
+   Empty the location table, then synchronize it with all contacts
+   from memory. Note that this can not be used when no database is
+   specified or with the DB-Only scheme.
+
+   Important: make sure that all your contacts are in memory
+   (ul_dump MI function) before executing this command.
 
    Parameters:
      * table name - table where the AOR resides (Ex: location).
-     * AOR (optional) - user AOR in username[@domain] format
-       (domain must be supplied only if use_domain option is on).
+     * AOR (optional) - only delete/sync this user AOR, not the
+       whole table. Format: "username[@domain]" (domain is
+       required only if use_domain option is on).
 
 1.7.8.  ul_cluster_sync
 
@@ -1186,6 +1204,7 @@ modparam("usrloc", "mi_dump_kv_store", 1)
    memory cache.
 
    Parameters:
+     * domain - The name of the table.
      * aor - The AOR of the inserted record.
 
 1.9.2.  E_UL_AOR_DELETE
@@ -1194,6 +1213,7 @@ modparam("usrloc", "mi_dump_kv_store", 1)
    memory cache.
 
    Parameters:
+     * domain - The name of the table.
      * aor - The AOR of the deleted record.
 
 1.9.3.  E_UL_CONTACT_INSERT
@@ -1204,6 +1224,7 @@ modparam("usrloc", "mi_dump_kv_store", 1)
    and E_UL_CONTACT_INSERT events will be raised.
 
    Parameters:
+     * domain - The name of the table.
      * aor - The AOR of the inserted contact.
      * uri - The contact URI of the inserted contact.
      * received - IP, port and protocol the registration message
@@ -1214,6 +1235,8 @@ modparam("usrloc", "mi_dump_kv_store", 1)
        message.(empty string if not present)
      * qval - The Q value (priority) of the contact (as integer
        value from 0 to 10).
+     * user_agent - The User-Agent header value.
+       NOTICE: Can contain spaces.
      * socket - The SIP socket/listener (as string) used by
        OpenSIPS to receive the contact registations.
      * bflags - The branch flags (bflags) of the contact (in
@@ -1233,8 +1256,8 @@ modparam("usrloc", "mi_dump_kv_store", 1)
        determine if the current node owns the contact (e.g.
        possibly using the $cluster.sh_tag pseudo-variable in order
        to perform the check).
-       NOTICE: If a contact has no shared tag attached to it, this
-       key will map to a "" (empty string) value!
+       NOTICE: If a contact has no shared tag attached to it, the
+       value of this parameter will be "" (empty string)!
 
 1.9.4.  E_UL_CONTACT_DELETE
 
@@ -1252,7 +1275,60 @@ modparam("usrloc", "mi_dump_kv_store", 1)
 
    Parameters: same as the E_UL_CONTACT_INSERT event
 
-1.9.6.  E_UL_LATENCY_UPDATE
+1.9.6.  E_UL_CONTACT_REFRESH
+
+   This event may only be raised for RFC 8599 (Push Notification)
+   enabled contacts.
+
+   Set contact_refresh_timer to true in order to enable this
+   event. The event is raised within reasonable time before an RFC
+   8599 enabled contact will expire, such that the script writer
+   can take action, possibly force a registration refresh from the
+   endpoint.
+
+   Parameters:
+     * domain - The name of the table.
+     * aor - The AOR of the inserted contact.
+     * uri - The contact URI of the inserted contact.
+     * received - IP, port and protocol the registration message
+       was received from. If these have the same value as the
+       contact's address (see the address parameter) then the
+       received parameter will be an empty string.
+     * user_agent - The User-Agent header value.
+       NOTICE: Can contain spaces.
+     * socket - The SIP socket/listener (as string) used by
+       OpenSIPS to receive the contact registations.
+     * bflags - The branch flags (bflags) of the contact (in
+       integer value of the bitmask)
+     * expires - The expires value of the contact (as UNIX
+       timestamp integer).
+     * callid - The Call-ID header of the registration message.
+     * attr - The attributes string attached to the contact (the
+       custom attributes attached from the script level). As this
+       string is options, if missing in the contact, the event
+       will push the empty string for this event field.
+     * shtag - The shared tag of the contact, which helps
+       determine if the current node owns the contact (e.g.
+       possibly using the $cluster.sh_tag pseudo-variable in order
+       to perform the check).
+     * reason - the reason why the binding refresh event was
+       triggered. Possible values:
+          + "reg-refresh" - periodic refresh triggered by OpenSIPS
+          + "ini-INVITE", "ini-SUBSCRIBE", etc. - a refresh
+            triggered by an incoming initial SIP request
+          + "mid-INVITE", "mid-BYE", etc. - a refresh triggered by
+            an incoming mid-dialog SIP request
+     * req_callid - the Call-ID of the SIP request which triggered
+       this event, if any. This gives the ability to logically
+       link the pending request with the current event and access
+       useful data from that request (e.g. caller identity, dialed
+       number, etc.).
+       Using the req_callid, if a dialog has been created for the
+       pending request, this dialog may be temporarily loaded
+       inside the event_route using the load_dialog_ctx() and
+       unload_dialog_ctx() functions of the dialog module.
+
+1.9.7.  E_UL_LATENCY_UPDATE
 
    This event is raised when a contact pinging latency matches
    either of the latency_event_min_us or
@@ -1500,27 +1576,30 @@ Chapter 3. Contributors
    Table 3.1. Top contributors by DevScore^(1), authored
    commits^(2) and lines added/removed^(3)
      Name DevScore Commits Lines ++ Lines --
-   1. Jan Janak (@janakj) 421 117 15689 10095
-   2. Bogdan-Andrei Iancu (@bogdan-iancu) 231 136 3963 3497
-   3. Liviu Chircu (@liviuchircu) 218 135 6081 1947
-   4. Ionut Ionita (@ionutrazvanionita) 41 24 1099 413
-   5. Daniel-Constantin Mierla (@miconda) 40 29 544 308
-   6. Jiri Kuthan (@jiriatipteldotorg) 36 25 975 120
-   7. Vlad Patrascu (@rvlad-patrascu) 35 17 761 619
-   8. Razvan Crainea (@razvancrainea) 22 17 372 107
-   9. Henning Westerholt (@henningw) 22 11 462 356
+   1. Jan Janak (@janakj) 410 117 15689 10095
+   2. Liviu Chircu (@liviuchircu) 323 190 8922 3624
+   3. Bogdan-Andrei Iancu (@bogdan-iancu) 242 148 4208 3614
+   4. Daniel-Constantin Mierla (@miconda) 40 29 544 308
+   5. Ionut Ionita (@ionutrazvanionita) 40 24 1099 413
+   6. Vlad Patrascu (@rvlad-patrascu) 40 22 787 651
+   7. Jiri Kuthan (@jiriatipteldotorg) 35 25 975 120
+   8. Razvan Crainea (@razvancrainea) 28 22 380 121
+   9. Henning Westerholt (@henningw) 21 11 462 356
    10. Andrei Pelinescu-Onciul 17 13 151 91
 
-   All remaining contributors: Vlad Paiu (@vladpaiu), Nils
-   Ohlmeier, Eseanu Marius Cristian (@eseanucristian), Ovidiu Sas
-   (@ovidiusas), Ionel Cerghit (@ionel-cerghit), Maksym Sobolyev
-   (@sobomax), Andrei Dragus, Dusan Klinec, Andrei Datcu
-   (@andrei-datcu), Juha Heinanen (@juha-h), Anca Vamanu, Marcus
-   Hunger, Jamey Hicks, Andreas Granig, Shlomi Gutman, @jalung,
-   Jeffrey Magder, Phil D'Amore, Norman Brandinger (@NormB), David
+   All remaining contributors: Vlad Paiu (@vladpaiu), Maksym
+   Sobolyev (@sobomax), Nils Ohlmeier, Walter Doekes (@wdoekes),
+   Eseanu Marius Cristian (@eseanucristian), Ovidiu Sas
+   (@ovidiusas), Ionel Cerghit (@ionel-cerghit), Andrei Dragus,
+   Anca Vamanu, Alessio Garzi (@Ozzyboshi), Zero King (@l2dy),
+   Dusan Klinec (@ph4r05), Andrei Datcu (@andrei-datcu), Juha
+   Heinanen (@juha-h), Marcus Hunger, Jamey Hicks, Peter Lemenkov
+   (@lemenkov), Andreas Granig, Shlomi Gutman, @jalung, Jeffrey
+   Magder, Phil D'Amore, Norman Brandinger (@NormB), David
    Sanders, Konstantin Bokarius, Klaus Darilion, Iouri Kharon,
-   Matthew M. Boedicker, Peter Lemenkov (@lemenkov), UnixDev,
-   Edson Gellert Schubert, Elena-Ramona Modroiu, Stephane Alnet.
+   Aron Podrigal (@ar45), Dan Pascu (@danpascu), Matthew M.
+   Boedicker, UnixDev, Edson Gellert Schubert, Alexey Vasilyev
+   (@vasilevalex), Elena-Ramona Modroiu, Stephane Alnet.
 
    (1) DevScore = author_commits + author_lines_added /
    (project_lines_added / project_commits) + author_lines_deleted
@@ -1542,19 +1621,22 @@ Chapter 3. Contributors
 
    Table 3.2. Most recently active contributors^(1) to this module
                       Name                   Commit Activity
-   1.  Razvan Crainea (@razvancrainea)     Jul 2011 - Mar 2019
-   2.  Vlad Patrascu (@rvlad-patrascu)     Jul 2016 - Feb 2019
-   3.  Bogdan-Andrei Iancu (@bogdan-iancu) Mar 2002 - Jan 2019
-   4.  Liviu Chircu (@liviuchircu)         Jan 2013 - Jan 2019
-   5.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
-   6.  Shlomi Gutman                       Mar 2018 - Mar 2018
-   7.  @jalung                             Aug 2017 - Aug 2017
-   8.  Vlad Paiu (@vladpaiu)               Jun 2011 - Jul 2017
-   9.  Ionut Ionita (@ionutrazvanionita)   Jul 2015 - Apr 2017
-   10. Ionel Cerghit (@ionel-cerghit)      Jul 2015 - Dec 2016
+   1.  Walter Doekes (@wdoekes)            Apr 2019 - May 2021
+   2.  Liviu Chircu (@liviuchircu)         Jan 2013 - Feb 2021
+   3.  Maksym Sobolyev (@sobomax)          Apr 2003 - Feb 2021
+   4.  Vlad Patrascu (@rvlad-patrascu)     Jul 2016 - May 2020
+   5.  Bogdan-Andrei Iancu (@bogdan-iancu) Mar 2002 - May 2020
+   6.  Zero King (@l2dy)                   Mar 2020 - Mar 2020
+   7.  Peter Lemenkov (@lemenkov)          Jun 2018 - Feb 2020
+   8.  Alexey Vasilyev (@vasilevalex)      Dec 2019 - Dec 2019
+   9.  Razvan Crainea (@razvancrainea)     Jul 2011 - Sep 2019
+   10. Aron Podrigal (@ar45)               Aug 2019 - Aug 2019
 
-   All remaining contributors: Ovidiu Sas (@ovidiusas), Dusan
-   Klinec, Eseanu Marius Cristian (@eseanucristian), David
+   All remaining contributors: Alessio Garzi (@Ozzyboshi), Dan
+   Pascu (@danpascu), Shlomi Gutman, @jalung, Vlad Paiu
+   (@vladpaiu), Ionut Ionita (@ionutrazvanionita), Ionel Cerghit
+   (@ionel-cerghit), Ovidiu Sas (@ovidiusas), Dusan Klinec
+   (@ph4r05), Eseanu Marius Cristian (@eseanucristian), David
    Sanders, Andrei Datcu (@andrei-datcu), Stephane Alnet, Andrei
    Dragus, Phil D'Amore, UnixDev, Daniel-Constantin Mierla
    (@miconda), Henning Westerholt (@henningw), Iouri Kharon,
@@ -1563,7 +1645,7 @@ Chapter 3. Contributors
    Jeffrey Magder, Norman Brandinger (@NormB), Andreas Granig,
    Juha Heinanen (@juha-h), Klaus Darilion, Jan Janak (@janakj),
    Andrei Pelinescu-Onciul, Jiri Kuthan (@jiriatipteldotorg),
-   Maksym Sobolyev (@sobomax), Jamey Hicks, Nils Ohlmeier.
+   Jamey Hicks, Nils Ohlmeier.
 
    (1) including any documentation-related commits, excluding
    merge commits
@@ -1572,7 +1654,8 @@ Chapter 4. Documentation
 
 4.1. Contributors
 
-   Last edited by: Liviu Chircu (@liviuchircu), Vlad Patrascu
+   Last edited by: Liviu Chircu (@liviuchircu), Zero King (@l2dy),
+   Alexey Vasilyev (@vasilevalex), Vlad Patrascu
    (@rvlad-patrascu), Peter Lemenkov (@lemenkov), Bogdan-Andrei
    Iancu (@bogdan-iancu), Razvan Crainea (@razvancrainea), Ionut
    Ionita (@ionutrazvanionita), Eseanu Marius Cristian

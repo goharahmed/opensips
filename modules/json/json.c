@@ -103,31 +103,30 @@ char buff[JSON_FILE_BUF_SIZE];
 static int mod_init(void);
 static int child_init(int );
 static void mod_destroy(void);
-static int fixup_json_bind(void**, int );
+static int fixup_json_bind(void**);
 static int pv_set_json (struct sip_msg*,  pv_param_t*, int , pv_value_t* );
 static int pv_get_json (struct sip_msg*,  pv_param_t*, pv_value_t* );
 static int pv_get_json_compact(struct sip_msg*,  pv_param_t*, pv_value_t* );
 static int pv_get_json_pretty(struct sip_msg*,  pv_param_t*, pv_value_t* );
 static int pv_get_json_ext(struct sip_msg*,  pv_param_t*, pv_value_t* , int flags);
-static int json_bind(struct sip_msg* , char* , char* );
+static int json_bind(struct sip_msg* , pv_spec_t* , pv_spec_t* );
 static void print_tag_list( json_tag *, json_tag *, int);
 static json_t *get_object(pv_json_t *, pv_param_t *, json_tag **, int, int);
-static int pv_parse_json_name (pv_spec_p , str *);
-static int pv_parse_json_index(pv_spec_p sp, str *in);
+static int pv_parse_json_name (pv_spec_p, const str *);
+static int pv_parse_json_index(pv_spec_p sp, const str *in);
 static pv_json_t * get_pv_json (pv_param_t* );
 static int pv_add_json ( pv_param_t* , json_t * );
 static int expand_tag_list( struct sip_msg*, json_tag *);
 
 
-
 static cmd_export_t cmds[]={
-	{"json_link",    (cmd_function)json_bind,   2,
-		fixup_json_bind, 0,
+	{"json_link",    (cmd_function)json_bind, {
+		{CMD_PARAM_VAR, fixup_json_bind, 0},
+		{CMD_PARAM_VAR, fixup_json_bind, 0}, {0,0,0}},
 		REQUEST_ROUTE|ONREPLY_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|
 		LOCAL_ROUTE|STARTUP_ROUTE|TIMER_ROUTE|EVENT_ROUTE},
-	{0,0,0,0,0,0}
+	{0,0,{{0,0,0}},0}
 };
-
 
 static pv_export_t mod_items[] = {
 	{ {"json",  sizeof("json")-1},    PVT_JSON, pv_get_json,
@@ -144,6 +143,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	NULL,            /* OpenSIPS module dependencies */
 	cmds,            /* exported functions */
 	0,               /* exported async functions */
@@ -153,22 +153,21 @@ struct module_exports exports= {
 	mod_items,       /* exported pseudo-variables */
 	0,			 	 /* exported transformations */
 	0,               /* extra processes */
+	0,               /* module pre-initialization function */
 	mod_init,        /* module initialization function */
 	0,               /* reply processing function */
 	mod_destroy,
-	child_init       /* per-child init function */
+	child_init,      /* per-child init function */
+	0                /* reload confirm function */
 };
 
-int json_bind(struct sip_msg* msg, char* s1, char* s2)
+int json_bind(struct sip_msg* msg, pv_spec_t* dest, pv_spec_t* src)
 {
-	pv_spec_t * src, * dest;
 	pv_json_t * var ;
 	json_t * obj;
 	json_name * id ;
 	pv_param_t *pvp;
 
-	src  = (pv_spec_t *) s2;
-	dest = (pv_spec_t *) s1;
 	pvp = &src->pvp;
 
 	id = (json_name *) pvp->pvn.u.dname;
@@ -198,38 +197,15 @@ int json_bind(struct sip_msg* msg, char* s1, char* s2)
 	return 1;
 };
 
-int fixup_json_bind(void** param, int param_no)
+int fixup_json_bind(void** param)
 {
-		pv_spec_t * var;
-		char * ret;
-		str s;
-		s.s = *param;
-		s.len = strlen(s.s);
+	if(pv_type(((pv_spec_t*)*param)->type) != PVT_JSON)
+	{
+		LM_ERR("Parameter must be a json variable\n");
+		return -1;
+	}
 
-		var = (pv_spec_t *)pkg_malloc(sizeof(pv_spec_t));
-		if( var == NULL )
-		{
-			LM_ERR("Out of memory\n");
-			return -1;
-		}
-
-		ret = pv_parse_spec(&s,var);
-
-		if( ret == NULL )
-		{
-			LM_ERR("Parse error\n");
-			return -1;
-		}
-
-		if(pv_type(var->type) != PVT_JSON)
-		{
-			LM_ERR("Parameter no: %d must be a json variable\n",param_no);
-			return -1;
-		}
-
-		*param = var;
-
-		return 0;
+	return 0;
 }
 
 
@@ -677,7 +653,7 @@ int pv_set_json (struct sip_msg* msg,  pv_param_t* pvp, int flag ,
 	}
 	else
 	{
-		if( val->flags & PV_VAL_INT )
+		if( pvv_is_int(val))
 		{
 			obj = json_object_new_int(val->ri);
 		}
@@ -916,9 +892,9 @@ int get_value(int state, json_name * id, char *start, char * cur)
 
 			break;
 		case ST_ITER:
-			if (!str_strcmp(&keys_s, &in))
+			if (str_match(&keys_s, &in))
 				id->iter_type = ITER_KEYS;
-			else if (!str_strcmp(&values_s, &in))
+			else if (str_match(&values_s, &in))
 				id->iter_type = ITER_VALUES;
 			else {
 				LM_ERR("Bad iterator type\n");
@@ -980,7 +956,7 @@ void init_matrix(void)
 
 
 
-int pv_parse_json_name (pv_spec_p sp, str *in)
+int pv_parse_json_name (pv_spec_p sp, const str *in)
 {
 	json_name * id;
 	char * cur,* start;
@@ -1049,7 +1025,7 @@ int pv_parse_json_name (pv_spec_p sp, str *in)
 	return 0;
 }
 
-static int pv_parse_json_index(pv_spec_p sp, str *in)
+static int pv_parse_json_index(pv_spec_p sp, const str *in)
 {
 	if (in == NULL || in->s == NULL || sp == NULL)
 		return -1;

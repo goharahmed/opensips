@@ -8,21 +8,22 @@
 #   re-generating the scenario with different options.
 #
 # Please refer to the Core CookBook at:
-#      http://www.opensips.org/Resources/DocsCookbooks
+#      https://opensips.org/Resources/DocsCookbooks
 # for a explanation of possible statements, functions and parameters.
 #
 
 
 ####### Global Parameters #########
 
+/* uncomment the following lines to enable debugging */
+#debug_mode=yes
+
 log_level=3
+xlog_level=3
 log_stderror=no
 log_facility=LOG_LOCAL0
 
-children=4
-
-/* uncomment the following lines to enable debugging */
-#debug_mode=yes
+udp_workers=4
 
 /* uncomment the next line to enable the auto temporary blacklisting of 
    not available destinations (default disabled) */
@@ -32,14 +33,10 @@ children=4
    lookup failures (default disabled) */
 #dns_try_ipv6=yes
 
-/* comment the next line to enable the auto discovery of local aliases
-   based on reverse DNS on IPs */
-auto_aliases=no
 
-
-listen=udp:127.0.0.1:5060   # CUSTOMIZE ME
-ifelse(ENABLE_TCP, `yes', `listen=tcp:127.0.0.1:5060   # CUSTOMIZE ME',`')
-ifelse(ENABLE_TLS,`yes',`listen=tls:127.0.0.1:5061   # CUSTOMIZE ME',`')
+socket=udp:127.0.0.1:5060   # CUSTOMIZE ME
+ifelse(ENABLE_TCP, `yes', `socket=tcp:127.0.0.1:5060   # CUSTOMIZE ME',`')
+ifelse(ENABLE_TLS,`yes',`socket=tls:127.0.0.1:5061   # CUSTOMIZE ME',`')
 
 ifelse(USE_HTTP_MANAGEMENT_INTERFACE,`yes',`define(`HTTPD_NEEDED',`yes')', `')
 
@@ -103,7 +100,7 @@ loadmodule "acc.so"
 modparam("acc", "early_media", 0)
 modparam("acc", "report_cancels", 0)
 /* by default we do not adjust the direct of the sequential requests.
-   if you enable this parameter, be sure the enable "append_fromtag"
+   if you enable this parameter, be sure to enable "append_fromtag"
    in "rr" module */
 modparam("acc", "detect_direction", 0)
 ifelse(USE_DBACC,`yes',`modparam("acc", "db_url",
@@ -137,13 +134,14 @@ loadmodule "proto_udp.so"
 ifelse(ENABLE_TCP, `yes', `loadmodule "proto_tcp.so"' , `')
 ifelse(ENABLE_TLS, `yes', `loadmodule "proto_tls.so"
 loadmodule "tls_mgm.so"
-modparam("tls_mgm","verify_cert", "1")
-modparam("tls_mgm","require_cert", "0")
-modparam("tls_mgm","tls_method", "TLSv1")
-modparam("tls_mgm","certificate", "/usr/local/etc/opensips/tls/user/user-cert.pem")
-modparam("tls_mgm","private_key", "/usr/local/etc/opensips/tls/user/user-privkey.pem")
-modparam("tls_mgm","ca_list", "/usr/local/etc/opensips/tls/user/user-calist.pem")
-
+modparam("tls_mgm","server_domain", "default")
+modparam("tls_mgm","match_ip_address", "[default]*")
+modparam("tls_mgm","verify_cert", "[default]1")
+modparam("tls_mgm","require_cert", "[default]0")
+modparam("tls_mgm","tls_method", "[default]TLSv1")
+modparam("tls_mgm","certificate", "[default]/etc/opensips/tls/user/user-cert.pem")
+modparam("tls_mgm","private_key", "[default]/etc/opensips/tls/user/user-privkey.pem")
+modparam("tls_mgm","ca_list", "[default]/etc/opensips/tls/user/user-calist.pem")
 ' , `')
 
 ####### Routing Logic ########
@@ -152,18 +150,18 @@ modparam("tls_mgm","ca_list", "/usr/local/etc/opensips/tls/user/user-calist.pem"
 
 route{
 
-	if (!mf_process_maxfwd_header("10")) {
-		send_reply("483","Too Many Hops");
+	if (!mf_process_maxfwd_header(10)) {
+		send_reply(483,"Too Many Hops");
 		exit;
 	}
 
-	if ( check_source_address("1","$avp(trunk_attrs)") ) {
+	if ( check_source_address( 1, $avp(trunk_attrs)) ) {
 		# request comes from trunks
-		setflag(IS_TRUNK);
+		setflag("IS_TRUNK");
 	} else if ( is_from_gw() ) {
 		# request comes from GWs
 	} else {
-		send_reply("403","Forbidden");
+		send_reply(403,"Forbidden");
 		exit;
 	}
 
@@ -180,7 +178,7 @@ route{
 		if ( !loose_route() ) {
 			# we do record-routing for all our traffic, so we should not
 			# receive any sequential requests without Route hdr.
-			send_reply("404","Not here");
+			send_reply(404,"Not here");
 			exit;
 		}
 		ifelse(USE_DIALOG,`yes',`
@@ -205,9 +203,9 @@ route{
 
 	#### INITIAL REQUESTS
 
-	if ( !isflagset(IS_TRUNK) ) {
+	if ( !isflagset("IS_TRUNK") ) {
 		## accept new calls only from trunks
-		send_reply("403","Not from trunk");
+		send_reply(403,"Not from trunk");
 		exit;
 	}
 
@@ -217,13 +215,13 @@ route{
 			t_relay();
 		exit;
 	} else if (!is_method("INVITE")) {
-		send_reply("405","Method Not Allowed");
+		send_reply(405,"Method Not Allowed");
 		exit;
 	}
 
 	if ($rU==NULL) {
 		# request with no Username in RURI
-		send_reply("484","Address Incomplete");
+		send_reply(484,"Address Incomplete");
 		exit;
 	}
 
@@ -234,7 +232,7 @@ route{
 		xlog("L_ERR",
 			"Attempt to route with preloaded Route's [$fu/$tu/$ru/$ci]");
 		if (!is_method("ACK"))
-			send_reply("403","Preload Route denied");
+			send_reply(403,"Preload Route denied");
 		exit;
 	}
 
@@ -247,15 +245,15 @@ route{
 	ifelse(USE_DIALOG,`yes',`
 	# create dialog with timeout
 	if ( !create_dialog("B") ) {
-		send_reply("500","Internal Server Error");
+		send_reply(500,"Internal Server Error");
 		exit;
 	}
 
 	ifelse(DO_CALL_LIMITATION,`yes',`
 	if (is_avp_set("$avp(trunk_attrs)") && $avp(trunk_attrs)=~"^[0-9]+$") {
-		get_profile_size("trunkCalls","$si","$var(size)");
+		get_profile_size("trunkCalls","$si",$var(size));
 		if ( $(var(size){s.int}) >= $(avp(trunk_attrs){s.int}) ) {
-			send_reply("486","Busy Here");
+			send_reply(486,"Busy Here");
 			exit;
 		}
 	}
@@ -265,11 +263,11 @@ route{
 
 	ifelse(USE_DIALPLAN,`yes',`
 	# apply transformations from dialplan table
-	dp_translate("0","$rU/$rU");',`')
+	dp_translate( 0, "$rU", $rU);',`')
 
 	# route calls based on prefix
-	if ( !do_routing("1") ) {
-		send_reply("404","No Route found");
+	if ( !do_routing(1) ) {
+		send_reply(404,"No Route found");
 		exit;
 	}
 
@@ -302,7 +300,7 @@ failure_route[GW_FAILOVER] {
 			exit;
 		}
 		
-		send_reply("500","All GW are down");
+		send_reply(500,"All GW are down");
 	}
 }
 

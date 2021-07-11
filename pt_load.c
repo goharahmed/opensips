@@ -138,7 +138,8 @@ void pt_become_idle(void)
 #define SUM_UP_LOAD(_now, _pno, _TYPE, _ratio) \
 	do { \
 		/* check if the entire time window has the same status */ \
-		if ((_now-PT_LOAD(_pno).last_time) >= (_TYPE##_WINDOW_TIME)*(_ratio)) { \
+		if (((long long)_now-(long long)PT_LOAD(_pno).last_time) >= \
+				(_TYPE##_WINDOW_TIME)*(_ratio)){\
 			/* nothing recorded in the last time window */ \
 			used += PT_LOAD(_pno).is_busy?_TYPE##_WINDOW_TIME*_ratio:0; \
 		} else { \
@@ -154,7 +155,8 @@ void pt_become_idle(void)
 					_TYPE##_WINDOW_SIZE; \
 				/* the start is between [new,old], so no used recorded yet */ \
 				if (idx_start>=idx_old && idx_start<=idx_new) {\
-					return PT_LOAD(_pno).is_busy?_TYPE##_WINDOW_TIME*_ratio:0;\
+					used+= PT_LOAD(_pno).is_busy?_TYPE##_WINDOW_TIME*_ratio:0;\
+					break; \
 				}\
 			} else { \
 				idx_start = idx_new; \
@@ -251,6 +253,8 @@ unsigned int pt_get_rt_load(int _)
 			SUM_UP_LOAD( usec_now, n, ST, 1);
 			summed_procs++;
 		}
+	if (!summed_procs)
+		return 0;
 
 	return (used*100/(ST_WINDOW_TIME*summed_procs));
 }
@@ -273,8 +277,10 @@ unsigned int pt_get_1m_load(int _)
 			SUM_UP_LOAD( usec_now, n, LT, LT_1m_RATIO);
 			summed_procs++;
 		}
+	if (!summed_procs)
+		return 0;
 
-	return (used*100/(LT_WINDOW_TIME*summed_procs*LT_1m_RATIO));
+	return (used*100/((long long)LT_WINDOW_TIME*summed_procs*LT_1m_RATIO));
 }
 
 
@@ -295,8 +301,10 @@ unsigned int pt_get_10m_load(int _)
 			SUM_UP_LOAD( usec_now, n, LT, 1);
 			summed_procs++;
 		}
+	if (!summed_procs)
+		return 0;
 
-	return (used*100/(LT_WINDOW_TIME*summed_procs));
+	return (used*100/((long long)LT_WINDOW_TIME*summed_procs));
 }
 
 
@@ -316,8 +324,10 @@ unsigned int pt_get_rt_loadall(int _)
 			SUM_UP_LOAD( usec_now, n, ST, 1);
 			summed_procs++;
 		}
+	if (!summed_procs)
+		return 0;
 
-	return (used*100/(ST_WINDOW_TIME*summed_procs));
+	return (used*100/((long long)ST_WINDOW_TIME*summed_procs));
 }
 
 
@@ -337,8 +347,10 @@ unsigned int pt_get_1m_loadall(int _)
 			SUM_UP_LOAD( usec_now, n, LT, LT_1m_RATIO);
 			summed_procs++;
 		}
+	if (!summed_procs)
+		return 0;
 
-	return (used*100/(LT_WINDOW_TIME*summed_procs*LT_1m_RATIO));
+	return (used*100/((long long)LT_WINDOW_TIME*summed_procs*LT_1m_RATIO));
 }
 
 
@@ -358,8 +370,10 @@ unsigned int pt_get_10m_loadall(int _)
 			SUM_UP_LOAD( usec_now, n, LT, 1);
 			summed_procs++;
 		}
+	if (!summed_procs)
+		return 0;
 
-	return (used*100/(LT_WINDOW_TIME*summed_procs));
+	return (used*100/((long long)LT_WINDOW_TIME*summed_procs));
 }
 
 
@@ -371,6 +385,24 @@ int register_processes_load_stats(int procs_no)
 	str name;
 	int pno;
 
+	group_stats *load_proc_grp, *load_proc_1m_grp, *load_proc_10m_grp;
+
+	load_proc_grp = register_stats_group("proc_load");
+	if (!load_proc_grp) {
+		LM_ERR("could not register stats group proc_load");
+		return -1;
+	}
+	load_proc_1m_grp = register_stats_group("proc_load1m");
+	if (!load_proc_1m_grp) {
+		LM_ERR("could not register stats group proc_load1m");
+		return -1;
+	}
+	load_proc_10m_grp = register_stats_group("proc_load10m");
+	if (!load_proc_10m_grp) {
+		LM_ERR("could not register stats group proc_load10m");
+		return -1;
+	}
+
 	/* build the stats and register them for each potential process
 	 * skipp the attendant, id 0 */
 	for( pno=1 ; pno<procs_no ; pno++) {
@@ -381,7 +413,7 @@ int register_processes_load_stats(int procs_no)
 		stat_prefix.len = sizeof("load-proc")-1;
 		if ( (stat_name = build_stat_name( &stat_prefix, pno_s)) == 0 ||
 		register_stat2( "load", stat_name, (stat_var**)pt_get_rt_proc_load,
-		STAT_IS_FUNC, (void*)(long)pno, 0) != 0) {
+		STAT_IS_FUNC|STAT_PER_PROC, (void*)(long)pno, 0) != 0) {
 			LM_ERR("failed to add RT load stat for process %d\n",pno);
 		return -1;
 		}
@@ -389,12 +421,13 @@ int register_processes_load_stats(int procs_no)
 		name.len = strlen(stat_name);
 		pt[pno].load_rt = get_stat(&name);
 		pt[pno].load_rt->flags |= STAT_HIDDEN;
+		add_stats_group(load_proc_grp, pt[pno].load_rt);
 
 		stat_prefix.s = "load1m-proc";
 		stat_prefix.len = sizeof("load1m-proc")-1;
 		if ( (stat_name = build_stat_name( &stat_prefix, pno_s)) == 0 ||
 		register_stat2( "load", stat_name, (stat_var**)pt_get_1m_proc_load,
-		STAT_IS_FUNC, (void*)(long)pno, 0) != 0) {
+		STAT_IS_FUNC|STAT_PER_PROC, (void*)(long)pno, 0) != 0) {
 			LM_ERR("failed to add RT load stat for process %d\n",pno);
 			return -1;
 		}
@@ -402,12 +435,13 @@ int register_processes_load_stats(int procs_no)
 		name.len = strlen(stat_name);
 		pt[pno].load_1m = get_stat(&name);
 		pt[pno].load_1m->flags |= STAT_HIDDEN;
+		add_stats_group(load_proc_1m_grp, pt[pno].load_1m);
 
 		stat_prefix.s = "load10m-proc";
 		stat_prefix.len = sizeof("load10m-proc")-1;
 		if ( (stat_name = build_stat_name( &stat_prefix, pno_s)) == 0 ||
 		register_stat2( "load", stat_name, (stat_var**)pt_get_10m_proc_load,
-		STAT_IS_FUNC, (void*)(long)pno, 0) != 0) {
+		STAT_IS_FUNC|STAT_PER_PROC, (void*)(long)pno, 0) != 0) {
 			LM_ERR("failed to add RT load stat for process %d\n",pno);
 			return -1;
 		}
@@ -415,7 +449,7 @@ int register_processes_load_stats(int procs_no)
 		name.len = strlen(stat_name);
 		pt[pno].load_10m = get_stat(&name);
 		pt[pno].load_10m->flags |= STAT_HIDDEN;
-
+		add_stats_group(load_proc_10m_grp, pt[pno].load_10m);
 	}
 
 	return 0;

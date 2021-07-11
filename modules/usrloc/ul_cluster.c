@@ -59,7 +59,7 @@ int ul_init_cluster(void)
 	}
 
 	if (rr_persist == RRP_SYNC_FROM_CLUSTER &&
-	    clusterer_api.request_sync(&contact_repl_cap, location_cluster, 0) < 0)
+	    clusterer_api.request_sync(&contact_repl_cap, location_cluster) < 0)
 		LM_ERR("Sync request failed\n");
 
 	return 0;
@@ -67,18 +67,26 @@ int ul_init_cluster(void)
 
 /* packet sending */
 
+static inline void bin_push_urecord(bin_packet_t *packet, urecord_t *r)
+{
+	bin_push_str(packet, r->domain);
+	bin_push_str(packet, &r->aor);
+	bin_push_int(packet, r->label);
+	bin_push_int(packet, r->next_clabel);
+}
+
 void replicate_urecord_insert(urecord_t *r)
 {
 	int rc;
 	bin_packet_t packet;
 
-	if (bin_init(&packet, &contact_repl_cap, REPL_URECORD_INSERT, BIN_VERSION, 1024) != 0) {
+	if (bin_init(&packet, &contact_repl_cap, REPL_URECORD_INSERT,
+	             UL_BIN_VERSION, 1024) != 0) {
 		LM_ERR("failed to replicate this event\n");
 		return;
 	}
 
-	bin_push_str(&packet, r->domain);
-	bin_push_str(&packet, &r->aor);
+	bin_push_urecord(&packet, r);
 
 	if (cluster_mode == CM_FEDERATION_CACHEDB)
 		rc = clusterer_api.send_all_having(&packet, location_cluster,
@@ -111,7 +119,8 @@ void replicate_urecord_delete(urecord_t *r)
 	int rc;
 	bin_packet_t packet;
 
-	if (bin_init(&packet, &contact_repl_cap, REPL_URECORD_DELETE, BIN_VERSION, 1024) != 0) {
+	if (bin_init(&packet, &contact_repl_cap, REPL_URECORD_DELETE,
+	             UL_BIN_VERSION, 1024) != 0) {
 		LM_ERR("failed to replicate this event\n");
 		return;
 	}
@@ -145,7 +154,52 @@ error:
 	bin_free_packet(&packet);
 }
 
-void bin_push_contact(bin_packet_t *packet, urecord_t *r, ucontact_t *c)
+void bin_push_ctmatch(bin_packet_t *packet, const struct ct_match *match)
+{
+	str_list *param;
+	int np = 0;
+
+	bin_push_int(packet, match->mode);
+	if (match->mode != CT_MATCH_PARAMS)
+		return;
+
+	for (param = match->match_params; param; param = param->next, np++) {}
+
+	bin_push_int(packet, np);
+	for (param = match->match_params; param; param = param->next)
+		bin_push_str(packet, &param->s);
+}
+
+/* NOTICE: remember to free @match->match_params when done with it! */
+void bin_pop_ctmatch(bin_packet_t *packet, struct ct_match *match)
+{
+	int np;
+
+	memset(match, 0, sizeof *match);
+
+	bin_pop_int(packet, &match->mode);
+	if (match->mode != CT_MATCH_PARAMS)
+		return;
+
+	bin_pop_int(packet, &np);
+
+	for (; np > 0; np--) {
+		str_list *param = pkg_malloc(sizeof *param);
+		if (!param) {
+			LM_ERR("oom\n");
+			free_pkg_str_list(match->match_params);
+			*match = (struct ct_match){CT_MATCH_CONTACT_CALLID, NULL};
+			return;
+		}
+		memset(param, 0, sizeof *param);
+
+		bin_pop_str(packet, &param->s);
+		add_last(param, match->match_params);
+	}
+}
+
+void bin_push_contact(bin_packet_t *packet, urecord_t *r, ucontact_t *c,
+        const struct ct_match *match)
 {
 	str st;
 
@@ -185,19 +239,23 @@ void bin_push_contact(bin_packet_t *packet, urecord_t *r, ucontact_t *c)
 	st = store_serialize(c->kv_storage);
 	bin_push_str(packet, &st);
 	store_free_buffer(&st);
+
+	bin_push_ctmatch(packet, match);
 }
 
-void replicate_ucontact_insert(urecord_t *r, str *contact, ucontact_t *c)
+void replicate_ucontact_insert(urecord_t *r, str *contact, ucontact_t *c,
+        const struct ct_match *match)
 {
 	int rc;
 	bin_packet_t packet;
 
-	if (bin_init(&packet, &contact_repl_cap, REPL_UCONTACT_INSERT, BIN_VERSION, 0) != 0) {
+	if (bin_init(&packet, &contact_repl_cap, REPL_UCONTACT_INSERT,
+	             UL_BIN_VERSION, 0) != 0) {
 		LM_ERR("failed to replicate this event\n");
 		return;
 	}
 
-	bin_push_contact(&packet, r, c);
+	bin_push_contact(&packet, r, c, match);
 
 	if (cluster_mode == CM_FEDERATION_CACHEDB)
 		rc = clusterer_api.send_all_having(&packet, location_cluster,
@@ -225,13 +283,15 @@ error:
 	bin_free_packet(&packet);
 }
 
-void replicate_ucontact_update(urecord_t *r, ucontact_t *ct)
+void replicate_ucontact_update(urecord_t *r, ucontact_t *ct,
+        const struct ct_match *match)
 {
 	str st;
 	int rc;
 	bin_packet_t packet;
 
-	if (bin_init(&packet, &contact_repl_cap, REPL_UCONTACT_UPDATE, BIN_VERSION, 0) != 0) {
+	if (bin_init(&packet, &contact_repl_cap, REPL_UCONTACT_UPDATE,
+	             UL_BIN_VERSION, 0) != 0) {
 		LM_ERR("failed to replicate this event\n");
 		return;
 	}
@@ -272,6 +332,8 @@ void replicate_ucontact_update(urecord_t *r, ucontact_t *ct)
 	st.len = sizeof ct->contact_id;
 	bin_push_str(&packet, &st);
 
+	bin_push_ctmatch(&packet, match);
+
 	if (cluster_mode == CM_FEDERATION_CACHEDB)
 		rc = clusterer_api.send_all_having(&packet, location_cluster,
 		                                   NODE_CMP_EQ_SIP_ADDR);
@@ -298,21 +360,30 @@ error:
 	bin_free_packet(&packet);
 }
 
-void replicate_ucontact_delete(urecord_t *r, ucontact_t *c)
+void replicate_ucontact_delete(urecord_t *r, ucontact_t *c,
+        const struct ct_match *_match)
 {
+	struct ct_match match;
 	int rc;
 	bin_packet_t packet;
 
-	if (bin_init(&packet, &contact_repl_cap, REPL_UCONTACT_DELETE, BIN_VERSION, 0) != 0) {
+	if (bin_init(&packet, &contact_repl_cap, REPL_UCONTACT_DELETE,
+	             UL_BIN_VERSION, 0) != 0) {
 		LM_ERR("failed to replicate this event\n");
 		return;
 	}
+
+	if (!_match)
+		match = (struct ct_match){CT_MATCH_CONTACT_CALLID, NULL};
+	else
+		match = *_match;
 
 	bin_push_str(&packet, r->domain);
 	bin_push_str(&packet, &r->aor);
 	bin_push_str(&packet, &c->c);
 	bin_push_str(&packet, &c->callid);
 	bin_push_int(&packet, c->cseq);
+	bin_push_ctmatch(&packet, &match);
 
 	if (cluster_mode == CM_FEDERATION_CACHEDB)
 		rc = clusterer_api.send_all_having(&packet, location_cluster,
@@ -350,9 +421,14 @@ static int receive_urecord_insert(bin_packet_t *packet)
 	str d, aor;
 	urecord_t *r;
 	udomain_t *domain;
+	int sl;
 
 	bin_pop_str(packet, &d);
 	bin_pop_str(packet, &aor);
+	if (aor.len == 0) {
+		LM_ERR("the AoR URI is missing the 'username' part!\n");
+		goto out_err;
+	}
 
 	if (find_domain(&d, &domain) != 0) {
 		LM_ERR("domain '%.*s' is not local\n", d.len, d.s);
@@ -368,6 +444,13 @@ static int receive_urecord_insert(bin_packet_t *packet)
 		unlock_udomain(domain, &aor);
 		goto out_err;
 	}
+
+	bin_pop_int(packet, &r->label);
+	bin_pop_int(packet, &r->next_clabel);
+
+	sl = r->aorhash & (domain->size - 1);
+	if (domain->table[sl].next_label <= r->label)
+		domain->table[sl].next_label = r->label + 1;
 
 out:
 	unlock_udomain(domain, &aor);
@@ -387,6 +470,10 @@ static int receive_urecord_delete(bin_packet_t *packet)
 
 	bin_pop_str(packet, &d);
 	bin_pop_str(packet, &aor);
+	if (aor.len == 0) {
+		LM_ERR("the AoR URI is missing the 'username' part!\n");
+		goto out_err;
+	}
 
 	if (find_domain(&d, &domain) != 0) {
 		LM_ERR("domain '%.*s' is not local\n", d.len, d.s);
@@ -418,12 +505,20 @@ static int receive_ucontact_insert(bin_packet_t *packet)
 	udomain_t *domain;
 	urecord_t *record;
 	ucontact_t *contact;
-	int rc, port, proto;
+	int rc, port, proto, sl;
+	unsigned short _, clabel;
+	unsigned int rlabel;
+	struct ct_match cmatch = {CT_MATCH_NONE, NULL};
+	short pkg_ver = get_bin_pkg_version(packet);
 
 	memset(&ci, 0, sizeof ci);
 
 	bin_pop_str(packet, &d);
 	bin_pop_str(packet, &aor);
+	if (aor.len == 0) {
+		LM_ERR("the AoR URI is missing the 'username' part!\n");
+		goto error;
+	}
 
 	if (find_domain(&d, &domain) != 0) {
 		LM_ERR("domain '%.*s' is not local\n", d.len, d.s);
@@ -484,8 +579,15 @@ static int receive_ucontact_insert(bin_packet_t *packet)
 	bin_pop_str(packet, &kv_str);
 	ci.packed_kv_storage = &kv_str;
 
+	if (pkg_ver <= UL_BIN_V2)
+		cmatch = (struct ct_match){CT_MATCH_CONTACT_CALLID, NULL};
+	else
+		bin_pop_ctmatch(packet, &cmatch);
+
 	if (skip_replicated_db_ops)
 		ci.flags |= FL_MEM;
+
+	unpack_indexes(ci.contact_id, &_, &rlabel, &clabel);
 
 	lock_udomain(domain, &aor);
 
@@ -498,9 +600,23 @@ static int receive_ucontact_insert(bin_packet_t *packet)
 			unlock_udomain(domain, &aor);
 			goto error;
 		}
+
+		record->label = rlabel;
+		sl = record->aorhash & (domain->size - 1);
+		if (domain->table[sl].next_label <= record->label)
+			domain->table[sl].next_label = record->label + 1;
 	}
 
-	rc = get_ucontact(record, &contact_str, &callid, ci.cseq, &contact);
+	if (record->label != rlabel)
+		LM_BUG("replicated ct insert: differring rlabels! (ci: '%.*s')",
+		       callid.len, callid.s);
+
+	if (record->next_clabel <= clabel)
+		record->next_clabel = CLABEL_INC_AND_TEST(clabel);
+
+	rc = get_ucontact(record, &contact_str, &callid, ci.cseq, &cmatch,
+		&contact);
+
 	switch (rc) {
 	case -2:
 		/* received data is consistent with what we have */
@@ -509,14 +625,14 @@ static int receive_ucontact_insert(bin_packet_t *packet)
 		break;
 	case 0:
 		/* received data is newer than what we have */
-		if (update_ucontact(record, contact, &ci, 1) != 0) {
+		if (update_ucontact(record, contact, &ci, NULL, 1) != 0) {
 			LM_ERR("failed to update ucontact (ci: '%.*s')\n", callid.len, callid.s);
 			unlock_udomain(domain, &aor);
 			goto error;
 		}
 		break;
 	case 1:
-		if (insert_ucontact(record, &contact_str, &ci, &contact, 1) != 0) {
+		if (insert_ucontact(record, &contact_str, &ci, NULL, 1, &contact) != 0) {
 			LM_ERR("failed to insert ucontact (ci: '%.*s')\n", callid.len, callid.s);
 			unlock_udomain(domain, &aor);
 			goto error;
@@ -525,9 +641,12 @@ static int receive_ucontact_insert(bin_packet_t *packet)
 	}
 
 	unlock_udomain(domain, &aor);
+
+	free_pkg_str_list(cmatch.match_params);
 	return 0;
 
 error:
+	free_pkg_str_list(cmatch.match_params);
 	LM_ERR("failed to process replication event. dom: '%.*s', aor: '%.*s'\n",
 		d.len, d.s, aor.len, aor.s);
 	return -1;
@@ -541,13 +660,20 @@ static int receive_ucontact_update(bin_packet_t *packet)
 	udomain_t *domain;
 	urecord_t *record;
 	ucontact_t *contact;
-	int port, proto;
-	int rc;
+	int port, proto, rc, sl;
+	unsigned short _, clabel;
+	unsigned int rlabel;
+	struct ct_match cmatch = {CT_MATCH_NONE, NULL};
+	short pkg_ver = get_bin_pkg_version(packet);
 
 	memset(&ci, 0, sizeof ci);
 
 	bin_pop_str(packet, &d);
 	bin_pop_str(packet, &aor);
+	if (aor.len == 0) {
+		LM_ERR("the AoR URI is missing the 'username' part!\n");
+		goto error;
+	}
 
 	if (find_domain(&d, &domain) != 0) {
 		LM_ERR("domain '%.*s' is not local\n", d.len, d.s);
@@ -611,6 +737,13 @@ static int receive_ucontact_update(bin_packet_t *packet)
 	bin_pop_str(packet, &st);
 	memcpy(&ci.contact_id, st.s, sizeof ci.contact_id);
 
+	unpack_indexes(ci.contact_id, &_, &rlabel, &clabel);
+
+	if (pkg_ver <= UL_BIN_V2)
+		cmatch = (struct ct_match){CT_MATCH_CONTACT_CALLID, NULL};
+	else
+		bin_pop_ctmatch(packet, &cmatch);
+
 	lock_udomain(domain, &aor);
 
 	/* failure in retrieving a urecord may be ok, because packet order in UDP
@@ -625,25 +758,38 @@ static int receive_ucontact_update(bin_packet_t *packet)
 			goto error;
 		}
 
-		if (insert_ucontact(record, &contact_str, &ci, &contact, 1) != 0) {
+		record->label = rlabel;
+		sl = record->aorhash & (domain->size - 1);
+		if (domain->table[sl].next_label <= record->label)
+			domain->table[sl].next_label = record->label + 1;
+
+		if (insert_ucontact(record, &contact_str, &ci, NULL, 1, &contact) != 0) {
 			LM_ERR("failed (ci: '%.*s')\n", callid.len, callid.s);
 			unlock_udomain(domain, &aor);
 			goto error;
 		}
+
+		if (record->next_clabel <= clabel)
+			record->next_clabel = CLABEL_INC_AND_TEST(clabel);
 	} else {
-		rc = get_ucontact(record, &contact_str, &callid, ci.cseq + 1, &contact);
+		rc = get_ucontact(record, &contact_str, &callid, ci.cseq + 1, &cmatch,
+			&contact);
 		if (rc == 1) {
 			LM_INFO("contact '%.*s' not found, inserting new (ci: '%.*s')\n",
 				contact_str.len, contact_str.s, callid.len, callid.s);
 
-			if (insert_ucontact(record, &contact_str, &ci, &contact, 1) != 0) {
+			if (insert_ucontact(record, &contact_str, &ci, NULL, 1, &contact) != 0) {
 				LM_ERR("failed to insert ucontact (ci: '%.*s')\n",
 					callid.len, callid.s);
 				unlock_udomain(domain, &aor);
 				goto error;
 			}
+
+			if (record->next_clabel <= clabel)
+				record->next_clabel = CLABEL_INC_AND_TEST(clabel);
+
 		} else if (rc == 0) {
-			if (update_ucontact(record, contact, &ci, 1) != 0) {
+			if (update_ucontact(record, contact, &ci, NULL, 1) != 0) {
 				LM_ERR("failed to update ucontact '%.*s' (ci: '%.*s')\n",
 					contact_str.len, contact_str.s, callid.len, callid.s);
 				unlock_udomain(domain, &aor);
@@ -655,9 +801,11 @@ static int receive_ucontact_update(bin_packet_t *packet)
 
 	unlock_udomain(domain, &aor);
 
+	free_pkg_str_list(cmatch.match_params);
 	return 0;
 
 error:
+	free_pkg_str_list(cmatch.match_params);
 	LM_ERR("failed to process replication event. dom: '%.*s', aor: '%.*s'\n",
 		d.len, d.s, aor.len, aor.s);
 	return -1;
@@ -670,12 +818,24 @@ static int receive_ucontact_delete(bin_packet_t *packet)
 	ucontact_t *contact;
 	str d, aor, contact_str, callid;
 	int cseq, rc;
+	struct ct_match cmatch = {CT_MATCH_NONE, NULL};
+	short pkg_ver = get_bin_pkg_version(packet);
 
 	bin_pop_str(packet, &d);
-	bin_pop_str(packet,&aor);
-	bin_pop_str(packet,&contact_str);
-	bin_pop_str(packet,&callid);
-	bin_pop_int(packet,&cseq);
+	bin_pop_str(packet, &aor);
+	if (aor.len == 0) {
+		LM_ERR("the AoR URI is missing the 'username' part!\n");
+		goto error;
+	}
+
+	bin_pop_str(packet, &contact_str);
+	bin_pop_str(packet, &callid);
+	bin_pop_int(packet, &cseq);
+
+	if (pkg_ver <= UL_BIN_V2)
+		cmatch = (struct ct_match){CT_MATCH_CONTACT_CALLID, NULL};
+	else
+		bin_pop_ctmatch(packet, &cmatch);
 
 	if (find_domain(&d, &domain) != 0) {
 		LM_ERR("domain '%.*s' is not local\n", d.len, d.s);
@@ -691,11 +851,12 @@ static int receive_ucontact_delete(bin_packet_t *packet)
 		LM_INFO("failed to fetch local urecord - ignoring request "
 			"(ci: '%.*s')\n", callid.len, callid.s);
 		unlock_udomain(domain, &aor);
-		return 0;
+		goto out;
 	}
 
 	/* simply specify a higher cseq and completely avoid any complications */
-	rc = get_ucontact(record, &contact_str, &callid, cseq + 1, &contact);
+	rc = get_ucontact(record, &contact_str, &callid, cseq + 1, &cmatch,
+		&contact);
 	if (rc != 0 && rc != 2) {
 		LM_ERR("contact '%.*s' not found: (ci: '%.*s')\n", contact_str.len,
 			contact_str.s, callid.len, callid.s);
@@ -706,7 +867,7 @@ static int receive_ucontact_delete(bin_packet_t *packet)
 	if (skip_replicated_db_ops)
 		contact->flags |= FL_MEM;
 
-	if (delete_ucontact(record, contact, 1) != 0) {
+	if (delete_ucontact(record, contact, NULL, 1) != 0) {
 		LM_ERR("failed to delete ucontact '%.*s' (ci: '%.*s')\n",
 			contact_str.len, contact_str.s, callid.len, callid.s);
 		unlock_udomain(domain, &aor);
@@ -715,9 +876,12 @@ static int receive_ucontact_delete(bin_packet_t *packet)
 
 	unlock_udomain(domain, &aor);
 
+out:
+	free_pkg_str_list(cmatch.match_params);
 	return 0;
 
 error:
+	free_pkg_str_list(cmatch.match_params);
 	LM_ERR("failed to process replication event. dom: '%.*s', aor: '%.*s'\n",
 	        d.len, d.s, aor.len, aor.s);
 	return -1;
@@ -747,27 +911,51 @@ void receive_binary_packets(bin_packet_t *packet)
 	bin_packet_t *pkt;
 
 	for (pkt = packet; pkt; pkt = pkt->next) {
+		/* Supported smooth BIN transitions:
+			UL_BIN_V2 -> UL_BIN_V3: the "cmatch" has been added
+							(assume: CT_MATCH_CONTACT_CALLID if not present)
+		*/
+		short ver = get_bin_pkg_version(pkt);
+
 		LM_DBG("received a binary packet [%d]!\n", pkt->type);
 
 		switch (pkt->type) {
 		case REPL_URECORD_INSERT:
+			if (ver != UL_BIN_V2)
+				ensure_bin_version(pkt, UL_BIN_VERSION);
 			rc = receive_urecord_insert(pkt);
 			break;
+
 		case REPL_URECORD_DELETE:
+			if (ver != UL_BIN_V2)
+				ensure_bin_version(pkt, UL_BIN_VERSION);
 			rc = receive_urecord_delete(pkt);
 			break;
+
 		case REPL_UCONTACT_INSERT:
+			if (ver != UL_BIN_V2)
+				ensure_bin_version(pkt, UL_BIN_VERSION);
 			rc = receive_ucontact_insert(pkt);
 			break;
+
 		case REPL_UCONTACT_UPDATE:
+			if (ver != UL_BIN_V2)
+				ensure_bin_version(pkt, UL_BIN_VERSION);
 			rc = receive_ucontact_update(pkt);
 			break;
+
 		case REPL_UCONTACT_DELETE:
+			if (ver != UL_BIN_V2)
+				ensure_bin_version(pkt, UL_BIN_VERSION);
 			rc = receive_ucontact_delete(pkt);
 			break;
+
 		case SYNC_PACKET_TYPE:
+			if (ver != UL_BIN_V2)
+				_ensure_bin_version(pkt, UL_BIN_VERSION, "usrloc sync packet");
 			rc = receive_sync_packet(pkt);
 			break;
+
 		default:
 			rc = -1;
 			LM_ERR("invalid usrloc binary packet type: %d\n", pkt->type);
@@ -780,6 +968,7 @@ void receive_binary_packets(bin_packet_t *packet)
 
 static int receive_sync_request(int node_id)
 {
+	struct ct_match cmatch = {CT_MATCH_CONTACT_CALLID, NULL};
 	bin_packet_t *sync_packet;
 	dlist_t *dl;
 	udomain_t *dom;
@@ -803,26 +992,23 @@ static int receive_sync_request(int node_id)
 				r = (urecord_t *)*p;
 
 				sync_packet = clusterer_api.sync_chunk_start(&contact_repl_cap,
-											location_cluster, node_id);
+									location_cluster, node_id, UL_BIN_VERSION);
 				if (!sync_packet)
 					goto error_unlock;
 
 				/* urecord in this chunk */
 				bin_push_int(sync_packet, 0);
-
-				bin_push_str(sync_packet, r->domain);
-				bin_push_str(sync_packet, &r->aor);
+				bin_push_urecord(sync_packet, r);
 
 				for (c = r->contacts; c; c = c->next) {
 					sync_packet = clusterer_api.sync_chunk_start(&contact_repl_cap,
-												location_cluster, node_id);
+										location_cluster, node_id, UL_BIN_VERSION);
 					if (!sync_packet)
 						goto error_unlock;
 
 					/* ucontact in this chunk */
 					bin_push_int(sync_packet, 1);
-
-					bin_push_contact(sync_packet, r, c);
+					bin_push_contact(sync_packet, r, c, &cmatch);
 				}
 			}
 			unlock_ulslot(dom, i);

@@ -165,45 +165,32 @@
 		<title>&osips; Modules</title>
 		<para>
 		The following modules must be loaded before this module:
-                    <itemizedlist>
+        <itemizedlist>
+			<listitem>
+			<para>
+				<emphasis>tls_openssl</emphasis> or <emphasis>tls_wolfssl</emphasis>,
+				depending on the desired TLS library
+			</para>
+			</listitem>
 			<listitem>
 			<para>
 				<emphasis>tls_mgm</emphasis>.
 			</para>
 			</listitem>
-                    </itemizedlist>
+        </itemizedlist>
 		</para>
 	</section>
 	<section>
 		<title>Dependencies of external libraries</title>
 		<para>
-			&osips; TLS v1.0 support requires the following packages:
+		The following libraries or applications must be installed before
+		running &osips; with this module loaded:
 			<itemizedlist>
-				<listitem>
-				<para><emphasis>openssl</emphasis> or
-					<emphasis>libssl</emphasis> >= 0.9.6
-				</para>
-				</listitem>
-				<listitem>
-				<para><emphasis>openssl-dev</emphasis> or
-					<emphasis>libssl-dev</emphasis>
-				</para>
-				</listitem>
-			</itemizedlist>
-		</para>
-		<para>
-			&osips; TLS v1.1/1.2 support requires the following packages:
-			<itemizedlist>
-				<listitem>
-				<para><emphasis>openssl</emphasis> or
-					<emphasis>libssl</emphasis> >= 1.0.1e
-				</para>
-				</listitem>
-				<listitem>
-				<para><emphasis>openssl-dev</emphasis> or
-					<emphasis>libssl-dev</emphasis>
-				</para>
-				</listitem>
+			<listitem>
+			<para>
+				<emphasis>None</emphasis>.
+			</para>
+			</listitem>
 			</itemizedlist>
 		</para>
 	</section>
@@ -227,7 +214,7 @@
 				<title>Set <varname>listen</varname> variable</title>
 				<programlisting format="linespecific">
 ...
-listen = tls:1.2.3.4:5061
+socket= tls:1.2.3.4:5061
 ...
 				</programlisting>
 			</example>
@@ -325,7 +312,39 @@ modparam("proto_tls", "tls_max_msg_chunks", 8)
 </programlisting>
 		</example>
 	</section>
-	<section id="trace-destination">
+
+	<section id="param_tls_cert_check_on_conn_reusage" xreflabel="cert_check_on_conn_reusage">
+		<title><varname>cert_check_on_conn_reusage</varname> (integer)</title>
+		<para>
+		This parameter turns on or off the extra checking/matching of the
+		TLS domain (SSL certificate) when comes to reusing an existing TLS
+		connection. Without this extra check, only IP and port of the
+		connections will be check (in order to re-use an existing connection).
+		With this extra check, the connection to be reused must have the same
+		SSL certificate as the one set for the current signaling operation.
+		</para>
+		<para>
+		This checking is done only when comes to send SIP traffic via TLS and
+		it is applied only against connections that were created / initiated 
+		by OpenSIPS (as TLS client). Any accepte connection (as TLS server) will
+		automatically match (the extra test will be skipped).
+		</para>
+		<para>
+		<emphasis>
+			Default value is 0 (disabled).
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>cert_check_on_conn_reusage</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("proto_tls", "cert_check_on_conn_reusage", 1)
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_tls_trace_destination" xreflabel="trace_destination">
 		<title><varname>trace_destination</varname> (string)</title>
 		<para>
 			Trace destination as defined in the tracing module. Currently
@@ -362,7 +381,7 @@ modparam("proto_tls", "trace_destination", "hep_dest")
 		<title><varname>trace_on</varname> (int)</title>
 		<para>
 			This controls whether tracing for tls is on or not. You still need to define
-			<xref linkend="trace-destination"/>in order to work, but this value will be
+			<xref linkend="param_tls_trace_destination"/>in order to work, but this value will be
 			controlled using mi function <xref linkend="mi_tls_trace"/>.
 		</para>
 		<emphasis>
@@ -387,7 +406,7 @@ modparam("proto_tls", "trace_on", 1)
 			connection. To disable tracing for a specific connection the last call in
 			this route must be <emphasis role="bold">drop</emphasis>, any other exit
 			mode resulting in tracing the current connection ( of course you still
-			have to define a <xref linkend="trace-destination"/> and trace must be
+			have to define a <xref linkend="param_tls_trace_destination"/> and trace must be
 			on at the time this connection is opened.
 		</para>
 		<para>
@@ -399,8 +418,8 @@ modparam("proto_tls", "trace_on", 1)
 				$si</emphasis> meaning the source ip if you read the docs) but in reality
 			it is simply the socket other than the &osips; socket. In order to match
 			&osips; interface (either the one that accepted the connection or the one
-			that initiated a connection) <emphasis role="bold">$Ri</emphasis> (ip) and
-			<emphasis role="bold">$Rp</emphasis> (port) can be used.
+			that initiated a connection) <emphasis role="bold">$socket_in(ip)</emphasis> (ip) and
+			<emphasis role="bold">$socket_in(port)</emphasis> (port) can be used.
 		</para>
 
 		<para>
@@ -425,11 +444,147 @@ route[tls_filter] {
 	   on interface 1.1.1.10:5060(opensips listener)
 	   all the other connections won't be */
 	 if ( $si == "1.1.1.1" &amp;&amp; $sp == 8000 &amp;&amp;
-		$Ri == "1.1.1.10"  &amp;&amp; $Rp == 5060)
+		$socket_in(ip) == "1.1.1.10"  &amp;&amp; $socket_in(port) == 5060)
 		exit;
 	else
 		drop;
 }
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_tls_handshake_timeout" xreflabel="tls_handshake_timeout">
+		<title><varname>tls_handshake_timeout</varname> (integer)</title>
+		<para>
+		Sets the timeout (in milliseconds) for the SSL handshake sequence to complete.
+			It may be necessary to increase this value when using a CPU intensive cipher
+			for the connection to allow time for keys to be generated and processed.
+		</para>
+		<para>
+		The timeout is invoked during acceptance of a new connection (inbound) and
+			during the wait period when a new session is being initiated (outbound).
+		</para>
+		<para><emphasis>
+			Default value is 100.
+		</emphasis></para>
+		<example>
+			<title>Set <varname>tls_handshake_timeout</varname> variable</title>
+			<programlisting format="linespecific">
+
+param("proto_tls", "tls_handshake_timeout", 200) # number of milliseconds
+
+			</programlisting>
+		</example>
+	</section>
+
+	<section id="param_tls_send_timeout" xreflabel="tls_send_timeout">
+		<title><varname>tls_send_timeout</varname> (integer)</title>
+		<para>
+			Sets the timeout (in milliseconds) for the send operations to complete
+		</para>
+		<para>
+			The send timeout is invoked for all TLS write operations, excluding
+			the handshake process (see: tls_handshake_timeout)
+		</para>
+		<para><emphasis>
+			Default value is 100.
+		</emphasis></para>
+		<example>
+			<title>Set <varname>tls_send_timeout</varname> variable</title>
+			<programlisting format="linespecific">
+
+param("proto_tls", "tls_send_timeout", 200) # number of milliseconds
+
+			</programlisting>
+		</example>
+	</section>
+
+	<section id="param_tls_async" xreflabel="tls_async">
+		<title><varname>tls_async</varname> (integer)</title>
+		<para>
+			If the TLS connect and write operations should be done in an
+			asynchronous mode (non-blocking connect and
+			write). If disabled, OpenSIPS will block and wait for TLS
+			operations like connect and write.
+		</para>
+		<para><emphasis>
+			Default value is 1 (enabled).
+		</emphasis></para>
+		<example>
+			<title>Set <varname>tls_async</varname> variable</title>
+			<programlisting format="linespecific">
+
+param("proto_tls", "tls_async", 1) # enable async TLS
+
+			</programlisting>
+		</example>
+	</section>
+
+	<section>
+		<title><varname>tls_async_max_postponed_chunks</varname> (integer)</title>
+		<para>
+			If <emphasis>tls_async</emphasis> is enabled, this specifies the
+			maximum number of SIP messages that can be stashed for later/async
+			writing. If the connection pending writes exceed this number, the
+			connection will be marked as broken and dropped.
+		</para>
+		<para>
+		<emphasis>
+			Default value is 32.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>tls_async_max_postponed_chunks</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("proto_tls", "tls_async_max_postponed_chunks", 16)
+...
+</programlisting>
+		</example>
+	</section>
+	<section>
+		<title><varname>tls_async_local_connect_timeout</varname> (integer)</title>
+		<para>
+			If <emphasis>tls_async</emphasis> is enabled, this specifies the
+			number of milliseconds that a connect will be tried in blocking
+			mode (optimization). If the connect operation lasts more than
+			this, the connect will go to async mode and will be passed to tls
+			MAIN for polling.
+		</para>
+		<para>
+		<emphasis>
+			Default value is 100 ms.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>tls_async_local_connect_timeout</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("proto_tls", "tls_async_local_connect_timeout", 200)
+...
+</programlisting>
+		</example>
+	</section>
+	<section>
+		<title><varname>tls_async_handshake_timeout</varname> (integer)</title>
+		<para>
+			If <emphasis>tls_async</emphasis> is enabled, this specifies the
+			number of milliseconds that a TLS handshake should be tried in blocking
+			mode (optimization). If the handshake operation lasts more than this,
+			the write will go to async mode and will be passed to tls MAIN for
+			polling.
+		</para>
+		<para>
+		<emphasis>
+			Default value is 10 ms.
+		</emphasis>
+		</para>
+		<example>
+		<title>Set <varname>tls_async_handshake_timeout</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("proto_tls", "tls_async_handshake_timeout", 100)
 ...
 </programlisting>
 		</example>

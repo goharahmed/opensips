@@ -39,6 +39,7 @@
 #include "../../ut.h"
 #include "../../timer.h"
 #include "../../str.h"
+#include "../../pt.h"
 #include "../../mem/shm_mem.h"
 #include "../../db/db.h"
 #include "../../parser/parse_from.h"
@@ -96,10 +97,10 @@ struct tm_binds tmb;
 void inv_callback( struct cell *t, int type, struct tmcb_params *ps);
 
 static cmd_export_t cmds[]={
-	{"imc_manager",  (cmd_function)imc_manager, 0, 0, 0, REQUEST_ROUTE},
-	{0,0,0,0,0,0}
+	{"imc_manager",(cmd_function)imc_manager, {{0,0,0}},
+		REQUEST_ROUTE},
+	{0,0,{{0,0,0}},0}
 };
-
 
 static param_export_t params[]={
 	{"db_url",				STR_PARAM, &db_url.s},
@@ -151,6 +152,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	&deps,           /* OpenSIPS module dependencies */
 	cmds,       /* exported commands */
 	0,          /* exported async commands */
@@ -164,10 +166,12 @@ struct module_exports exports= {
 	0,          /* exported pseudo-variables */
 	0,			/* exported transformations */
 	0,          /* extra processes */
+	0,          /* pre-mod init */
 	mod_init,   /* mod init */
 	(response_function) 0,       /* response handler */
 	(destroy_function) destroy,  /* destroy function */
-	child_init  /* child init */
+	child_init, /* child init */
+	0           /* reload confirm function */
 };
 
 /**
@@ -604,7 +608,7 @@ void destroy(void)
 
 	LM_DBG("destroy module ...\n");
 
-	if(imc_db==NULL)
+	if (child_init( process_no )<0)
 		goto done;
 
 	mq_cols[0] = &imc_col_username;

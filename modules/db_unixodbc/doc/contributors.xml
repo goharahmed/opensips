@@ -21,7 +21,7 @@
 	<row>
 		<entry>1. </entry>
 		<entry>Henning Westerholt (<ulink url="https://github.com/henningw">@henningw</ulink>)</entry>
-		<entry align="center">47</entry>
+		<entry align="center">45</entry>
 		<entry align="center">22</entry>
 		<entry align="center">385</entry>
 		<entry align="center">1129</entry>
@@ -29,15 +29,15 @@
 	<row>
 		<entry>2. </entry>
 		<entry>Bogdan-Andrei Iancu (<ulink url="https://github.com/bogdan-iancu">@bogdan-iancu</ulink>)</entry>
-		<entry align="center">43</entry>
-		<entry align="center">30</entry>
-		<entry align="center">615</entry>
-		<entry align="center">417</entry>
+		<entry align="center">44</entry>
+		<entry align="center">31</entry>
+		<entry align="center">617</entry>
+		<entry align="center">418</entry>
 	</row>
 	<row>
 		<entry>3. </entry>
 		<entry>Marco Lorrai</entry>
-		<entry align="center">22</entry>
+		<entry align="center">23</entry>
 		<entry align="center">1</entry>
 		<entry align="center">2660</entry>
 		<entry align="center">0</entry>
@@ -61,13 +61,21 @@
 	<row>
 		<entry>6. </entry>
 		<entry>Razvan Crainea (<ulink url="https://github.com/razvancrainea">@razvancrainea</ulink>)</entry>
-		<entry align="center">5</entry>
-		<entry align="center">3</entry>
-		<entry align="center">48</entry>
-		<entry align="center">13</entry>
+		<entry align="center">10</entry>
+		<entry align="center">8</entry>
+		<entry align="center">63</entry>
+		<entry align="center">26</entry>
 	</row>
 	<row>
 		<entry>7. </entry>
+		<entry>Vlad Patrascu (<ulink url="https://github.com/rvlad-patrascu">@rvlad-patrascu</ulink>)</entry>
+		<entry align="center">4</entry>
+		<entry align="center">2</entry>
+		<entry align="center">3</entry>
+		<entry align="center">3</entry>
+	</row>
+	<row>
+		<entry>8. </entry>
 		<entry>Anca Vamanu</entry>
 		<entry align="center">4</entry>
 		<entry align="center">1</entry>
@@ -75,7 +83,7 @@
 		<entry align="center">103</entry>
 	</row>
 	<row>
-		<entry>8. </entry>
+		<entry>9. </entry>
 		<entry>Elena-Ramona Modroiu</entry>
 		<entry align="center">3</entry>
 		<entry align="center">1</entry>
@@ -83,25 +91,17 @@
 		<entry align="center">1</entry>
 	</row>
 	<row>
-		<entry>9. </entry>
+		<entry>10. </entry>
 		<entry>Anonymous</entry>
 		<entry align="center">3</entry>
 		<entry align="center">1</entry>
 		<entry align="center">4</entry>
 		<entry align="center">3</entry>
 	</row>
-	<row>
-		<entry>10. </entry>
-		<entry>Konstantin Bokarius</entry>
-		<entry align="center">3</entry>
-		<entry align="center">1</entry>
-		<entry align="center">3</entry>
-		<entry align="center">5</entry>
-	</row>
 	</tbody>
 	</tgroup>
 	</table>
-	<para><emphasis role='bold'>All remaining contributors</emphasis>: Alex Massover, Razvan Pistolea, Norman Brandinger (<ulink url="https://github.com/NormB">@NormB</ulink>), Peter Lemenkov (<ulink url="https://github.com/lemenkov">@lemenkov</ulink>), Edson Gellert Schubert, Vlad Paiu (<ulink url="https://github.com/vladpaiu">@vladpaiu</ulink>), Carsten Bock, Vlad Patrascu (<ulink url="https://github.com/rvlad-patrascu">@rvlad-patrascu</ulink>).</para>
+<para><emphasis role='bold'>All remaining contributors</emphasis>: Konstantin Bokarius, Alex Massover, Razvan Pistolea, Norman Brandinger (<ulink url="https://github.com/NormB">@NormB</ulink>), Peter Lemenkov (<ulink url="https://github.com/lemenkov">@lemenkov</ulink>), Edson Gellert Schubert, Vlad Paiu (<ulink url="https://github.com/vladpaiu">@vladpaiu</ulink>), Carsten Bock.</para>
 	<para>
 	    <emphasis>(1) DevScore = author_commits + author_lines_added / (project_lines_added / project_commits) + author_lines_deleted / (project_lines_deleted / project_commits)</emphasis>
 	</para>
@@ -128,28 +128,28 @@
 	<tbody>
 	<row>
 		<entry>1. </entry>
-		<entry>Peter Lemenkov (<ulink url="https://github.com/lemenkov">@lemenkov</ulink>)</entry>
-		<entry align="center">Jun 2018 - Jun 2018</entry>
+		<entry>Razvan Crainea (<ulink url="https://github.com/razvancrainea">@razvancrainea</ulink>)</entry>
+		<entry align="center">Oct 2011 - Jan 2021</entry>
 	</row>
 	<row>
 		<entry>2. </entry>
-		<entry>Liviu Chircu (<ulink url="https://github.com/liviuchircu">@liviuchircu</ulink>)</entry>
-		<entry align="center">Mar 2014 - Jun 2018</entry>
+		<entry>Bogdan-Andrei Iancu (<ulink url="https://github.com/bogdan-iancu">@bogdan-iancu</ulink>)</entry>
+		<entry align="center">Dec 2005 - Apr 2019</entry>
 	</row>
 	<row>
 		<entry>3. </entry>
 		<entry>Vlad Patrascu (<ulink url="https://github.com/rvlad-patrascu">@rvlad-patrascu</ulink>)</entry>
-		<entry align="center">May 2017 - May 2017</entry>
+		<entry align="center">May 2017 - Apr 2019</entry>
 	</row>
 	<row>
 		<entry>4. </entry>
-		<entry>Razvan Crainea (<ulink url="https://github.com/razvancrainea">@razvancrainea</ulink>)</entry>
-		<entry align="center">Oct 2011 - Apr 2017</entry>
+		<entry>Peter Lemenkov (<ulink url="https://github.com/lemenkov">@lemenkov</ulink>)</entry>
+		<entry align="center">Jun 2018 - Jun 2018</entry>
 	</row>
 	<row>
 		<entry>5. </entry>
-		<entry>Bogdan-Andrei Iancu (<ulink url="https://github.com/bogdan-iancu">@bogdan-iancu</ulink>)</entry>
-		<entry align="center">Dec 2005 - Oct 2014</entry>
+		<entry>Liviu Chircu (<ulink url="https://github.com/liviuchircu">@liviuchircu</ulink>)</entry>
+		<entry align="center">Mar 2014 - Jun 2018</entry>
 	</row>
 	<row>
 		<entry>6. </entry>
@@ -179,7 +179,7 @@
 	</tbody>
 	</tgroup>
 	</table>
-	<para><emphasis role='bold'>All remaining contributors</emphasis>: Daniel-Constantin Mierla (<ulink url="https://github.com/miconda">@miconda</ulink>), Konstantin Bokarius, Edson Gellert Schubert, Anca Vamanu, Elena-Ramona Modroiu, Norman Brandinger (<ulink url="https://github.com/NormB">@NormB</ulink>), Anonymous, Marco Lorrai.</para>
+<para><emphasis role='bold'>All remaining contributors</emphasis>: Daniel-Constantin Mierla (<ulink url="https://github.com/miconda">@miconda</ulink>), Konstantin Bokarius, Edson Gellert Schubert, Anca Vamanu, Elena-Ramona Modroiu, Norman Brandinger (<ulink url="https://github.com/NormB">@NormB</ulink>), Anonymous, Marco Lorrai.</para>
 	<para>
 	    <emphasis>(1) including any documentation-related commits, excluding merge commits</emphasis>
 	</para>

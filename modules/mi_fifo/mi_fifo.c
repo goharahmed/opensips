@@ -49,7 +49,7 @@ static int mi_destroy(void);
 
 /* FIFO server vars */
 /* FIFO name */
-static char *mi_fifo = 0;
+static char *mi_fifo = "/tmp/opensips_fifo";
 /* dir where reply fifos are allowed */
 static char *mi_fifo_reply_dir = DEFAULT_MI_REPLY_DIR;
 static int  mi_fifo_uid = -1;
@@ -82,7 +82,8 @@ static param_export_t mi_params[] = {
 
 
 static proc_export_t mi_procs[] = {
-	{"MI FIFO",  0,  0,  fifo_process,  1 , PROC_FLAG_INITCHILD },
+	{"MI FIFO",  0,  0,  fifo_process,  1 ,
+		PROC_FLAG_INITCHILD|PROC_FLAG_HAS_IPC|PROC_FLAG_NEEDS_SCRIPT },
 	{0,0,0,0,0,0}
 };
 
@@ -92,6 +93,7 @@ struct module_exports exports = {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,               /* dlopen flags */
+	0,				               /* load function */
 	NULL,            /* OpenSIPS module dependencies */
 	0,                             /* exported functions */
 	0,                             /* exported async functions */
@@ -101,10 +103,12 @@ struct module_exports exports = {
 	0,                             /* exported pseudo-variables */
 	0,			 				   /* exported transformations */
 	mi_procs,                      /* extra processes */
+	0,                             /* module pre-initialization function */
 	mi_mod_init,                   /* module initialization function */
 	(response_function) 0,         /* response handling function */
 	(destroy_function) mi_destroy, /* destroy function */
-	0                              /* per-child init function */
+	0,                             /* per-child init function */
+	0                              /* reload confirm function */
 };
 
 

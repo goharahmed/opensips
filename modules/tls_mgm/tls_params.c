@@ -214,23 +214,11 @@ int tlsp_set_method(modparam_t type, void *in)
 {
 	str name;
 	str val;
-	int method;
 
 	if (split_param_val((char*)in, &name, &val) < 0)
 		return -1;
 
-	if (strcasecmp(val.s, "SSLV23")==0 || strcasecmp(val.s, "TLSany")==0 )
-		method = TLS_USE_SSLv23;
-	else if (strcasecmp(val.s, "TLSV1")==0 )
-		method = TLS_USE_TLSv1;
-	else if (strcasecmp(val.s, "TLSV1_2")==0 )
-		method = TLS_USE_TLSv1_2;
-	else {
-		LM_ERR("unsupported method [%s]\n",val.s);
-		return -1;
-	}
-
-	set_domain_attr(name, method, method);
+	set_domain_attr(name, method_str, val);
 
 	return 1;
 }

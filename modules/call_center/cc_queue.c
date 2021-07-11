@@ -1,7 +1,7 @@
 /*
  * call center module - call queuing and distribution
  *
- * Copyright (C) 2014 OpenSIPS Solutions
+ * Copyright (C) 2014-2020 OpenSIPS Solutions
  *
  * This file is part of opensips, a free SIP server.
  *
@@ -17,11 +17,7 @@
  *
  * You should have received a copy of the GNU General Public License 
  * along with this program; if not, write to the Free Software 
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
- *
- * History:
- * --------
- *  2014-03-17 initial version (bogdan)
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include "../../ut.h"
@@ -57,16 +53,49 @@ int cc_call_state_machine(struct cc_data *data, struct cc_call *call,
 			}
 			/* no Welcome message -> got for queue/agent  */
 		case CC_CALL_WELCOME:
+			/* next should be dissuading, if the case and if any */
+			if (call->flow->diss_ewt_th && call->eta > call->flow->diss_ewt_th
+			&& call->flow->recordings[AUDIO_DISSUADING].len ) {
+				/* callback/dissuading message */
+				LM_DBG("selecting DISSUADING on EWT\n");
+				out = &(call->flow->recordings[ AUDIO_DISSUADING ]);
+				state = call->flow->diss_hangup ?
+					CC_CALL_DISSUADING2 : CC_CALL_DISSUADING1;
+				break;
+			} else
+			if (call->flow->diss_qsize_th &&
+			call->flow->diss_qsize_th <= data->queue.calls_no &&
+			call->flow->recordings[AUDIO_DISSUADING].len ) {
+				/* callback/dissuading message */
+				LM_DBG("selecting DISSUADING on QUEUE SIZE\n");
+				out = &(call->flow->recordings[ AUDIO_DISSUADING ]);
+				state = call->flow->diss_hangup ?
+					CC_CALL_DISSUADING2 : CC_CALL_DISSUADING1;
+				break;
+			} 
+			/* got for queue/agent */
+		case CC_CALL_DISSUADING1:
 		case CC_CALL_QUEUED:
 			/* search for an available agent */
-			agent = get_free_agent_by_skill( data, call->flow->skill);
+			/* if we have a flow_id recording, we push the call in the queue */
+			if (!call->flow->recordings[AUDIO_FLOW_ID].len)
+				agent = get_free_agent_by_skill( data, call->flow->skill);
+			else
+				agent = NULL;
 			if (agent) {
 				/* send it to agent */
 				LM_DBG("selecting AGENT %p (%.*s)\n",agent,
 					agent->id.len, agent->id.s);
-				state = CC_CALL_TOAGENT;
-				out = &agent->location;
-				LM_DBG("moved to TOAGENT from %d, out=%p\n", call->state, out);
+				if(call->flow->recordings[AUDIO_FLOW_ID].len) {
+					out = &call->flow->recordings[AUDIO_FLOW_ID];
+					state = CC_CALL_PRE_TOAGENT;
+					LM_DBG("moved to PRE_TOAGENT from %d\n", call->state);
+				}
+				else {
+					state = CC_CALL_TOAGENT;
+					out = &agent->location;
+					LM_DBG("moved to TOAGENT from %d, out=%p\n", call->state, out);
+				}
 				/* mark agent as used */
 				agent->state = CC_AGENT_INCALL;
 				call->agent = agent;
@@ -89,6 +118,7 @@ int cc_call_state_machine(struct cc_data *data, struct cc_call *call,
 				pos = cc_queue_push_call( data, call, 0);
 			}
 			break;
+		case CC_CALL_DISSUADING2:
 		case CC_CALL_TOAGENT:
 		case CC_CALL_ENDED:
 			LM_DBG("selecting END\n");

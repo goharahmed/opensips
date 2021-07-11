@@ -236,6 +236,18 @@ modparam("rr", "enable_socket_mismatch_warning", 0)
 		header is removed and the function returns FALSE.
 		</para>
 		<para>
+		The function is able to automatically detecting if it deals with a
+		'strict' or 'loose' routing scenario (the difference is how the SIP
+		path is stored across the RURI and Route hdrs). To make the difference
+		between the two scenarios OpenSIPS has to determine which SIP URI
+		holds its address/domain - the RURI (then it is a strict routing
+		scenario) or the top Route URI (then it is a loose route scenario).
+		In order to check if the SIP URI holds its address/domain, OpenSIPS 
+		checks the host URI against the listening IPs/interfaces (as a static
+		component) and the domains listed from the "domain" module/table (as 
+		the dynamic component).
+		</para>
+		<para>
 		If there is a Route header but other parsing errors occur ( like
 		parsing the TO header to get the TAG ), the function also returns
 		FALSE.
@@ -275,7 +287,7 @@ loose_route();
 		<para>
 		If any string is passed as parameter, it will be appended as URI
 		parameter to the Record-Route header. The string must follow the 
-		<quote>;name=value</quote> scheme and it may contain pseudo-variables.
+		<quote>;name=value</quote> scheme.
 		</para>
 		<para>
 		This function can be used from REQUEST_ROUTE, BRANCH_ROUTE and 
@@ -309,8 +321,8 @@ record_route();
 		</listitem>
 		<listitem>
 			<para>
-			<emphasis>string2</emphasis> - String to be inserted into the 
-				second header field; it may contain pseudo-variables.
+			<emphasis>string2</emphasis> (optional) - String to be inserted into the 
+				second header field.
 			</para>
 		</listitem>
 		</itemizedlist>
@@ -346,9 +358,8 @@ record_route_preset("1.2.3.4:5090");
 		<itemizedlist>
 		<listitem>
 			<para>
-			<emphasis>param</emphasis> - String containing the URI parameter to
-			be added. It must follow the <quote>;name=value</quote> scheme; it 
-			may contain pseudo-variables.
+			<emphasis>param</emphasis> (string) - the URI parameter to
+			be added. It must follow the <quote>;name=value</quote> scheme.
 			</para>
 		</listitem>
 		</itemizedlist>
@@ -379,7 +390,7 @@ add_rr_param(";nat=yes");
 		<itemizedlist>
 		<listitem>
 			<para>
-			<emphasis>re</emphasis> - regular expression to check against the
+			<emphasis>re</emphasis> (string) - regular expression to check against the
 			Route URI parameters.
 			</para>
 		</listitem>
@@ -421,7 +432,7 @@ if (check_route_param("nat=yes")) {
 		<itemizedlist>
 		<listitem>
 			<para>
-			<emphasis>dir</emphasis> - string containing the direction to be 
+			<emphasis>dir</emphasis> (string) - the direction to be 
 				checked. It may be <quote>upstream</quote> (from UAS to UAC) or 
 				<quote>downstream</quote> (UAC to UAS).
 			</para>

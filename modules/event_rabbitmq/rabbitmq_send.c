@@ -34,20 +34,10 @@
 #define RMQ_SIZE (sizeof(rmq_send_t *))
 #define IS_ERR(_err) (errno == _err)
 
-#ifdef HAVE_SCHED_YIELD
-#include <sched.h>
-#else
-#include <unistd.h>
-/** Fake sched_yield if no unistd.h include is available */
-        #define sched_yield()   sleep(0)
-#endif
-
-unsigned rmq_sync_mode = 0;
-
 /* used to communicate with the sending process */
 static int rmq_pipe[2];
-/* used to communicate the status of the send (success or fail) from the sending process back to the requesting ones */
-static int (*rmq_status_pipes)[2];
+
+str rmq_static_holder = str_init(RMQ_DEFAULT_UP);
 
 /* creates communication pipe */
 int rmq_create_pipe(void)
@@ -64,37 +54,6 @@ int rmq_create_pipe(void)
 		LM_ERR("cannot create status pipe [%d:%s]\n", errno, strerror(errno));
 		return -1;
 	}
-
-	if (rmq_sync_mode && rmq_create_status_pipes() < 0) {
-		LM_ERR("cannot create communication status pipes\n");
-		return -1;
-	}
-
-	return 0;
-}
-
-/* creates status pipes */
-int rmq_create_status_pipes(void) {
-	int rc, i;
-
-	rmq_status_pipes = shm_malloc(counted_max_processes * sizeof(rmq_pipe));
-
-	if (!rmq_status_pipes) {
-		LM_ERR("cannot allocate rmq_status_pipes\n");
-		return -1;
-	}
-
-	/* create pipes */
-	for (i = 0; i < counted_max_processes; i++) {
-		do {
-			rc = pipe(rmq_status_pipes[i]);
-		} while (rc < 0 && IS_ERR(EINTR));
-
-		if (rc < 0) {
-			LM_ERR("cannot create status pipe [%d:%s]\n", errno, strerror(errno));
-			return -1;
-		}
-	}
 	return 0;
 }
 
@@ -104,30 +63,12 @@ void rmq_destroy_pipe(void)
 		close(rmq_pipe[0]);
 	if (rmq_pipe[1] != -1)
 		close(rmq_pipe[1]);
-
-	if (rmq_sync_mode)
-		rmq_destroy_status_pipes();
-}
-
-void rmq_destroy_status_pipes(void)
-{
-	int i;
-
-	for(i = 0; i < counted_max_processes; i++) {
-		close(rmq_status_pipes[i][0]);
-		close(rmq_status_pipes[i][1]);
-	}
-
-	shm_free(rmq_status_pipes);
 }
 
 int rmq_send(rmq_send_t* rmqs)
 {
 	int rc;
 	int retries = RMQ_SEND_RETRY;
-	int send_status;
-
-	rmqs->process_idx = process_no;
 
 	do {
 		rc = write(rmq_pipe[1], &rmqs, RMQ_SIZE);
@@ -136,26 +77,10 @@ int rmq_send(rmq_send_t* rmqs)
 	if (rc < 0) {
 		LM_ERR("unable to send rmq send struct to worker\n");
 		shm_free(rmqs);
-		return RMQ_SEND_FAIL;
+		return -1;
 	}
-	/* give a change to the writer :) */
-	sched_yield();
 
-	if (rmq_sync_mode) {
-		retries = RMQ_SEND_RETRY;
-
-		do {
-			rc = read(rmq_status_pipes[process_no][0], &send_status, sizeof(int));
-		} while (rc < 0 && (IS_ERR(EINTR) || retries-- > 0));
-
-		if (rc < 0) {
-			LM_ERR("cannot receive send status\n");
-			send_status = RMQ_SEND_FAIL;
-		}
-
-		return send_status;
-	} else
-		return RMQ_SEND_SUCCESS;
+	return 0;
 }
 
 static rmq_send_t * rmq_receive(void)
@@ -187,9 +112,6 @@ int rmq_init_writer(void)
 		rmq_pipe[0] = -1;
 	}
 
-	if (rmq_sync_mode)
-		close(rmq_status_pipes[process_no][1]);
-
 	/* Turn non-blocking mode on for sending*/
 	flags = fcntl(rmq_pipe[1], F_GETFL);
 	if (flags == -1) {
@@ -210,30 +132,10 @@ error:
 
 static void rmq_init_reader(void)
 {
-	int i, flags;
-
 	if (rmq_pipe[1] != -1) {
 		close(rmq_pipe[1]);
 		rmq_pipe[1] = -1;
 	}
-
-	if (rmq_sync_mode)
-		for(i = 0; i < counted_max_processes; i++) {
-			close(rmq_status_pipes[i][0]);
-
-			/* Turn non-blocking mode on for sending*/
-			flags = fcntl(rmq_status_pipes[i][1], F_GETFL);
-			if (flags == -1) {
-				LM_ERR("fcntl failed: %s\n", strerror(errno));
-				close(rmq_status_pipes[i][1]);
-				return;
-			}
-			if (fcntl(rmq_status_pipes[i][1], F_SETFL, flags | O_NONBLOCK) == -1) {
-				LM_ERR("fcntl: set non-blocking failed: %s\n", strerror(errno));
-				close(rmq_status_pipes[i][1]);
-				return;
-			}
-		}
 }
 
 /* function that checks for error */
@@ -292,16 +194,11 @@ static int rmq_error(char const *context, amqp_rpc_reply_t x)
 
 void rmq_free_param(rmq_params_t *rmqp)
 {
-	/* XXX: hack to make clang happy, because it _always_
-	 * warns when comparing two char * (even casted to void *)
-	 */
-	static void *dummy_holder = RMQ_DEFAULT_UP;
-
 	if ((rmqp->flags & RMQ_PARAM_USER) && rmqp->user.s &&
-			rmqp->user.s != dummy_holder)
+			rmqp->user.s != rmq_static_holder.s)
 		shm_free(rmqp->user.s);
 	if ((rmqp->flags & RMQ_PARAM_PASS) && rmqp->pass.s &&
-			rmqp->pass.s != dummy_holder)
+			rmqp->pass.s != rmq_static_holder.s)
 		shm_free(rmqp->pass.s);
 	if ((rmqp->flags & RMQ_PARAM_RKEY) && rmqp->routing_key.s)
 		shm_free(rmqp->routing_key.s);
@@ -322,6 +219,11 @@ void rmq_destroy_param(rmq_params_t *rmqp)
 				amqp_connection_close(rmqp->conn, AMQP_REPLY_SUCCESS));
 		if (amqp_destroy_connection(rmqp->conn) < 0)
 			LM_ERR("cannot destroy connection\n");
+	}
+
+	if (rmqp->tls_dom) {
+		tls_api.release_domain(rmqp->tls_dom);
+		rmqp->tls_dom = NULL;
 	}
 
 	rmqp->flags &= ~(RMQ_PARAM_CONN|RMQ_PARAM_CHAN);
@@ -360,18 +262,104 @@ static int rmq_reconnect(evi_reply_sock *sock)
 			return -1;
 		}
 #if defined AMQP_VERSION_v04
-		amqp_sock = amqp_tcp_socket_new(rmqp->conn);
-		if (!amqp_sock) {
-			LM_ERR("cannot create AMQP socket\n");
-			goto destroy_rmqp;
+		if (use_tls && (rmqp->flags&RMQ_PARAM_TLS)) {
+			if (!rmqp->tls_dom) {
+				rmqp->tls_dom = tls_api.find_client_domain_name(&rmqp->tls_dom_name);
+				if (!rmqp->tls_dom) {
+					LM_ERR("TLS domain: '%.*s' not found\n",
+						rmqp->tls_dom_name.len, rmqp->tls_dom_name.s);
+					goto destroy_rmqp;
+				}
+			}
+
+			amqp_sock = amqp_ssl_socket_new(rmqp->conn);
+			if (!amqp_sock) {
+				LM_ERR("cannot create AMQP TLS socket\n");
+				goto destroy_rmqp;
+			}
+
+			if (amqp_ssl_socket_set_cacert(amqp_sock, rmqp->tls_dom->ca.s) !=
+				AMQP_STATUS_OK) {
+				LM_ERR("Failed to set CA certificate\n");
+				goto destroy_rmqp;
+			}
+
+			if (amqp_ssl_socket_set_key(amqp_sock, rmqp->tls_dom->cert.s,
+				rmqp->tls_dom->pkey.s) != AMQP_STATUS_OK) {
+				LM_ERR("Failed to set certificate and private key\n");
+				goto destroy_rmqp;
+			}
+
+			#if AMQP_VERSION >= 0x00080000
+			amqp_ssl_socket_set_verify_peer(amqp_sock, rmqp->tls_dom->verify_cert);
+			amqp_ssl_socket_set_verify_hostname(amqp_sock, 0);
+			#else
+			amqp_ssl_socket_set_verify(amqp_sock, rmqp->tls_dom->verify_cert);
+			#endif
+
+			#if AMQP_VERSION >= 0x00080000
+			amqp_tls_version_t method_min, method_max;
+
+			if (rmqp->tls_dom->method != TLS_METHOD_UNSPEC) {
+				switch (rmqp->tls_dom->method) {
+				case TLS_USE_TLSv1:
+					method_min = AMQP_TLSv1;
+					break;
+				case TLS_USE_TLSv1_2:
+					method_min = AMQP_TLSv1_2;
+					break;
+				default:
+					LM_NOTICE("Unsupported TLS minimum method for AMQP, using TLSv1\n");
+					method_min = AMQP_TLSv1;
+				}
+			} else {
+				LM_DBG("Minimum TLS method unspecified, using TLSv1\n");
+				method_min = AMQP_TLSv1;
+			}
+
+			if (rmqp->tls_dom->method_max != TLS_METHOD_UNSPEC) {
+				switch (rmqp->tls_dom->method_max) {
+				case TLS_USE_TLSv1:
+					method_max = AMQP_TLSv1;
+					break;
+				case TLS_USE_TLSv1_2:
+					method_max = AMQP_TLSv1_2;
+					break;
+				default:
+					LM_NOTICE("Unsupported TLS maximum method for AMQP, using latest"
+						" supported by librabbitmq\n");
+					method_max = AMQP_TLSvLATEST;
+				}
+			} else {
+				method_max = AMQP_TLSvLATEST;
+				LM_DBG("Maximum TLS method unspecified, using latest supported by"
+					" librabbitmq\n");
+			}
+
+			if (amqp_ssl_socket_set_ssl_versions(amqp_sock, method_min, method_max) !=
+				AMQP_STATUS_OK) {
+				LM_ERR("Failed to set TLS method range\n");
+				goto destroy_rmqp;
+			}
+			#endif
+		} else {
+			amqp_sock = amqp_tcp_socket_new(rmqp->conn);
+			if (!amqp_sock) {
+				LM_ERR("cannot create AMQP socket\n");
+				goto destroy_rmqp;
+			}
 		}
-		socket = amqp_socket_open(amqp_sock, sock->address.s, sock->port);
+
+		socket = amqp_socket_open_noblock(amqp_sock, sock->address.s,
+			sock->port, &conn_timeout_tv);
 		if (socket < 0) {
-			LM_ERR("cannot open AMQP socket\n");
+			amqp_connection_close(rmqp->conn, AMQP_REPLY_SUCCESS);
+			LM_ERR("cannot open AMQP socket: %d\n", socket);
 			goto destroy_rmqp;
 		}
 #else
-		socket = amqp_open_socket(sock->address.s, sock->port);
+		socket = amqp_open_socket_noblock(sock->address.s, sock->port,
+			&conn_timeout_tv);
 		if (socket < 0) {
 			LM_ERR("cannot open AMQP socket\n");
 			goto destroy_rmqp;
@@ -470,9 +458,16 @@ static int rmq_sendmsg(rmq_send_t *rmqs)
 	rmq_params_t * rmqp = (rmq_params_t *)rmqs->sock->params;
 	int ret,rtrn;
 	int re_publish = 0;
+	amqp_basic_properties_t props;
 
 	if (!(rmqp->flags & RMQ_PARAM_CONN))
 		return 0;
+
+	if (rmqp->flags & RMQ_PARAM_PERS) {
+		memset(&props, 0, sizeof props);
+		props.delivery_mode = 2;
+		props._flags |= AMQP_BASIC_DELIVERY_MODE_FLAG;
+	}
 	
 	/* all checks should be already done */
 	ret = amqp_basic_publish(rmqp->conn,
@@ -483,7 +478,7 @@ static int rmq_sendmsg(rmq_send_t *rmqs)
 			amqp_cstring_bytes(rmqp->routing_key.s),
 			0,
 			0,
-			0,
+			((rmqp->flags & RMQ_PARAM_PERS)?&props:0),
 			amqp_cstring_bytes(rmqs->msg));
 
 	rtrn = amqp_check_status(rmqp, ret, &re_publish);
@@ -502,7 +497,7 @@ static int rmq_sendmsg(rmq_send_t *rmqs)
 				amqp_cstring_bytes(rmqp->routing_key.s),
 				0,
 				0,
-				0,
+				((rmqp->flags & RMQ_PARAM_PERS)?&props:0),
 				amqp_cstring_bytes(rmqs->msg));
 		rtrn = amqp_check_status(rmqp, ret, &re_publish);
 	}
@@ -510,10 +505,37 @@ static int rmq_sendmsg(rmq_send_t *rmqs)
 	return rtrn;
 }
 
+void rmq_run_status_cb(int sender, void *param)
+{
+	struct rmq_cb_ipc_param *cb_ipc_param =
+		(struct rmq_cb_ipc_param *)param;
+
+	cb_ipc_param->async_ctx.status_cb(cb_ipc_param->async_ctx.cb_param,
+		cb_ipc_param->status);
+
+	shm_free(cb_ipc_param);
+}
+
+static void rmq_dispatch_status_cb(evi_async_ctx_t *async_ctx,
+	enum evi_status status)
+{
+	struct rmq_cb_ipc_param *cb_ipc_param;
+
+	cb_ipc_param = shm_malloc(sizeof *cb_ipc_param);
+	if (!cb_ipc_param) {
+		LM_ERR("oom!\n");
+		return;
+	}
+
+	cb_ipc_param->async_ctx = *async_ctx;
+	cb_ipc_param->status = status;
+
+	ipc_dispatch_rpc(rmq_run_status_cb, cb_ipc_param);
+}
+
 void rmq_process(int rank)
 {
-	int retries, rc;
-	int send_status;
+	enum evi_status status;
 
 	/* init blocking reader */
 	rmq_init_reader();
@@ -535,31 +557,21 @@ void rmq_process(int rank)
 		/* check if we should reconnect */
 		if (rmq_reconnect(rmqs->sock) < 0) {
 			LM_ERR("cannot reconnect socket\n");
-			send_status = RMQ_SEND_FAIL;
-			goto send_status_reply;
+			if (rmqs->async_ctx.status_cb)
+				rmq_dispatch_status_cb(&rmqs->async_ctx, EVI_STATUS_FAIL);
+			goto end;
 		}
 
 		/* send msg */
 		if (rmq_sendmsg(rmqs)) {
 			LM_ERR("cannot send message\n");
-			send_status = RMQ_SEND_FAIL;
+			status = EVI_STATUS_FAIL;
 		} else {
-			send_status = RMQ_SEND_SUCCESS;
+			status = EVI_STATUS_SUCCESS;
 		}
 
-send_status_reply:
-		if (rmq_sync_mode) {
-			retries = RMQ_SEND_RETRY;
-
-			/* check rmqs->process_idx sanity */
-			if (rmqs->process_idx >= 0 && rmqs->process_idx < counted_max_processes) {
-				do {
-					rc = write(rmq_status_pipes[rmqs->process_idx][1], &send_status, sizeof(int));
-				} while (rc < 0 && (IS_ERR(EINTR) || retries-- > 0));
-				if (rc < 0)
-					LM_ERR("cannot send status back to requesting process\n");
-			}
-		}
+		if (rmqs->async_ctx.status_cb)
+			rmq_dispatch_status_cb(&rmqs->async_ctx, status);
 end:
 		if (rmqs)
 			shm_free(rmqs);

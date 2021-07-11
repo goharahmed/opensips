@@ -39,6 +39,9 @@ int mi_message_id;
 static char* correlation_name = "correlation_id";
 str correlation_value;
 int correlation_id=-1, correlation_vendor=-1;
+str mi_trpl;
+struct mi_trace_req mi_treq;
+struct mi_trace_param mi_tparam;
 
 
 void try_load_trace_api(void)
@@ -206,9 +209,8 @@ static int mi_mods_no=0;
 
 static int is_id_valid(int id)
 {
-	/* FIXME is this valid? */
-	if ( id >= 8 * sizeof( *(((struct mi_cmd *)0)->trace_mask) ) ||
-			id < 0 )
+	/* mask is currently char, we might need to expand it to offer more space */
+	if (id < 0 || id >= 8 * sizeof( *(((struct mi_cmd *)0)->trace_mask) ))
 		return 0;
 
 	return 1;

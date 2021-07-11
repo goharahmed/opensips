@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2005-2008 Voice Sistem SRL
+ * Copyright (C) 2020 OpenSIPS Solutions
  *
  * This file is part of Open SIP Server (OpenSIPS).
  *
@@ -16,15 +17,6 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
- *
- * For any questions about this software and its license, please contact
- * Voice Sistem at following e-mail address:
- *         office@voice-system.ro
- *
- * History:
- * ---------
- *  2005-02-20  first version (cristian)
- *  2005-02-27  ported to 0.9.0 (bogdan)
  */
 
 
@@ -36,22 +28,27 @@
 #include "../../ip_addr.h"
 #include "../../time_rec.h"
 #include "../../map.h"
+#include "../../mem/mem_funcs.h"
 
-#define PTREE_CHILDREN 10
+#include "dr_cb_sorting.h"
+
 #define IS_DECIMAL_DIGIT(d) \
 	(((d)>='0') && ((d)<= '9'))
 
+extern int ptree_children;
 extern int tree_size;
 struct head_db;
 
 #define INIT_PTREE_NODE(f, p, n) \
 do {\
-	(n) = (ptree_t*)func_malloc(f, sizeof(ptree_t));\
+	(n) = (ptree_t*)func_malloc(f, sizeof(ptree_t) +\
+		ptree_children*sizeof(ptree_node_t));\
 	if(NULL == (n))\
 		goto err_exit;\
 	tree_size+=sizeof(ptree_t);\
-	memset((n), 0, sizeof(ptree_t));\
+	memset((n), 0, sizeof(ptree_t)+ptree_children*sizeof(ptree_node_t));\
 	(n)->bp=(p);\
+	(n)->ptnode=(ptree_node_t*)((n)+1);\
 }while(0);
 
 
@@ -98,10 +95,11 @@ typedef struct pgw_list_ {
 	unsigned int weight;
 }pgw_list_t;
 
-#define DR_CR_FLAG_WEIGHT (1<<0)
-#define DR_CR_FLAG_FIRST  (1<<1)
-#define DR_CR_FLAG_IS_OFF (1<<2)
-#define DR_CR_FLAG_DIRTY  (1<<3)
+//#define DR_CR_FLAG_WEIGHT (1<<0)
+#define DR_CR_FLAG_FIRST  (1<<0)
+#define DR_CR_FLAG_IS_OFF (1<<1)
+#define DR_CR_FLAG_DIRTY  (1<<2)
+//#define DR_CR_FLAG_QR (1<<4)
 
 /* list of carriers */
 struct pcr_ {
@@ -109,6 +107,8 @@ struct pcr_ {
 	str id;
 	/* flags */
 	unsigned int flags;
+	/* gateway sorting algorithm */
+	sort_cb_type sort_alg;
 	/* array of pointers into the PSTN gw list */
 	pgw_list_t *pgwl;
 	/* length of the PSTN gw array */
@@ -127,9 +127,9 @@ typedef struct rt_info_ {
 	/* priority of the rule */
 	unsigned int priority;
 	/* timerec says when the rule is on */
-	tmrec_t *time_rec;
+	tmrec_expr *time_rec;
 	/* script route to be executed */
-	int route_idx;
+	char* route_idx;
 	/* opaque string with rule attributes */
 	str attrs;
 	/* array of pointers into the PSTN gw list */
@@ -138,6 +138,10 @@ typedef struct rt_info_ {
 	unsigned short pgwa_len;
 	/* how many lists link this element */
 	unsigned short ref_cnt;
+	/* handler used by qr for accounting (actually qr_rule_t *) */
+	void *qr_handler;
+	/* sorting algorithm for the destinations */
+	sort_cb_type sort_alg;
 } rt_info_t;
 
 typedef struct rt_info_wrp_ {
@@ -160,8 +164,15 @@ typedef struct ptree_node_ {
 typedef struct ptree_ {
 	/* backpointer */
 	struct ptree_ *bp;
-	ptree_node_t ptnode[PTREE_CHILDREN];
+	ptree_node_t *ptnode;
 } ptree_t;
+
+
+
+int
+init_prefix_tree(
+	char *extra_prefix_chars
+	);
 
 void
 print_interim(

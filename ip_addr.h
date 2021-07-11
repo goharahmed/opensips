@@ -49,9 +49,15 @@
 #define MAX_SEND_BUFFER_SIZE	512*1024
 #define BUFFER_INCREMENT	2048
 
+#define HEX2I(c) \
+	(	(((c)>='0') && ((c)<='9'))? (c)-'0' :  \
+		(((c)>='A') && ((c)<='F'))? ((c)-'A')+10 : \
+		(((c)>='a') && ((c)<='f'))? ((c)-'a')+10 : -1 )
+
+
 enum sip_protos { PROTO_NONE = 0, PROTO_FIRST = 1, PROTO_UDP = 1, \
 	PROTO_TCP, PROTO_TLS, PROTO_SCTP, PROTO_WS, PROTO_WSS, PROTO_BIN,
-				PROTO_HEP_UDP, PROTO_HEP_TCP, PROTO_SMPP, PROTO_OTHER };
+	PROTO_BINS, PROTO_HEP_UDP, PROTO_HEP_TCP, PROTO_SMPP, PROTO_OTHER };
 #define PROTO_LAST PROTO_OTHER
 
 struct ip_addr{
@@ -90,8 +96,8 @@ struct receive_info {
 	unsigned short src_port; /*!< host byte order */
 	unsigned short dst_port; /*!< host byte order */
 	int proto;
-	int proto_reserved1; /*!< tcp stores the connection id here */
-	int proto_reserved2;
+	unsigned int proto_reserved1; /*!< tcp stores the connection id here */
+	unsigned int proto_reserved2;
 	union sockaddr_union src_su; /*!< useful for replies*/
 	struct socket_info* bind_address; /*!< sock_info structure on which the msg was received*/
 	/* no need for dst_su yet */
@@ -100,7 +106,7 @@ struct receive_info {
 
 struct dest_info {
 	int proto;
-	int proto_reserved1; /*!< tcp stores the connection id here */
+	unsigned int proto_reserved1; /*!< tcp stores the connection id here */
 	union sockaddr_union to;
 	struct socket_info* send_sock;
 };
@@ -147,7 +153,7 @@ struct socket_id {
 		struct ip_addr __ip; \
 		sockaddr2ip_addr( &__ip, (struct sockaddr*)_su ); \
 		_ip_char = ip_addr2a(&__ip); \
-		_port_no = su_getport( (union sockaddr_union*)_su); \
+		_port_no = su_getport( (union sockaddr_union*)(void *)_su); \
 	} while(0)
 
 
@@ -160,6 +166,9 @@ struct socket_id {
 /* check if a socket_info is marked as anycast */
 #define is_anycast(_si) (_si->flags & SI_IS_ANYCAST)
 
+/* checks if the given protocol is a SIP one (versus HEP, BIN, SMPP, etc) 
+ * we rely here on the fact at all the SIP protos are in a sequance */
+#define is_sip_proto(_proto) (PROTO_UDP<=(_proto) && (_proto)<=PROTO_WSS)
 
 struct net* mk_net(struct ip_addr* ip, struct ip_addr* mask);
 struct net* mk_net_bitlen(struct ip_addr* ip, unsigned int bitlen);
@@ -167,6 +176,8 @@ struct net* mk_net_bitlen(struct ip_addr* ip, unsigned int bitlen);
 void print_ip(char* prefix, struct ip_addr* ip, char* suffix);
 void stdout_print_ip(struct ip_addr* ip);
 void print_net(struct net* net);
+
+int ip_addr_is_1918(str *s_ip);
 
 #ifdef USE_MCAST
 /*! \brief Returns 1 if the given address is a multicast address */
@@ -200,22 +211,26 @@ inline static int matchnet(struct ip_addr* ip, struct net* net)
 /*! \brief inits an ip_addr pointer from a sockaddr structure*/
 static inline void sockaddr2ip_addr(struct ip_addr* ip, struct sockaddr* sa)
 {
+	void *copyfrom;
+
 	switch(sa->sa_family){
 	case AF_INET:
 			ip->af=AF_INET;
 			ip->len=4;
-			memcpy(ip->u.addr, &((struct sockaddr_in*)sa)->sin_addr, 4);
+			copyfrom = &((struct sockaddr_in*)(void *)sa)->sin_addr;
 			break;
 	case AF_INET6:
 			ip->af=AF_INET6;
 			ip->len=16;
-			memcpy(ip->u.addr, &((struct sockaddr_in6*)sa)->sin6_addr, 16);
+			copyfrom = &((struct sockaddr_in6*)(void *)sa)->sin6_addr;
 			break;
 	default:
 			LM_CRIT("unknown address family %d\n", sa->sa_family);
 			/* clear the structure to prevent uninitialized warnings */
 			ip->af=sa->sa_family;
+			return;
 	}
+	memcpy(ip->u.addr, copyfrom, ip->len);
 }
 
 
@@ -495,6 +510,177 @@ static inline char* ip_addr2a(struct ip_addr* ip)
 	return _ip_addr_A_buff;
 }
 
+
+/*! \brief converts a str to an ipv4 address, returns the address or 0 on error
+   Warning: the result is a pointer to a statically allocated structure */
+static inline struct ip_addr* str2ip(str* st)
+{
+	int i, j;
+	unsigned char *limit;
+	static struct ip_addr ip;
+	unsigned char *s;
+
+	if (st == NULL || st->s == NULL) goto error_null;
+	s=(unsigned char*)st->s;
+
+	/*init*/
+	ip.u.addr32[0]=0;
+	i=j=0;
+	limit=(unsigned char*)(st->s + st->len);
+
+	/* first char must be different than '0' */
+	if ((*s > '9' ) || (*s < '0')) goto error_char;
+	ip.u.addr[i]=ip.u.addr[i]*10+*s-'0';
+	s++;
+	j++;
+	for(;s<limit ;s++){
+		if (*s=='.'){
+				i++;
+				j=0;
+				if (i>3) goto error_dots;
+				s++;
+				if (s==limit) break;
+				if ( (*s <= '9' ) && (*s >= '0') ){
+					j++;
+					ip.u.addr[i]=ip.u.addr[i]*10+*s-'0';
+				} else {
+					goto error_char;
+				}
+		}else if ( (j==1) && (*s <= '9' ) && (*s >= '0') ){
+				/* if first char is '0' then fail conversion */
+				if (ip.u.addr[i]==0) goto error_char;
+				j++;
+				ip.u.addr[i]=ip.u.addr[i]*10+*s-'0';
+		}else if ( (j==2) && (*s <= '9' ) && (*s >= '0') ){
+				/* if first two chars are bigger then '25' then fail conversion */
+				if (ip.u.addr[i]>25) goto error_char;
+				/* if first three chars are bigger then '255' then fail conversion */
+				if (ip.u.addr[i]==25 && *s > '5') goto error_char;
+				j++;
+				ip.u.addr[i]=ip.u.addr[i]*10+*s-'0';
+		}else{
+				//error unknown char
+				goto error_char;
+		}
+	}
+	if (i<3) goto error_dots;
+	ip.af=AF_INET;
+	ip.len=4;
+
+	return &ip;
+error_null:
+	LM_DBG("Null pointer detected\n");
+	return NULL;
+error_dots:
+	LM_DBG("too %s dots in [%.*s]\n", (i>3)?"many":"few",
+			st->len, st->s);
+	return NULL;
+ error_char:
+	/*
+	LM_ERR("unexpected char [%p]->[%c] in [%p]->[%.*s] while i=[%d] j=[%d]\n",
+		s, *s, st->s, st->len, st->s, i, j);
+	*/
+	return NULL;
+}
+
+
+/*! \brief returns an ip_addr struct.; on error returns 0
+ * the ip_addr struct is static, so subsequent calls will destroy its content*/
+static inline struct ip_addr* str2ip6(str* st)
+{
+	int i, idx1, rest;
+	int no_colons;
+	int double_colon;
+	int hex;
+	static struct ip_addr ip;
+	unsigned short* addr_start;
+	unsigned short addr_end[8];
+	unsigned short* addr;
+	unsigned char* limit;
+	unsigned char* s;
+
+	if (st == NULL || st->s == NULL) goto error_char;
+	/* init */
+	if ((st->len) && (st->s[0]=='[')){
+		/* skip over [ ] */
+		if (st->s[st->len-1]!=']') goto error_char;
+		s=(unsigned char*)(st->s+1);
+		limit=(unsigned char*)(st->s+st->len-1);
+	}else{
+		s=(unsigned char*)st->s;
+		limit=(unsigned char*)(st->s+st->len);
+	}
+	i=idx1=rest=0;
+	double_colon=0;
+	no_colons=0;
+	ip.af=AF_INET6;
+	ip.len=16;
+	addr_start=ip.u.addr16;
+	addr=addr_start;
+	memset(addr_start, 0 , 8*sizeof(unsigned short));
+	memset(addr_end, 0 , 8*sizeof(unsigned short));
+	for (; s<limit; s++){
+		if (*s==':'){
+			no_colons++;
+			if (no_colons>7) goto error_too_many_colons;
+			if (double_colon){
+				idx1=i;
+				i=0;
+				if (addr==addr_end) goto error_colons;
+				addr=addr_end;
+			}else{
+				double_colon=1;
+				addr[i]=htons(addr[i]);
+				i++;
+			}
+		}else if ((hex=HEX2I(*s))>=0){
+				addr[i]=addr[i]*16+hex;
+				double_colon=0;
+		}else{
+			/* error, unknown char */
+			goto error_char;
+		}
+	}
+	if (!double_colon){ /* not ending in ':' */
+		addr[i]=htons(addr[i]);
+		i++;
+	}
+	/* if address contained '::' fix it */
+	if (addr==addr_end){
+		rest=8-i-idx1;
+		memcpy(addr_start+idx1+rest, addr_end, i*sizeof(unsigned short));
+	}else{
+		/* no double colons inside */
+		if (no_colons<7) goto error_too_few_colons;
+	}
+/*
+	DBG("str2ip6: idx1=%d, rest=%d, no_colons=%d, hex=%x\n",
+			idx1, rest, no_colons, hex);
+	DBG("str2ip6: address %x:%x:%x:%x:%x:%x:%x:%x\n",
+			addr_start[0], addr_start[1], addr_start[2],
+			addr_start[3], addr_start[4], addr_start[5],
+			addr_start[6], addr_start[7] );
+*/
+	return &ip;
+
+error_too_many_colons:
+	LM_DBG("too many colons in [%.*s]\n", st->len, st->s);
+	return 0;
+
+error_too_few_colons:
+	LM_DBG("too few colons in [%.*s]\n", st->len, st->s);
+	return 0;
+
+error_colons:
+	LM_DBG("too many double colons in [%.*s]\n", st->len, st->s);
+	return 0;
+
+error_char:
+	/*
+	DBG("str2ip6: WARNING: unexpected char %c in [%.*s]\n", *s, st->len,
+			st->s);*/
+	return 0;
+}
 
 
 /*! \brief converts an ip_addr structure to a hostent

@@ -30,14 +30,20 @@ Load Balancer Module
 
         1.6. Exported Functions
 
-              1.6.1. lb_start(grp,resources[,flags])
-              1.6.2. lb_next()
-              1.6.3. lb_start_or_next(grp,resources[,flags])
-              1.6.4. load_balance(grp,resources[,flags])
+              1.6.1. lb_start(grp,resources[,flags],[attrs])
+              1.6.2. lb_next([attrs])
+              1.6.3.
+                      lb_start_or_next(grp,resources[,flags],[attrs]
+                      )
+
+              1.6.4. load_balance(grp,resources[,flags],[attrs])
               1.6.5. lb_reset()
               1.6.6. lb_is_started()
               1.6.7. lb_disable_dst()
-              1.6.8. lb_is_destination(ip,port[,group[,active]])
+              1.6.8.
+                      lb_is_destination(ip,port,[group],[active],[at
+                      trs]])
+
               1.6.9. lb_count_call(ip,port,grp,resources[,undo])
 
         1.7. Exported MI Functions
@@ -122,8 +128,7 @@ Chapter 1. Admin Guide
 
    Please refer to the Load-Balancer tutorial from the OpenSIPS
    website:
-   http://www.opensips.org/Documentation/Tutorials-LoadBalancing-1
-   -9.
+   https://opensips.org/Documentation/Tutorials-LoadBalancing-1-9.
 
 1.3. Probing and Disabling destinations
 
@@ -292,8 +297,10 @@ modparam("load_balancer", "lb_define_blacklist", "blist2= 2,10,6")
    periodically update the internal maximum value of the given
    resource using statistics pushed by the FreeSWITCH box.
 
-   The max value of a resource is updated every 20 seconds, as the
-   stats arrive from FreeSWITCH.
+   The max value of a resource is updated every
+   event_heartbeat_interval seconds (see the "freeswitch" OpenSIPS
+   module for more details regarding this setting), as the stats
+   arrive from FreeSWITCH.
 
    Given the following format for FreeSWITCH heartbeat messages:
 {
@@ -392,7 +399,7 @@ modparam("load_balancer", "cluster_sharing_tag", "vip")
 
 1.6. Exported Functions
 
-1.6.1.  lb_start(grp,resources[,flags])
+1.6.1.  lb_start(grp,resources[,flags],[attrs])
 
    The function starts a new load-balancing session over the
    available destinations. This translates into finding the less
@@ -400,14 +407,13 @@ modparam("load_balancer", "cluster_sharing_tag", "vip")
    belong to a requested group.
 
    Meaning of the parameters is as follows:
-     * grp - group id for the destinations; the destination may be
-       grouped in several groups you can you for differnet
-       scenarios; this can be a number or a variable containing a
-       numerical value.
-     * resources - string containing a semi-colon separated list
-       of resources required by the current call.
-     * flags - various flags to controll the LB algorithm ( or
-       computing the available load on the system):
+     * grp (int) - group id for the destinations; the destination
+       may be grouped in several groups you can you for differnet
+       scenarios.
+     * resources (string) - a semi-colon separated list of
+       resources required by the current call.
+     * flags (string, optional) - various flags to controll the LB
+       algorithm ( or computing the available load on the system):
           + n - Negative availability - use destinations with
             negative availability (exceeded capacity); do not
             ignore resources with negative availability, and thus
@@ -428,6 +434,8 @@ modparam("load_balancer", "cluster_sharing_tag", "vip")
             and distribute load in situations when failed calls
             always routed to first destination, since they almost
             does not affect load counters of destinations.
+     * attrs (var, optional) - a writable variable to be populated
+       with the attributes of the selected destination.
 
    The function may return:
      * 1 (true) - if a new destination URI is set, pointing to the
@@ -447,7 +455,7 @@ modparam("load_balancer", "cluster_sharing_tag", "vip")
 
    Example 1.13. lb_start usage
 ...
-if (lb_start("1","trascoding;conference")) {
+if (lb_start(1,"trascoding;conference")) {
         # dst URI points to the new destination
         xlog("sending call to $du\n");
         t_relay();
@@ -455,7 +463,7 @@ if (lb_start("1","trascoding;conference")) {
 }
 ...
 
-1.6.2.  lb_next()
+1.6.2.  lb_next([attrs])
 
    Function to be used to pull the next available (and less
    loaded) destination. You need to have an ongoing LB session
@@ -463,6 +471,10 @@ if (lb_start("1","trascoding;conference")) {
 
    This function is mainly used for implementing failover for the
    LB destinations.
+
+   Meaning of the parameters is as follows:
+     * attrs (var, optional) - a writable variable to be populated
+       with the attributes of the selected destination.
 
    The function may return:
      * 1 (true) - if a new destination URI is set, pointing to the
@@ -491,13 +503,13 @@ if (t_check_status("(408)|(5[0-9][0-9])")) {
 
 ...
 
-1.6.3.  lb_start_or_next(grp,resources[,flags])
+1.6.3.  lb_start_or_next(grp,resources[,flags],[attrs])
 
    This is just a wrapper function to simplify scripting. If there
    is no ongoing LB session, it acts as lb_start(); If there is an
    ongoing LB session, it acts as lb_next().
 
-1.6.4.  load_balance(grp,resources[,flags])
+1.6.4.  load_balance(grp,resources[,flags],[attrs])
 
    Old name of the lb_start_or_next() function.
 
@@ -524,7 +536,7 @@ if (t_check_status("(5[0-9][0-9])")) {
         }
 } else if (t_check_status("(408)")) {
         lb_reset();
-        if (lb_start("1","conference")) {
+        if (lb_start(1,"conference")) {
                 t_relay();
                 exit;
         }
@@ -557,13 +569,13 @@ if (t_check_status("(408)|(5[0-9][0-9])")) {
                 xlog("-----------new dst is $du\n");
                 t_relay();
         } else {
-                t_reply("500","Error");
+                t_reply(500,"Error");
         }
 }
 
 ...
 
-1.6.8.  lb_is_destination(ip,port[,group[,active]])
+1.6.8.  lb_is_destination(ip,port,[group],[active],[attrs]])
 
    Checks if the given IP and PORT belongs to a destination
    configured in the load-balancer's list. Returns true if found
@@ -573,19 +585,22 @@ if (t_check_status("(408)|(5[0-9][0-9])")) {
    ONREPLY_ROUTE, BRANCH_ROUTE and LOCAL_ROUTE.
 
    Meaning of the parameters is as follows:
-     * ip and port - IP and PORT to be checked (any kind of
-       variables are allowed, but take care as the PORT variables
-       should have an integer value); A value 0 for the port means
-       "any" - will match any port.
-     * group - in what LB group the destination should be looked
-       for; If not specified, the search will be in all groups.
-     * active - if "1", the search will be performed only over
-       "active" (not disabled) destinations. If missing, the
-       search will consider any kind of destinations.
+     * ip (string) - IP to be checked
+     * port (int) - PORT to be checked. A value 0 means "any" -
+       will match any port.
+     * group (int, optional) - in what LB group the destination
+       should be looked for; If not specified, the search will be
+       in all groups.
+     * active (int, optional)- if "1", the search will be
+       performed only over "active" (not disabled) destinations.
+       If missing, the search will consider any kind of
+       destinations.
+     * attrs (var, optional) - a writable variable to be populated
+       with the attributes of the identified destination.
 
    Example 1.17. lb_is_destination usage
 ...
-if (lb_is_destination("$si","$sp") ) {
+if (lb_is_destination($si,$sp) ) {
         # request from a LB destination
 }
 ...
@@ -599,14 +614,16 @@ if (lb_is_destination("$si","$sp") ) {
    LB as ongoing call for a destination;
 
    Meaning of the parameters is as follows:
-     * ip and port - IP and PORT to identify the destination the
-       call has to be counted for.
-     * grp - group id for the destinations; if no knows, "-1" will
-       mean all groups.
-     * resources - string containing a semi-colon separated list
-       of resources required by the current call.
-     * undo - (optional) if set to a non zero value, it will force
-       the function to un-count - actually it will undo the
+     * ip (string) - IP to identify the destination the call has
+       to be counted for.
+     * port (int) - PORT to identify the destination the call has
+       to be counted for.
+     * grp (int) - group id for the destinations; if no knows,
+       "-1" will mean all groups.
+     * resources - (string) a semi-colon separated list of
+       resources required by the current call.
+     * undo - (int, optional) if set to a non zero value, it will
+       force the function to un-count - actually it will undo the
        counting of this call as load in the current LB session;
        this might be needed if we count call for particular
        resources and then need to un-count it.
@@ -620,13 +637,13 @@ if (lb_is_destination("$si","$sp") ) {
    Example 1.18. lb_count_call usage
 ...
 # count as load also the calls orgininated by lb destinations
-if (lb_is_destination("$si","$sp") ) {
+if (lb_is_destination($si,$sp) ) {
         # inbound call from destination
-        lb_count_call("$si","$sp","-1","conference");
+        lb_count_call($si,$sp,-1,"conference");
 } else {
         # outbound call to destinations
-        if ( !load_balance("1","conference") ) {
-                send_reply("503","unavailable");
+        if ( !load_balance(1,"conference") ) {
+                send_reply(503,"unavailable");
                 exit();
         }
         # dst URI points to the new destination
@@ -714,34 +731,34 @@ Chapter 3. Frequently Asked Questions
 
    3.1.
 
-       Where can I find more about OpenSIPS?
+   Where can I find more about OpenSIPS?
 
-       Take a look at http://www.opensips.org/.
+   Take a look at https://opensips.org/.
 
    3.2.
 
-       Where can I post a question about this module?
+   Where can I post a question about this module?
 
-       First at all check if your question was already answered on one
-       of our mailing lists:
-         * User Mailing List -
-           http://lists.opensips.org/cgi-bin/mailman/listinfo/users
-         * Developer Mailing List -
-           http://lists.opensips.org/cgi-bin/mailman/listinfo/devel
+   First at all check if your question was already answered on one
+   of our mailing lists:
+     * User Mailing List -
+       http://lists.opensips.org/cgi-bin/mailman/listinfo/users
+     * Developer Mailing List -
+       http://lists.opensips.org/cgi-bin/mailman/listinfo/devel
 
-       E-mails regarding any stable OpenSIPS release should be sent to
-       <users@lists.opensips.org> and e-mails regarding development
-       versions should be sent to <devel@lists.opensips.org>.
+   E-mails regarding any stable OpenSIPS release should be sent to
+   <users@lists.opensips.org> and e-mails regarding development
+   versions should be sent to <devel@lists.opensips.org>.
 
-       If you want to keep the mail private, send it to
-       <users@lists.opensips.org>.
+   If you want to keep the mail private, send it to
+   <users@lists.opensips.org>.
 
    3.3.
 
-       How can I report a bug?
+   How can I report a bug?
 
-       Please follow the guidelines provided at:
-       https://github.com/OpenSIPS/opensips/issues.
+   Please follow the guidelines provided at:
+   https://github.com/OpenSIPS/opensips/issues.
 
 Chapter 4. Contributors
 
@@ -750,19 +767,20 @@ Chapter 4. Contributors
    Table 4.1. Top contributors by DevScore^(1), authored
    commits^(2) and lines added/removed^(3)
      Name DevScore Commits Lines ++ Lines --
-   1. Bogdan-Andrei Iancu (@bogdan-iancu) 113 65 4259 728
-   2. Liviu Chircu (@liviuchircu) 38 29 678 166
-   3. Razvan Crainea (@razvancrainea) 22 16 257 141
-   4. Vlad Patrascu (@rvlad-patrascu) 21 12 262 308
-   5. Sergey Khripchenko 19 6 649 366
-   6. shripchenko 11 4 409 150
-   7. Vlad Paiu (@vladpaiu) 5 3 7 5
-   8. Walter Doekes (@wdoekes) 5 3 3 3
-   9. Jeremy Martinez 5 2 193 1
-   10. Ezequiel Lovelle 4 2 3 3
+   1. Bogdan-Andrei Iancu (@bogdan-iancu) 119 71 4268 738
+   2. Liviu Chircu (@liviuchircu) 41 32 683 170
+   3. Vlad Patrascu (@rvlad-patrascu) 36 17 619 759
+   4. Sergey Khripchenko (@shripchenko) 28 10 1058 516
+   5. Razvan Crainea (@razvancrainea) 25 19 260 142
+   6. Vlad Paiu (@vladpaiu) 5 3 7 5
+   7. Walter Doekes (@wdoekes) 5 3 3 3
+   8. Jeremy Martinez (@JeremyMartinez51) 5 2 193 1
+   9. Ezequiel Lovelle (@lovelle) 4 2 3 3
+   10. Anca Vamanu 3 1 20 9
 
-   All remaining contributors: Anca Vamanu, Andrei Dragus, James
-   Van Vleet, Dusan Klinec, Peter Lemenkov (@lemenkov).
+   All remaining contributors: Andrei Dragus, James Van Vleet,
+   Dusan Klinec (@ph4r05), Peter Lemenkov (@lemenkov), Zero King
+   (@l2dy).
 
    (1) DevScore = author_commits + author_lines_added /
    (project_lines_added / project_commits) + author_lines_deleted
@@ -784,16 +802,16 @@ Chapter 4. Contributors
 
    Table 4.2. Most recently active contributors^(1) to this module
                       Name                   Commit Activity
-   1.  Razvan Crainea (@razvancrainea)     Oct 2010 - Mar 2019
-   2.  Bogdan-Andrei Iancu (@bogdan-iancu) Feb 2009 - Jan 2019
-   3.  Vlad Patrascu (@rvlad-patrascu)     Mar 2017 - Dec 2018
-   4.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
-   5.  Liviu Chircu (@liviuchircu)         Sep 2012 - Jun 2018
-   6.  Jeremy Martinez                     Feb 2017 - Feb 2017
-   7.  Dusan Klinec                        Dec 2015 - Dec 2015
-   8.  Sergey Khripchenko                  Nov 2014 - Oct 2015
-   9.  Ezequiel Lovelle                    Oct 2014 - Oct 2014
-   10. shripchenko                         Oct 2014 - Oct 2014
+   1.  Bogdan-Andrei Iancu (@bogdan-iancu) Feb 2009 - Sep 2020
+   2.  Liviu Chircu (@liviuchircu)         Sep 2012 - Sep 2020
+   3.  Zero King (@l2dy)                   Mar 2020 - Mar 2020
+   4.  Vlad Patrascu (@rvlad-patrascu)     Mar 2017 - Jan 2020
+   5.  Razvan Crainea (@razvancrainea)     Oct 2010 - Sep 2019
+   6.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
+   7.  Jeremy Martinez (@JeremyMartinez51) Feb 2017 - Feb 2017
+   8.  Dusan Klinec (@ph4r05)              Dec 2015 - Dec 2015
+   9.  Sergey Khripchenko (@shripchenko)   Oct 2014 - Oct 2015
+   10. Ezequiel Lovelle (@lovelle)         Oct 2014 - Oct 2014
 
    All remaining contributors: Walter Doekes (@wdoekes), Vlad Paiu
    (@vladpaiu), Andrei Dragus, James Van Vleet, Anca Vamanu.
@@ -805,10 +823,11 @@ Chapter 5. Documentation
 
 5.1. Contributors
 
-   Last edited by: Razvan Crainea (@razvancrainea), Bogdan-Andrei
-   Iancu (@bogdan-iancu), Peter Lemenkov (@lemenkov), Liviu Chircu
-   (@liviuchircu), Vlad Patrascu (@rvlad-patrascu), Sergey
-   Khripchenko, Ezequiel Lovelle, Walter Doekes (@wdoekes), Vlad
+   Last edited by: Zero King (@l2dy), Vlad Patrascu
+   (@rvlad-patrascu), Liviu Chircu (@liviuchircu), Razvan Crainea
+   (@razvancrainea), Bogdan-Andrei Iancu (@bogdan-iancu), Peter
+   Lemenkov (@lemenkov), Sergey Khripchenko (@shripchenko),
+   Ezequiel Lovelle (@lovelle), Walter Doekes (@wdoekes), Vlad
    Paiu (@vladpaiu).
 
    Documentation Copyrights:

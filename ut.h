@@ -43,6 +43,8 @@
 #include "mem/mem.h"
 #include "mem/shm_mem.h"
 
+#include "lib/str2const.h"
+
 typedef struct _int_str_t {
 	union {
 		int i;
@@ -53,18 +55,17 @@ typedef struct _int_str_t {
 
 struct sip_msg;
 
+/* the amount of decimals to be displayed for "float" and "double" values */
+#define FLOATING_POINT_PRECISION 8
+
 /* zero-string wrapper */
 #define ZSW(_c) ((_c)?(_c):"")
-
-/* str initialization */
-#define str_init(_string)  {_string, sizeof(_string) - 1}
 
 /* returns string beginning and length without insignificant chars */
 #define trim_len( _len, _begin, _mystr ) \
 	do{ 	static char _c; \
 		(_len)=(_mystr).len; \
-		while ((_len) && ((_c=(_mystr).s[(_len)-1])==0 || _c=='\r' || \
-					_c=='\n' || _c==' ' || _c=='\t' )) \
+		while ((_len) && ((_c=(_mystr).s[(_len)-1])==0 || is_ws(_c))) \
 			(_len)--; \
 		(_begin)=(_mystr).s; \
 		while ((_len) && ((_c=*(_begin))==' ' || _c=='\t')) { \
@@ -134,28 +135,28 @@ struct sip_msg;
 	_add_last(what, where, next)
 
 /**
- * pkg_free_all() - pkg_free() each element of the given list.
+ * pkg_free_all() - pkg_free() each element of the given (circular) list.
  * @things: Pointer to the list that is to be freed in succession.
  *
  * The list is walked using "->next".
  */
 #define pkg_free_all(things) \
 	do { \
-		typeof(things) pos; \
-		while (things) \
+		typeof(things) pos = NULL, head = (things); \
+		while ((things) && ((things) != head || !pos)) \
 			{ pos = (things); (things) = (things)->next; pkg_free(pos); } \
 	} while (0)
 
 /**
- * shm_free_all() - shm_free() each element of the given list.
+ * shm_free_all() - shm_free() each element of the given (circular) list.
  * @things: Pointer to the list that is to be freed in succession.
  *
  * The list is walked using "->next".
  */
 #define shm_free_all(things) \
 	do { \
-		typeof(things) pos; \
-		while (things) \
+		typeof(things) pos = NULL, head = (things); \
+		while ((things) && ((things) != head || !pos)) \
 			{ pos = (things); (things) = (things)->next; shm_free(pos); } \
 	} while (0)
 
@@ -286,6 +287,18 @@ static inline char* sint2str(long l, int* len)
 		if (len) (*len)++;
 	}
 	return p;
+}
+
+static inline char* double2str(double d, int* len)
+{
+	static int buf;
+
+	buf = (buf + 1) % INT2STR_BUF_NO;
+	*len = snprintf(int2str_buf[buf], INT2STR_MAX_LEN - 1, "%0.*lf",
+	                FLOATING_POINT_PRECISION, d);
+	int2str_buf[buf][*len] = '\0';
+
+	return int2str_buf[buf];
 }
 
 
@@ -441,7 +454,7 @@ inline static int string2hex(
 		str++;
 
 	}
-	return orig_len-len;
+	return orig_len * 2;
 }
 
 /* portable sleep in microseconds (no interrupt handling now) */
@@ -469,6 +482,17 @@ inline static int pathmax(void)
 	}
 	return pathmax;
 }
+
+/* faster than glibc equivalents */
+#define _isdigit(c) ((c) >= '0' && (c) <= '9')
+#define _isalpha(c) \
+	(((c) >= 'a' && (c) <= 'z') || \
+	 ((c) >= 'A' && (c) <= 'Z'))
+#define _isxdigit(c) \
+	(((c) >= '0' && (c) <= '9') || \
+	 ((c) >= 'a' && (c) <= 'f') || \
+	 ((c) >= 'A' && (c) <= 'F'))
+#define _isalnum(c) (_isalpha(c) || _isdigit(c))
 
 inline static int hex2int(char hex_digit)
 {
@@ -552,6 +576,54 @@ error:
 	return -1;
 }
 
+static inline void unescape_crlf(str *in_out)
+{
+	char *p, *lim = in_out->s + in_out->len;
+
+	if (ZSTR(*in_out))
+		return;
+
+	for (p = in_out->s; p < lim; p++) {
+		if (*p == '\\' && p + 1 < lim) {
+			if (*(p + 1) == 'r') {
+				*p = '\r';
+				memmove(p + 1, p + 2, lim - (p + 2));
+				in_out->len--;
+			} else if (*(p + 1) == 'n') {
+				*p = '\n';
+				memmove(p + 1, p + 2, lim - (p + 2));
+				in_out->len--;
+			}
+		}
+	}
+}
+
+static inline int _is_e164(const str* _user, int require_plus)
+{
+	char *d, *start, *end;
+
+	if (_user->len < 1)
+		return -1;
+
+	if (_user->s[0] == '+') {
+		start = _user->s + 1;
+	} else {
+		if (require_plus)
+			return -1;
+		start = _user->s;
+	}
+
+	end = _user->s + _user->len;
+	if (end - start < 2 || end - start > 15)
+		return -1;
+
+	for (d = start; d < end; d++)
+		if (!_isdigit(*d))
+			return -1;
+
+	return 1;
+}
+#define is_e164(_user) _is_e164(_user, 1)
 
 /*
  * Convert a string to lower case
@@ -591,7 +663,7 @@ static inline int str2short(str* _s, unsigned short *_r)
 /*
  * Convert a str into integer
  */
-static inline int str2int(str* _s, unsigned int* _r)
+static inline int str2int(const str* _s, unsigned int* _r)
 {
 	int i;
 
@@ -614,7 +686,7 @@ static inline int str2int(str* _s, unsigned int* _r)
 /*
  * Convert a str into a big integer
  */
-static inline int str2int64(str* _s, uint64_t *_r)
+static inline int str2int64(const str* _s, uint64_t *_r)
 {
 	int i;
 
@@ -638,7 +710,7 @@ static inline int str2int64(str* _s, uint64_t *_r)
 /*
  * Convert a str into signed integer
  */
-static inline int str2sint(str* _s, int* _r)
+static inline int str2sint(const str* _s, int* _r)
 {
 	int i;
 	int s;
@@ -673,7 +745,7 @@ static inline int str2sint(str* _s, int* _r)
 /*
  * Convert a str (base 10 or 16) into integer
  */
-static inline int strno2int( str *val, unsigned int *mask )
+static inline int strno2int(const str *val, unsigned int *mask )
 {
 	/* hexa or decimal*/
 	if (val->len>2 && val->s[0]=='0' && val->s[1]=='x') {
@@ -705,10 +777,14 @@ static inline int shm_str_dup(str* dst, const str* src)
 /*
  * Make a copy of an str structure using shm_malloc
  *	  + an additional '\0' byte, so you can make use of dst->s
+ *
+ * dst == src is allowed!
  */
 static inline int shm_nt_str_dup(str* dst, const str* src)
 {
-	if (!src->s) {
+	const str _src = *src;
+
+	if (!_src.s) {
 		memset(dst, 0, sizeof *dst);
 		return 0;
 	}
@@ -717,36 +793,44 @@ static inline int shm_nt_str_dup(str* dst, const str* src)
 	if (!dst->s) {
 		LM_ERR("no shared memory left\n");
 		dst->len = 0;
+		if (dst == src)
+			*dst = _src;
 		return -1;
 	}
 
-	memcpy(dst->s, src->s, src->len);
-	dst->len = src->len;
-	dst->s[dst->len] = '\0';
+	memcpy(dst->s, _src.s, _src.len);
+	dst->len = _src.len;
+	dst->s[_src.len] = '\0';
 	return 0;
 }
 
 /*
  * Make a copy of an str structure using pkg_malloc
  *	  + an additional '\0' byte, so you can make use of dst->s
+ *
+ * dst == src is allowed!
  */
 static inline int pkg_nt_str_dup(str* dst, const str* src)
 {
-	if (!src->s) {
+	const str _src = *src;
+
+	if (!_src.s) {
 		memset(dst, 0, sizeof *dst);
 		return 0;
 	}
 
-	dst->s = pkg_malloc(src->len + 1);
+	dst->s = pkg_malloc(_src.len + 1);
 	if (!dst->s) {
 		LM_ERR("no private memory left\n");
 		dst->len = 0;
+		if (dst == src)
+			*dst = _src;
 		return -1;
 	}
 
-	memcpy(dst->s, src->s, src->len);
-	dst->len = src->len;
-	dst->s[dst->len] = '\0';
+	memcpy(dst->s, _src.s, _src.len);
+	dst->len = _src.len;
+	dst->s[_src.len] = '\0';
 	return 0;
 }
 
@@ -775,6 +859,8 @@ static inline int shm_str_extend(str *in, int size)
 {
 	char *p;
 
+	/* do not check for !in->s here, as it's better
+	 * to crash sooner on a corrupt @in string (e.g. {NULL, 172}) */
 	if (in->len < size) {
 		p = shm_realloc(in->s, size);
 		if (!p) {
@@ -861,6 +947,8 @@ static inline int pkg_str_extend(str *in, int size)
 {
 	char *p;
 
+	/* do not check for !in->s here, as it's better
+	 * to crash sooner on a corrupt @in string (e.g. {NULL, 172}) */
 	if (in->len < size) {
 		p = pkg_realloc(in->s, size);
 		if (!p) {
@@ -875,10 +963,69 @@ static inline int pkg_str_extend(str *in, int size)
 	return 0;
 }
 
+
+/*
+ * test if two str's are equal
+ */
+static inline int _str_matchCC(const str_const *a, const str_const *b)
+{
+	return a->len == b->len && !memcmp(a->s, b->s, a->len);
+}
+static inline int _str_matchSS(const str *a, const str *b)
+{
+        return _str_matchCC(str2const(a), str2const(b));
+}
+static inline int _str_matchSC(const str *a, const str_const *b)
+{
+        return _str_matchCC(str2const(a), b);
+}
+static inline int _str_matchCS(const str_const *a, const str *b)
+{
+        return _str_matchCC(a, str2const(b));
+}
+
+/*
+ * test if two str's are equal, case-insensitive
+ */
+static inline int _str_casematchCC(const str_const *a, const str_const *b)
+{
+	const char *p, *q, *end;
+
+	if (a->len != b->len)
+		return 0;
+
+	p = a->s;
+	q = b->s;
+
+	if (p == q)
+		return 1;
+
+	end = p + a->len;
+
+	do {
+		if (tolower(*p) != tolower(*q++))
+			return 0;
+	} while (++p < end);
+
+	return 1;
+}
+static inline int _str_casematchSS(const str *a, const str *b)
+{
+        return _str_casematchCC(str2const(a), str2const(b));
+}
+static inline int _str_casematchSC(const str *a, const str_const *b)
+{
+        return _str_casematchCC(str2const(a), b);
+}
+static inline int _str_casematchCS(const str_const *a, const str *b)
+{
+        return _str_casematchCC(a, str2const(b));
+}
+
 /*
  * compare two str's
  */
-static inline int str_strcmp(const str *stra, const str *strb)
+static inline int _str_strcmpCC(const str_const *stra, const str_const *strb)
 {
 	int i;
 	int alen;
@@ -888,14 +1035,15 @@ static inline int str_strcmp(const str *stra, const str *strb)
 	if(stra==NULL || strb==NULL || stra->s ==NULL || strb->s==NULL
 	|| stra->len<0 || strb->len<0)
 	{
-		LM_ERR("bad parameters\n");
+#ifdef EXTRA_DEBUG
+		LM_DBG("bad parameters\n");
+#endif
 		return -2;
 	}
 
 	alen = stra->len;
 	blen = strb->len;
 	minlen = (alen < blen ? alen : blen);
-
 
 	for (i = 0; i < minlen; i++) {
 		const char a = stra->s[i];
@@ -905,6 +1053,7 @@ static inline int str_strcmp(const str *stra, const str *strb)
 		if (a > b)
 			return 1;
 	}
+
 	if (alen < blen)
 		return -1;
 	else if (alen > blen)
@@ -912,6 +1061,35 @@ static inline int str_strcmp(const str *stra, const str *strb)
 	else
 		return 0;
 }
+static inline int _str_strcmpSS(const str *a, const str *b)
+{
+	return _str_strcmpCC(str2const(a), str2const(b));
+}
+static inline int _str_strcmpSC(const str *a, const str_const *b)
+{
+	return _str_strcmpCC(str2const(a), b);
+}
+static inline int _str_strcmpCS(const str_const *a, const str *b)
+{
+	return _str_strcmpCC(a, str2const(b));
+}
+
+/*
+ * compares a str with a const null terminated string
+ */
+static inline int str_match_nt(const str *a, const char *b)
+{
+	return a->len == strlen(b) && !memcmp(a->s, b, a->len);
+}
+
+/*
+ * compares a str with a const null terminated string, case-insensitive
+ */
+static inline int str_casematch_nt(const str *a, const char *b)
+{
+	return a->len == strlen(b) && !strncasecmp(a->s, b, a->len);
+}
+
 
 /*
  * search strb in stra
@@ -923,7 +1101,9 @@ static inline char* str_strstr(const str *stra, const str *strb)
 
 	if (stra==NULL || strb==NULL || stra->s==NULL || strb->s==NULL
 			|| stra->len<=0 || strb->len<=0) {
-		LM_ERR("bad parameters\n");
+#ifdef EXTRA_DEBUG
+		LM_DBG("bad parameters\n");
+#endif
 		return NULL;
 	}
 
@@ -963,7 +1143,9 @@ static inline int str_strncasecmp(const str *stra, const str *strb, int n)
 	if(stra==NULL || strb==NULL || stra->s ==NULL || strb->s==NULL
 	|| stra->len<0 || strb->len<0)
 	{
-		LM_ERR("bad parameters\n");
+#ifdef EXTRA_DEBUG
+		LM_DBG("bad parameters\n");
+#endif
 		return -2;
 	}
 
@@ -998,7 +1180,9 @@ static inline int str_strcasecmp(const str *stra, const str *strb)
 	if(stra==NULL || strb==NULL || stra->s ==NULL || strb->s==NULL
 	|| stra->len<0 || strb->len<0)
 	{
-		LM_ERR("bad parameters\n");
+#ifdef EXTRA_DEBUG
+		LM_DBG("bad parameters\n");
+#endif
 		return -2;
 	}
 	alen = stra->len;
@@ -1023,21 +1207,40 @@ static inline int str_strcasecmp(const str *stra, const str *strb)
 
 #define start_expire_timer(begin,threshold) \
 	do { \
-		if ((threshold))	\
+		if (threshold)	\
 			gettimeofday(&(begin), NULL); \
 	} while(0) \
 
-#define stop_expire_timer(begin,threshold,func_info,extra_s,extra_len,tcp) \
+#define __stop_expire_timer(begin,threshold,func_info, \
+                           extra_s,extra_len,tcp,_slow_stat) \
 	do { \
-		if ((threshold)) \
-			log_expiry(get_time_diff(&(begin)),(threshold),(func_info),(extra_s),(extra_len),tcp); \
+		if (threshold) { \
+			int __usdiff__ = get_time_diff(&(begin)); \
+			if (__usdiff__ > (threshold)) { \
+				log_expiry(__usdiff__,(threshold),(func_info), \
+				           (extra_s),(extra_len),tcp); \
+				if (_slow_stat) \
+					inc_stat(_slow_stat); \
+			} \
+		} \
 	} while(0)
 
+#define stop_expire_timer(begin,threshold,func_info,extra_s,extra_len,tcp) \
+	__stop_expire_timer(begin,threshold,func_info, \
+	                   extra_s,extra_len,tcp,(stat_var *)NULL)
 
+#define _stop_expire_timer(begin,threshold,func_info,extra_s,extra_len,tcp, \
+							slow, total) \
+	do { \
+		__stop_expire_timer(begin,threshold,func_info, \
+							extra_s,extra_len,tcp,slow); \
+		if (total) \
+			inc_stat(total); \
+	} while (0)
 
-int tcp_timeout_con_get;
-int tcp_timeout_receive_fd;
-int tcp_timeout_send;
+extern int tcp_timeout_con_get;
+extern int tcp_timeout_receive_fd;
+extern int tcp_timeout_send;
 
 #define reset_tcp_vars(threshold) \
 	do { \
@@ -1103,7 +1306,7 @@ static inline void log_expiry(int time_diff,int expire,
 		if (memcmp(func_info,"msg",3) == 0) {
 			for (i=0;i<LONGEST_ACTION_SIZE;i++) {
 				if (longest_action[i].a) {
-					if ((unsigned char)longest_action[i].a->type == MODULE_T)
+					if ((unsigned char)longest_action[i].a->type == CMD_T)
 					LM_WARN("#%i is a module action : %s - %dus - line %d\n",i+1,
 							((cmd_export_t*)(longest_action[i].a->elem[0].u.data))->name,
 							longest_action[i].a_time,longest_action[i].a->line);
@@ -1230,6 +1433,15 @@ static inline void * l_memmem(const void *b1, const void *b2,
 	return NULL;
 }
 
+/**
+ * Make any database URL log-friendly by masking its password, if any
+ * Note: makes use of a single, static buffer -- use accordingly!
+ */
+char *db_url_escape(const str *url);
+static inline char *_db_url_escape(char *url)
+{
+	return db_url_escape(_str(url));
+}
 
 int user2uid(int* uid, int* gid, char* user);
 
@@ -1247,6 +1459,9 @@ int parse_reply_codes( str *options_reply_codes_str,
 void base64encode(unsigned char *out, unsigned char *in, int inlen);
 int base64decode(unsigned char *out,unsigned char *in,int len);
 
+void base64urlencode(unsigned char *out, unsigned char *in, int inlen);
+int base64urldecode(unsigned char *out,unsigned char *in,int len);
+
 /*
  * "word64" is a combination between:
  *   - RFC 3261-compatible "word" token characters
@@ -1255,11 +1470,31 @@ int base64decode(unsigned char *out,unsigned char *in,int len);
 void word64encode(unsigned char *out, unsigned char *in, int inlen);
 int word64decode(unsigned char *out, unsigned char *in, int len);
 
+void _base32encode(unsigned char *out, unsigned char *in, int inlen,
+	unsigned char pad_char);
+int _base32decode(unsigned char *out, unsigned char *in, int len,
+	unsigned char pad_char);
+
+#define base32encode(out, in, inlen) _base32encode(out, in, inlen, '=')
+
+/* also accepts lowercase letters as equivalent encoding characters
+ * of uppercase letters */
+#define base32decode(out, in, len) _base32decode(out, in, len, '=')
+
+/* same as base32 but uses '-' instead of '=' as pad character */
+#define word32encode(out, in, inlen) _base32encode(out, in, inlen, '-')
+#define word32decode(out, in, len) _base32decode(out, in, len, '-')
+
 #define calc_base64_encode_len(_l) (((_l)/3 + ((_l)%3?1:0))*4)
 #define calc_max_base64_decode_len(_l) ((_l)*3/4)
 
 #define calc_word64_encode_len calc_base64_encode_len
 #define calc_max_word64_decode_len calc_max_base64_decode_len
 
+#define calc_base32_encode_len(_l) (((_l)/5 + ((_l)%5?1:0))*8)
+#define calc_max_base32_decode_len(_l) ((_l)*5/8)
+
+#define calc_word32_encode_len calc_base32_encode_len
+#define calc_max_word32_decode_len calc_max_base32_decode_len
 
 #endif

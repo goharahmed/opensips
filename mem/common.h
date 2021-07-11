@@ -23,6 +23,10 @@
 #ifndef mem_common_h
 #define mem_common_h
 
+extern void *mem_block;
+extern void *shm_block;
+extern void *rpm_block;
+
 #include "meminfo.h"
 
 #if !defined(F_MALLOC) && !defined(Q_MALLOC) && !defined(HP_MALLOC)
@@ -76,10 +80,6 @@ int parse_mm(const char *mm_name, enum osips_mm *mm);
 	 (mm) == MM_Q_MALLOC_DBG ? "Q_MALLOC_DBG" : \
 	 (mm) == MM_HP_MALLOC_DBG ? "HP_MALLOC_DBG" : "unknown")
 
-extern void *mem_block;
-extern void *shm_block;
-extern void *rpm_block;
-
 #ifdef DBG_MALLOC
 typedef void *(*osips_block_malloc_f) (void *block, unsigned long size,
                       const char *file, const char *func, unsigned int line);
@@ -93,35 +93,13 @@ typedef void *(*osips_block_realloc_f) (void *block, void *ptr, unsigned long si
 typedef void (*osips_block_free_f) (void *block, void *ptr);
 #endif
 
-#ifdef DBG_MALLOC
-typedef void *(*osips_malloc_f) (unsigned long size,
-                      const char *file, const char *func, unsigned int line);
-typedef void *(*osips_realloc_f) (void *ptr, unsigned long size,
-                      const char *file, const char *func, unsigned int line);
-typedef void (*osips_free_f) (void *ptr,
-                      const char *file, const char *func, unsigned int line);
-#define func_malloc(_func, _size) (_func)(_size, \
-		__FILE__, __FUNCTION__, __LINE__ )
-#define func_realloc(_func, _ptr, _size) (_func)(_ptr, _size, \
-		__FILE__, __FUNCTION__, __LINE__ )
-#define func_free(_func, _ptr) (_func)(_ptr, \
-		__FILE__, __FUNCTION__, __LINE__ )
-#else
-typedef void *(*osips_malloc_f) (unsigned long size);
-typedef void *(*osips_realloc_f) (void *ptr, unsigned long size);
-typedef void (*osips_free_f) (void *ptr);
-#define func_malloc(_func, _size) (_func)(_size)
-#define func_realloc(_func, _ptr, _size) (_func)(_ptr, _size)
-#define func_free(_func, _ptr) (_func)(_ptr)
-#endif
-
 typedef void (*osips_mem_info_f) (void *block, struct mem_info *i);
 typedef void (*osips_mem_status_f) (void *block);
 typedef unsigned long (*osips_get_mmstat_f) (void *block);
 typedef void (*osips_shm_stats_init_f) (void *block, int core_index);
 
 #define oom_errorf \
-	"not enough free %s memory (%lu bytes left, need %lu), " \
+	"not enough free %s memory (%ld bytes left, need %lu), " \
 	"please increase the \"-%s\" command line parameter!\n"
 
 #define oom_nostats_errorf \

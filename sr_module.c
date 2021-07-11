@@ -89,8 +89,9 @@ struct sr_module* modules=0;
 	extern struct module_exports sl_exports;
 #endif
 
+#define MPATH_LEN	256
 static const char *mpath;
-static char mpath_buf[256];
+static char mpath_buf[MPATH_LEN + 1];
 static int  mpath_len;
 
 /* initializes statically built (compiled in) modules*/
@@ -195,10 +196,6 @@ error:
 	return ret;
 }
 
-#ifndef DLSYM_PREFIX
-/* define it to null */
-#define DLSYM_PREFIX
-#endif
 
 static inline int version_control(struct module_exports* exp, char *path)
 {
@@ -279,6 +276,11 @@ int sr_load_module(char* path)
 		exit(0);
 	}
 
+	if (exp->load_f && exp->load_f() < 0) {
+		LM_ERR("could not initialize module %s\n", path);
+		goto error1;
+	}
+
 	/* launch register */
 	if (register_module(exp, path, handle)<0) goto error1;
 	return 0;
@@ -347,9 +349,14 @@ static int load_static_module(char *path)
 
 void set_mpath(const char *new_mpath)
 {
+	int len = strlen(new_mpath);
+	if (len >= MPATH_LEN) {
+		LM_ERR("mpath %s too long!\n", new_mpath);
+		return;
+	}
 	mpath = new_mpath;
 	strcpy(mpath_buf, new_mpath);
-	mpath_len = strlen(mpath);
+	mpath_len = len;
 	if (mpath_len == 0 || mpath_buf[mpath_len - 1] != '/') {
 		mpath_buf[mpath_len] = '/';
 		mpath_len++;
@@ -368,7 +375,7 @@ int load_module(char* name)
 		return 0;
 
 	if(*name!='/' && mpath!=NULL
-		&& strlen(name)+mpath_len<255)
+		&& strlen(name)+mpath_len<MPATH_LEN)
 	{
 		strcpy(mpath_buf+mpath_len, name);
 		if (stat(mpath_buf, &statf) == -1 || S_ISDIR(statf.st_mode)) {
@@ -376,7 +383,7 @@ int load_module(char* name)
 			if(strchr(name, '/')==NULL &&
 				strncmp(mpath_buf+i_tmp-3, ".so", 3)==0)
 			{
-				if(i_tmp+strlen(name)<255)
+				if(i_tmp+strlen(name)<MPATH_LEN)
 				{
 					strcpy(mpath_buf+i_tmp-3, "/");
 					strcpy(mpath_buf+i_tmp-2, name);
@@ -417,63 +424,54 @@ int load_module(char* name)
  * 0 if not found
  * flags parameter is OR value of all flags that must match
  */
-cmd_function find_export(char* name, int param_no, int flags)
+cmd_function find_export(char* name, int flags)
 {
 	cmd_export_t* cmd;
 
-	cmd = find_cmd_export_t(name, param_no, flags);
+	cmd = find_mod_cmd_export_t(name, flags);
 	if (cmd==0)
 		return 0;
+
 	return cmd->function;
 }
 
 
 
-/* searches the module list and returns pointer to the "name" cmd_export_t
- * structure or 0 if not found
- * In order to find the module the name, flags parameter number and type and
- * the value of all flags in the config must match to the module export
+/* Searches the module list for the "name" cmd_export_t structure.
  */
-cmd_export_t* find_cmd_export_t(char* name, int param_no, int flags)
+cmd_export_t* find_mod_cmd_export_t(char* name, int flags)
 {
 	struct sr_module* t;
 	cmd_export_t* cmd;
 
 	for(t=modules;t;t=t->next){
 		for(cmd=t->exports->cmds; cmd && cmd->name; cmd++){
-			if((strcmp(name, cmd->name)==0)&&
-				(cmd->param_no==param_no) &&
-				((cmd->flags & flags) == flags)
-			  ){
-				LM_DBG("found <%s>(%d) in module %s [%s]\n",
-						name, param_no, t->exports->name, t->path);
+			if((strcmp(name, cmd->name)==0)&&((cmd->flags & flags) == flags)){
+				LM_DBG("found <%s> in module %s [%s]\n",
+						name, t->exports->name, t->path);
 				return cmd;
 			}
 		}
 	}
+
 	LM_DBG("<%s> not found \n", name);
 	return 0;
 }
 
 
 
-/* searches the module list and returns pointer to the async "name" cmd_export_t
- * structure or 0 if not found
- * In order to find the module the name, flags parameter number in the config
- * must match to the module export
+/* Searches the module list for the "name" acmd_export_t structure.
  */
-acmd_export_t* find_acmd_export_t(char* name, int param_no)
+acmd_export_t* find_mod_acmd_export_t(char* name)
 {
 	struct sr_module* t;
 	acmd_export_t* cmd;
 
 	for(t=modules;t;t=t->next){
 		for(cmd=t->exports->acmds; cmd && cmd->name; cmd++){
-			if((strcmp(name, cmd->name)==0)&&
-			   (cmd->param_no==param_no)
-			  ){
-				LM_DBG("found async <%s>(%d) in module %s [%s]\n",
-					name, param_no, t->exports->name, t->path);
+			if((strcmp(name, cmd->name)==0)){
+				LM_DBG("found <%s> in module %s [%s]\n",
+						name, t->exports->name, t->path);
 				return cmd;
 			}
 		}
@@ -482,14 +480,12 @@ acmd_export_t* find_acmd_export_t(char* name, int param_no)
 	return 0;
 }
 
-
-
 /*
  * searches the module list and returns pointer to "name" function in module
  * "mod" or 0 if not found
  * flags parameter is OR value of all flags that must match
  */
-cmd_function find_mod_export(char* mod, char* name, int param_no, int flags)
+cmd_function find_mod_export(char* mod, char* name, int flags)
 {
 	struct sr_module* t;
 	cmd_export_t* cmd;
@@ -498,7 +494,6 @@ cmd_function find_mod_export(char* mod, char* name, int param_no, int flags)
 		if (strcmp(t->exports->name, mod) == 0) {
 			for (cmd = t->exports->cmds;  cmd && cmd->name; cmd++) {
 				if ((strcmp(name, cmd->name) == 0) &&
-				    (cmd->param_no == param_no) &&
 				    ((cmd->flags & flags) == flags)
 				   ){
 					LM_DBG("found <%s> in module %s [%s]\n",
@@ -537,21 +532,45 @@ void* find_param_export(char* mod, char* name, modparam_t type)
 }
 
 
+static void destroy_module(struct sr_module *m, int skip_others)
+{
+	struct sr_module_dep *dep;
+
+	if (!m)
+		return;
+
+	/* destroy the modules in script load order using backwards iteration */
+	if (!skip_others)
+		destroy_module(m->next, 0);
+
+	if (m->destroy_done || !m->exports)
+		return;
+
+	/* make sure certain modules get destroyed before this one */
+	for (dep = m->sr_deps_destroy; dep; dep = dep->next)
+		if (!dep->mod->destroy_done)
+			destroy_module(dep->mod, 1);
+
+	if (m->init_done && m->exports->destroy_f)
+		m->exports->destroy_f();
+
+	m->destroy_done = 1;
+}
+
 
 void destroy_modules(void)
 {
-	struct sr_module* t, *foo;
+	struct sr_module *mod, *aux;
 
-	t = modules;
-	while (t) {
-		foo = t->next;
-		if (t->init_done && t->exports && t->exports->destroy_f)
-			t->exports->destroy_f();
-		pkg_free(t);
-		t = foo;
+	destroy_module(modules, 0);
+	free_module_dependencies(modules);
+
+	mod = modules;
+	while (mod) {
+		aux = mod;
+		mod = mod->next;
+		pkg_free(aux);
 	}
-
-	modules = NULL;
 }
 
 
@@ -560,33 +579,39 @@ void destroy_modules(void)
    which modules are loaded in config file
 */
 
-static int init_mod_child( struct sr_module* m, int rank, char *type )
+static int init_mod_child( struct sr_module* m, int rank, char *type,
+                          int skip_others)
 {
-	if (m) {
-		/* iterate through the list; if error occurs,
-		   propagate it up the stack */
-		if (init_mod_child(m->next, rank, type)!=0)
-			return -1;
+	struct sr_module_dep *dep;
 
-		if (m->exports && m->exports->init_child_f) {
-			LM_DBG("type=%s, rank=%d, module=%s\n",
-					type, rank, m->exports->name);
-			if (m->exports->init_child_f(rank)<0) {
-				LM_ERR("failed to initializing module %s, rank %d\n",
-					m->exports->name,rank);
+	if (!m || m->init_child_done)
+		return 0;
+
+	/* iterate through the list; if error occurs,
+	   propagate it up the stack */
+	if (!skip_others && init_mod_child(m->next, rank, type, 0) != 0)
+		return -1;
+
+	for (dep = m->sr_deps_init; dep; dep = dep->next)
+		if (!dep->mod->init_child_done)
+			if (init_mod_child(dep->mod, rank, type, 1) != 0)
 				return -1;
-			} else {
-				/* module correctly initialized */
-				return 0;
-			}
-		}
 
-		/* no init function -- proceed with success */
+	if (m->init_child_done)
 		return 0;
-	} else {
-		/* end of list */
-		return 0;
+
+	if (m->exports && m->exports->init_child_f) {
+		LM_DBG("type=%s, rank=%d, module=%s\n",
+				type, rank, m->exports->name);
+		if (m->exports->init_child_f(rank)<0) {
+			LM_ERR("failed to initializing module %s, rank %d\n",
+				m->exports->name,rank);
+			return -1;
+		}
 	}
+
+	m->init_child_done = 1;
+	return 0;
 }
 
 
@@ -604,7 +629,6 @@ int init_child(int rank)
 	case PROC_TIMER:    type = "PROC_TIMER";    break;
 	case PROC_MODULE:   type = "PROC_MODULE";   break;
 	case PROC_TCP_MAIN: type = "PROC_TCP_MAIN"; break;
-	case PROC_BIN:      type = "PROC_BIN";      break;
 	}
 
 	if (!type) {
@@ -614,7 +638,7 @@ int init_child(int rank)
 			type = "UNKNOWN";
 	}
 
-	return init_mod_child(modules, rank, type);
+	return init_mod_child(modules, rank, type, 0);
 }
 
 
@@ -643,7 +667,7 @@ static int init_mod( struct sr_module* m, int skip_others)
 			return 0;
 
 		/* make sure certain modules get loaded before this one */
-		for (dep = m->sr_deps; dep; dep = dep->next) {
+		for (dep = m->sr_deps_init; dep; dep = dep->next) {
 			if (!dep->mod->init_done)
 				if (init_mod(dep->mod, 1) != 0)
 					return -1;
@@ -693,19 +717,27 @@ static int init_mod( struct sr_module* m, int skip_others)
  */
 int init_modules(void)
 {
+	struct sr_module *currentMod;
 	int ret;
 
-	if (testing_framework) {
+	if (testing_framework)
 		init_unit_tests();
-		solve_module_dependencies(modules);
+
+	/* pre-initialize all modules */
+	for (currentMod=modules; currentMod; currentMod=currentMod->next) {
+		if (currentMod->exports->preinit_f == NULL)
+			continue;
+		ret = currentMod->exports->preinit_f();
+		if (ret < 0) {
+			LM_ERR("could not pre-initialize module %s!\n",
+					currentMod->exports->name);
+			return ret;
+		}
 	}
 
-	ret = init_mod(modules, 0);
-
-	free_module_dependencies(modules);
-
-	return ret;
+	return init_mod(modules, 0);
 }
+
 
 /* Returns 1 if the module with name 'name' is loaded, and zero otherwise. */
 int module_loaded(char *name)
@@ -720,6 +752,18 @@ int module_loaded(char *name)
 	}
 
 	return 0;
+}
+
+
+void *get_mod_handle(const char *name)
+{
+	struct sr_module *mod;
+
+	for (mod = modules; mod; mod = mod->next)
+		if (!strcasecmp(name, mod->exports->name))
+			return mod->handle;
+
+	return NULL;
 }
 
 
@@ -751,6 +795,7 @@ int start_module_procs(void)
 	struct sr_module *m;
 	unsigned int n;
 	unsigned int l;
+	unsigned int flags;
 	int x;
 
 	for( m=modules ; m ; m=m->next) {
@@ -771,9 +816,18 @@ int start_module_procs(void)
 			for ( l=0; l<m->exports->procs[n].no ; l++) {
 				LM_DBG("forking process \"%s\"/%d for module %s\n",
 					m->exports->procs[n].name, l, m->exports->name);
-				x = internal_fork( m->exports->procs[n].name,
-						((m->exports->procs[n].flags&PROC_FLAG_HAS_IPC) ?
-						0 : OSS_PROC_NO_IPC)|OSS_PROC_IS_EXTRA, TYPE_MODULE );
+				/* conver the module proc flags to internal proc flgas
+				 * NOTE that the PROC_FLAG_NEEDS_SCRIPT automatically
+				 * assumes PROC_FLAG_HAS_IPC - IPC is needed for script
+				 * reload */
+				flags = OSS_PROC_IS_EXTRA;
+				if (m->exports->procs[n].flags&PROC_FLAG_NEEDS_SCRIPT)
+					flags |= OSS_PROC_NEEDS_SCRIPT;
+				else
+				if ( (m->exports->procs[n].flags&PROC_FLAG_HAS_IPC)==0)
+					flags |= OSS_PROC_NO_IPC;
+				x = internal_fork( m->exports->procs[n].name, flags,
+					TYPE_MODULE );
 				if (x<0) {
 					LM_ERR("failed to fork process \"%s\"/%d for module %s\n",
 						m->exports->procs[n].name, l, m->exports->name);
@@ -811,3 +865,23 @@ int start_module_procs(void)
 
 	return 0;
 }
+
+
+int modules_validate_reload(void)
+{
+	struct sr_module *m;
+	int ret = 1;
+
+	for( m=modules ; m ; m=m->next) {
+		if (m->exports->reload_ack_f==NULL)
+			continue;
+		if (!m->exports->reload_ack_f()) {
+			LM_ERR("module <%s> did not validated the cfg file\n",
+				m->exports->name);
+			ret = 0;
+		}
+	}
+
+	return ret;
+}
+

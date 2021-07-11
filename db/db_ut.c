@@ -27,16 +27,20 @@
  * values and print SQL queries from the internal API representation.
  */
 
-#include "db_ut.h"
+#define _XOPEN_SOURCE 700 /* See strptime(3), snprintf(3) */
+#define _DEFAULT_SOURCE
 
-#include "../mem/mem.h"
-#include "../dprint.h"
+#include <time.h>
 #include <limits.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "../mem/mem.h"
+#include "../dprint.h"
+
+#include "db_ut.h"
 
 inline int db_str2int(const char* _s, int* _v)
 {
@@ -51,7 +55,7 @@ inline int db_str2int(const char* _s, int* _v)
 	tmp = strtol(_s, &p, 10);
 	if (((tmp == LONG_MAX || tmp == LONG_MIN) && errno == ERANGE) ||
 	    (tmp < INT_MIN) || (tmp > INT_MAX)) {
-		LM_ERR("Value out of range\n");
+		LM_ERR("Value out of range: [%s]\n", _s);
 		return -1;
 	}
 	if (p && *p != '\0') {
@@ -75,7 +79,7 @@ inline int db_str2bigint(const char* _s, long long* _v)
 
 	tmp = strtoll(_s, &p, 10);
 	if ((tmp == LLONG_MIN || tmp == LLONG_MAX) && errno == ERANGE) {
-		LM_ERR("Value out of range\n");
+		LM_ERR("Value out of range: [%s]\n", _s);
 		return -1;
 	}
 	if (p && *p != '\0') {
@@ -208,7 +212,7 @@ inline int db_str2time(const char* _s, time_t* _v)
 
 inline int db_time2str_nq(time_t _v, char* _s, int* _l)
 {
-	struct tm* t;
+	struct tm t;
 	int l;
 
 	if ((!_s) || (!_l) || (*_l < 2)) {
@@ -217,8 +221,8 @@ inline int db_time2str_nq(time_t _v, char* _s, int* _l)
 	}
 
 	/* Convert time_t structure to format accepted by the database */
-	t = localtime(&_v);
-	l = strftime(_s, *_l -1, "%Y-%m-%d %H:%M:%S", t);
+	localtime_r(&_v, &t);
+	l = strftime(_s, *_l -1, "%Y-%m-%d %H:%M:%S", &t);
 
 	if (l == 0) {
 		LM_ERR("Error during time conversion\n");
@@ -408,4 +412,40 @@ int db_print_set(const db_con_t* _c, char* _b, const int _l, const db_key_t* _k,
  error:
 	LM_ERR("Error in snprintf\n");
 	return -1;
+}
+
+
+int db_is_neq_type(db_type_t _t0, db_type_t _t1)
+{
+	// LM_DBG("t0=%d t1=%d!\n", _t0, _t1);
+	switch(_t0) {
+	case DB_BIGINT:
+	case DB_BITMAP:
+	case DB_DATETIME:
+	case DB_INT:
+		switch(_t1) {
+		case DB_BIGINT:
+		case DB_BITMAP:
+		case DB_DATETIME:
+		case DB_INT:
+			return 0;
+		default:
+			return 1;
+		}
+	case DB_BLOB:
+	case DB_STR:
+	case DB_STRING:
+		switch(_t1) {
+		case DB_BLOB:
+		case DB_STR:
+		case DB_STRING:
+			return 0;
+		default:
+			return 1;
+		}
+	default:
+		break;
+	}
+
+	return _t0 != _t1;
 }

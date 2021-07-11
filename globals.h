@@ -23,20 +23,21 @@
  * \brief Global variables
  */
 
-
 #ifndef globals_h
 #define globals_h
 
-#include "ip_addr.h"
-#include "str.h"
-#include "poll_types.h"
+#include <time.h>
+
+typedef struct __str * const strptr_t;
 
 #define DO_DNS     1
 #define DO_REV_DNS 2
 
 extern int testing_framework;
+extern char *testing_module;
 
 extern char * cfg_file;
+extern char *preproc;
 extern int config_check;
 extern char *stat_file;
 
@@ -49,6 +50,7 @@ extern int auto_aliases;
 
 extern unsigned int maxbuffer;
 extern int udp_workers_no;
+extern char *udp_auto_scaling_profile;
 extern enum poll_types io_poll_method;
 extern int auto_scaling_enabled;
 extern int auto_scaling_cycle;
@@ -60,7 +62,7 @@ extern int tcp_disable;
 extern int tcp_accept_aliases;
 extern int tcp_connect_timeout;
 extern int tcp_con_lifetime; /*!< connection lifetime */
-extern int tcp_listen_backlog;
+extern int tcp_socket_backlog;
 extern int tcp_max_fd_no;
 extern int tcp_max_connections;
 extern int tcp_keepalive;
@@ -78,8 +80,8 @@ extern int check_via;
 extern int received_dns;
 extern int sip_warning;
 extern int server_signature;
-extern str server_header;
-extern str user_agent_header;
+extern strptr_t server_header;
+extern strptr_t user_agent_header;
 extern char* user;
 extern char* group;
 extern char* sock_user;
@@ -111,6 +113,7 @@ extern unsigned long pkg_mem_size;
 extern int reply_to_via;
 
 extern int is_main;
+extern int is_pre_daemon;
 
 extern int memlog;  /*!< debugging level for printing memory debugs */
 extern int memdump; /*!< debugging level for dumping memory status */
@@ -123,8 +126,8 @@ extern int mhomed; /*!< looking up outbound interface ? */
 extern int my_argc; /*!< command-line arguments */
 extern char **my_argv;
 
-extern str default_global_address; /*!< pre-set addresses */
-extern str default_global_port; /*!< pre-ser ports */
+extern strptr_t default_global_address; /*!< pre-set addresses */
+extern strptr_t default_global_port; /*!< pre-ser ports */
 
 extern int disable_core_dump; /*!< core dump limits */
 extern int open_files_limit; /*!< file limits */
@@ -148,4 +151,6 @@ extern int disable_503_translation;
 
 extern int enable_asserts;
 extern int abort_on_assert;
+
+extern int process_no;
 #endif

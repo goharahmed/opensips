@@ -29,7 +29,6 @@
 #include "../../parser/parse_uri.h"
 #include "../../parser/parse_param.h"
 #include "../../dset.h"
-#include "../../mod_fix.h"
 #include "../../pvar.h"
 #include "../../ut.h"
 
@@ -62,26 +61,13 @@ int has_totag(struct sip_msg* _m, char* _foo, char* _bar)
 
 
 /*
- * Find if Request URI has a given parameter with no value
- */
-int ruri_has_param_1(struct sip_msg* _msg, char* _param, char* _str2)
-{
-	return ruri_has_param_2(_msg, _param, (char*)0);
-}
-
-
-/*
  * Find if Request URI has a given parameter with matching value
  */
-int ruri_has_param_2(struct sip_msg* _msg, char* _param, char* _value)
+int ruri_has_param(struct sip_msg* _msg, str* param, str* value)
 {
-	str *param, *value, t;
-
+	str t;
 	param_hooks_t hooks;
-	param_t* params;
-
-	param = (str*)_param;
-	value = (str*)_value;
+	param_t *params, *p;
 
 	if (parse_sip_msg_uri(_msg) < 0) {
 	        LM_ERR("ruri parsing failed\n");
@@ -95,25 +81,26 @@ int ruri_has_param_2(struct sip_msg* _msg, char* _param, char* _value)
 	        return -1;
 	}
 
-	while (params) {
-		if ((params->name.len == param->len) &&
-		    (strncmp(params->name.s, param->s, param->len) == 0)) {
+	p = params;
+	while (p) {
+		if ((p->name.len == param->len) &&
+		    (strncmp(p->name.s, param->s, param->len) == 0)) {
 			if (value) {
-				if ((value->len == params->body.len) &&
-				    strncmp(value->s, params->body.s, value->len) == 0) {
+				if ((value->len == p->body.len) &&
+				    strncmp(value->s, p->body.s, value->len) == 0) {
 					goto ok;
 				} else {
 					goto nok;
 				}
 			} else {
-				if (params->body.len > 0) {
+				if (p->body.len > 0) {
 					goto nok;
 				} else {
 					goto ok;
 				}
 			}
 		} else {
-			params = params->next;
+			p = p->next;
 		}
 	}
 
@@ -131,9 +118,9 @@ ok:
 /*
  * Removes a given parameter from Request URI
  */
-int ruri_del_param(struct sip_msg* _msg, char* _param, char* _s)
+int ruri_del_param(struct sip_msg* _msg, str* _param)
 {
-	str param;
+	str param = *_param;
 	str params;
 
 	char  *tok_end;
@@ -143,11 +130,6 @@ int ruri_del_param(struct sip_msg* _msg, char* _param, char* _s)
 	str    new_uri, old_uri;
 
 	int begin_len, end_len;
-
-	if (fixup_get_svalue(_msg, (gparam_p)_param, &param) < 0) {
-		LM_ERR("failed to fetch parameter\n");
-		return -1;
-	}
 
 	if (param.len == 0)
 		return 1;
@@ -224,16 +206,11 @@ int ruri_del_param(struct sip_msg* _msg, char* _param, char* _s)
 /*
  * Adds a new parameter to Request URI
  */
-int ruri_add_param(struct sip_msg* _msg, char* _param, char* _s2)
+int ruri_add_param(struct sip_msg* _msg, str* _param)
 {
-	str param, *cur_uri, new_uri;
+	str param = *_param, *cur_uri, new_uri;
 	struct sip_uri *parsed_uri;
 	char *at;
-
-	if (fixup_get_svalue(_msg, (gparam_p)_param, &param) < 0) {
-		LM_ERR("failed to fetch parameter\n");
-		return -1;
-	}
 
 	if (param.len == 0)
 		return 1;
@@ -338,7 +315,7 @@ ok:
  * conversion succeeded or if no conversion was needed, i.e., Request-URI
  * was not tel URI.  Returns -1, if conversion failed.
  */
-int ruri_tel2sip(struct sip_msg* _msg, char* _s1, char* _s2)
+int ruri_tel2sip(struct sip_msg* _msg)
 {
 	str *ruri;
 	struct sip_uri *pfuri;
@@ -409,32 +386,19 @@ static inline int e164_check(str* _user)
 /*
  * Check if user part of URI in pseudo variable is an e164 number
  */
-int is_uri_user_e164(struct sip_msg* _m, char* _sp, char* _s2)
+int is_uri_user_e164(struct sip_msg* _m, str* uri)
 {
-    pv_spec_t *sp;
-    pv_value_t pv_val;
-    struct sip_uri puri;
+	struct sip_uri puri;
 
-    sp = (pv_spec_t *)_sp;
-
-    if (sp && (pv_get_spec_value(_m, sp, &pv_val) == 0)) {
-	if (pv_val.flags & PV_VAL_STR) {
-	    if (pv_val.rs.len == 0 || pv_val.rs.s == NULL) {
+	if (!uri->s || uri->len == 0) {
 		LM_DBG("missing uri\n");
 		return -1;
-	    }
-	    if (parse_uri(pv_val.rs.s, pv_val.rs.len, &puri) < 0) {
+	}
+
+	if (parse_uri(uri->s, uri->len, &puri) < 0) {
 		LM_ERR("parsing URI failed\n");
 		return -1;
-	    }
-	    return e164_check(&(puri.user));
-	} else {
-	    LM_ERR("pseudo variable value is not string\n");
-	    return -1;
 	}
-    } else {
-	LM_ERR("failed to get pseudo variable value\n");
-	return -1;
-    }
-}
 
+	return e164_check(&(puri.user));
+}

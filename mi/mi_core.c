@@ -48,6 +48,7 @@
 #include "../evi/event_interface.h"
 #include "../ipc.h"
 #include "../xlog.h"
+#include "../cfg_reload.h"
 #include "mi.h"
 #include "mi_trace.h"
 
@@ -56,16 +57,13 @@ static str    up_since_ctime;
 
 static int init_mi_uptime(void)
 {
-	char *p;
-
-	p = ctime(&startup_time);
-	up_since_ctime.len = strlen(p)-1;
-	up_since_ctime.s = (char*)pkg_malloc(up_since_ctime.len);
+	up_since_ctime.s = (char*)pkg_malloc(26);
 	if (up_since_ctime.s==0) {
 		LM_ERR("no more pkg mem\n");
 		return -1;
 	}
-	memcpy(up_since_ctime.s, p , up_since_ctime.len);
+	ctime_r(&startup_time, up_since_ctime.s);
+	up_since_ctime.len = strlen(up_since_ctime.s)-1;
 	return 0;
 }
 
@@ -75,22 +73,22 @@ static mi_response_t *mi_uptime(const mi_params_t *params,
 	mi_response_t *resp;
 	mi_item_t *resp_obj;
 	time_t now;
-	char *p;
+	char buf[26];
 
 	resp = init_mi_result_object(&resp_obj);
 	if (!resp)
 		return 0;
 
 	time(&now);
-	p = ctime(&now);
-	if (add_mi_string(resp_obj, MI_SSTR("Now"), p, strlen(p)-1) < 0)
+	ctime_r(&now, buf);
+	if (add_mi_string(resp_obj, MI_SSTR("Now"), buf, strlen(buf)-1) < 0)
 		goto error;
 
 	if (add_mi_string(resp_obj, MI_SSTR("Up since"),
 		up_since_ctime.s, up_since_ctime.len) < 0)
 		goto error;
 
-	if (add_mi_string_fmt(resp, MI_SSTR("Up time"), "%lu [sec]",
+	if (add_mi_string_fmt(resp_obj, MI_SSTR("Up time"), "%lu [sec]",
 		(unsigned long)difftime(now, startup_time)) < 0)
 		goto error;
 
@@ -112,7 +110,7 @@ static mi_response_t *mi_version(const mi_params_t *params,
 	if (!resp)
 		return 0;
 
-	if (add_mi_string(resp_obj, MI_SSTR("Server"), SERVER_HDR+8,
+	if (add_mi_string(resp_obj, MI_SSTR("Server"), (char *)SERVER_HDR+8,
 		SERVER_HDR_LEN-8) < 0) {
 		LM_ERR("failed to add mi item\n");
 		free_mi_response(resp);
@@ -132,7 +130,7 @@ static mi_response_t *mi_version_1(const mi_params_t *params,
 	if (!resp)
 		return 0;
 
-	if (add_mi_string(resp_obj, MI_SSTR("Server"), SERVER_HDR+8,
+	if (add_mi_string(resp_obj, MI_SSTR("Server"), (char *)SERVER_HDR+8,
 		SERVER_HDR_LEN-8) < 0) {
 		LM_ERR("failed to add mi item\n");
 		free_mi_response(resp);
@@ -575,7 +573,7 @@ static mi_response_t *mi_cachefetch(const mi_params_t *params,
 	}
 
 	if(ret == -2 || value.s == 0 || value.len == 0)
-		return init_mi_result_string(MI_SSTR("Value not found"));
+		return init_mi_error(400, MI_SSTR("Value not found"));
 
 	resp = init_mi_result_object(&resp_obj);
 	if (!resp) {
@@ -755,6 +753,15 @@ static mi_response_t *w_mem_rpm_dump_1(const mi_params_t *params,
 	return mi_mem_rpm_dump(llevel);
 }
 
+static mi_response_t *w_reload_routes(const mi_params_t *params,
+							struct mi_handler *async_hdl)
+{
+	if (reload_routing_script()==0)
+		return init_mi_result_ok();
+	return init_mi_error( 500, MI_SSTR("reload failed"));
+}
+
+
 
 static mi_export_t mi_core_cmds[] = {
 	{ "uptime", "prints various time information about OpenSIPS - "
@@ -855,6 +862,13 @@ static mi_export_t mi_core_cmds[] = {
 		{EMPTY_MI_RECIPE}
 		}
 	},
+	{ "raise_event", "raises an event through the Event Interface; "
+		"Params: event [ params ]", 0, 0, {
+		{w_mi_raise_event, {"event", 0}},
+		{w_mi_raise_event, {"event", "params", 0}},
+		{EMPTY_MI_RECIPE}
+		}
+	},
 	{ "list_tcp_conns", "list all ongoing TCP based connections", 0, 0, {
 		{mi_tcp_list_conns, {0}},
 		{EMPTY_MI_RECIPE}
@@ -875,6 +889,11 @@ static mi_export_t mi_core_cmds[] = {
 	{ "mem_rpm_dump", "forces a status dump of the restart persistent memory", 0, 0, {
 		{w_mem_rpm_dump, {0}},
 		{w_mem_rpm_dump_1, {"log_level", 0}},
+		{EMPTY_MI_RECIPE}
+		}
+	},
+	{ "reload_routes", "triggers the script (routes only) reload", 0, 0, {
+		{w_reload_routes, {0}},
 		{EMPTY_MI_RECIPE}
 		}
 	},

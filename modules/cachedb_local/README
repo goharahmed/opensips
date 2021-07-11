@@ -155,8 +155,8 @@ cache_store("local:group2", ...)
    '='. Every collection that is defined in this parameter SHOULD
    be used in at least one URL, else you'll receive a WARNING.
 
-   “If no collection is defined, the collection with name
-   "default" will be created.”.
+   The "default" collection always gets created, even when not
+   included in this list of collections.
 
    Example 1.2. Set cache_collections parameter
 ...
@@ -166,7 +166,7 @@ tom size
 ould have been
 ## created anyway from 2^9 - 512 (default value) to 2^4 - 16
 modparam("cachedb_local", "cache_collections", "collection1; collection2
-=5; default=4")
+ = 5; default = 4")
 ...
 
 1.4.3. cache_clean_period (int)
@@ -226,6 +226,10 @@ modparam("cachedb_local", "cluster_persistency", "sync-from-cluster")
    is different than group name, which identifies the engine in
    cachedb operations.
 
+   Parameters:
+     * collection (string, optional)
+     * glob (string)
+
    This function can be used from all routes
 
    Example 1.6. cache_remove_chunk usage
@@ -242,29 +246,26 @@ modparam("cachedb_local", "cluster_persistency", "sync-from-cluster")
    param.
 
    Parameters :
+     * glob - keys that match glob will be removed
      * collection(optional) - collection from which the keys shall
        be removed; if no collection set, the default collection
        will be used;
-     * glob - keys that match glob will be removed
 
    MI FIFO Command Format:
-                :cache_remove_chunk:_reply_fifo_file_
-                collection*
-                keyprefix*
-                _empty_line_
+opensips-cli -x mi cache_remove_chunk "keyprefix*" collection
 
 Chapter 2. Frequently Asked Questions
 
    2.1.
 
-       What happened with old cache_table_size parameter?
+   What happened with old cache_table_size parameter?
 
-       The parameter was removed because it was redundant. Since the
-       addition of collections, the old hash now belongs to the
-       default collection. This collection is created every time and
-       it has a default size of 512. The size can be changed by
-       setting the default collection size using cache_collections
-       paramter.
+   The parameter was removed because it was redundant. Since the
+   addition of collections, the old hash now belongs to the
+   default collection. This collection is created every time and
+   it has a default size of 512. The size can be changed by
+   setting the default collection size using cache_collections
+   paramter.
 
 Chapter 3. Contributors
 
@@ -273,19 +274,20 @@ Chapter 3. Contributors
    Table 3.1. Top contributors by DevScore^(1), authored
    commits^(2) and lines added/removed^(3)
      Name DevScore Commits Lines ++ Lines --
-   1. Vlad Paiu (@vladpaiu) 33 10 1155 693
-   2. Bogdan-Andrei Iancu (@bogdan-iancu) 15 13 44 49
-   3. Anca Vamanu 12 5 739 54
-   4. Liviu Chircu (@liviuchircu) 11 8 23 61
-   5. Andrei Dragus 10 4 182 181
-   6. Fabian Gast (@fgast) 9 3 517 48
-   7. Ionut Ionita (@ionutrazvanionita) 9 3 513 55
-   8. Vlad Patrascu (@rvlad-patrascu) 5 3 34 34
-   9. Razvan Crainea (@razvancrainea) 4 2 5 5
-   10. Dusan Klinec 3 1 4 4
+   1. Vlad Paiu (@vladpaiu) 32 10 1155 693
+   2. Liviu Chircu (@liviuchircu) 20 14 125 190
+   3. Bogdan-Andrei Iancu (@bogdan-iancu) 16 14 46 50
+   4. Vlad Patrascu (@rvlad-patrascu) 13 9 99 125
+   5. Anca Vamanu 13 5 739 54
+   6. Andrei Dragus 9 4 182 181
+   7. Fabian Gast (@fgast) 9 3 517 48
+   8. Ionut Ionita (@ionutrazvanionita) 9 3 513 55
+   9. Razvan Crainea (@razvancrainea) 7 5 8 6
+   10. Peter Lemenkov (@lemenkov) 4 2 3 3
 
-   All remaining contributors: Ryan Bullock (@rrb3942), Julián
-   Moreno Patiño, Peter Lemenkov (@lemenkov).
+   All remaining contributors: Maksym Sobolyev (@sobomax), Dusan
+   Klinec (@ph4r05), Ryan Bullock (@rrb3942), Julián Moreno
+   Patiño, Zero King (@l2dy).
 
    (1) DevScore = author_commits + author_lines_added /
    (project_lines_added / project_commits) + author_lines_deleted
@@ -307,19 +309,20 @@ Chapter 3. Contributors
 
    Table 3.2. Most recently active contributors^(1) to this module
                       Name                   Commit Activity
-   1.  Bogdan-Andrei Iancu (@bogdan-iancu) Jan 2009 - Jan 2019
-   2.  Fabian Gast (@fgast)                Dec 2018 - Dec 2018
-   3.  Vlad Patrascu (@rvlad-patrascu)     Jan 2017 - Nov 2018
-   4.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
-   5.  Liviu Chircu (@liviuchircu)         Mar 2014 - Jun 2018
-   6.  Razvan Crainea (@razvancrainea)     Aug 2015 - Apr 2017
-   7.  Ionut Ionita (@ionutrazvanionita)   Jan 2017 - Jan 2017
-   8.  Julián Moreno Patiño                Feb 2016 - Feb 2016
-   9.  Dusan Klinec                        Dec 2015 - Dec 2015
-   10. Ryan Bullock (@rrb3942)             Jan 2014 - Jan 2014
+   1.  Liviu Chircu (@liviuchircu)         Mar 2014 - Jan 2021
+   2.  Maksym Sobolyev (@sobomax)          Jan 2021 - Jan 2021
+   3.  Vlad Patrascu (@rvlad-patrascu)     Jan 2017 - Nov 2020
+   4.  Zero King (@l2dy)                   Mar 2020 - Mar 2020
+   5.  Peter Lemenkov (@lemenkov)          Jun 2018 - Feb 2020
+   6.  Razvan Crainea (@razvancrainea)     Aug 2015 - Sep 2019
+   7.  Bogdan-Andrei Iancu (@bogdan-iancu) Jan 2009 - Apr 2019
+   8.  Fabian Gast (@fgast)                Dec 2018 - Dec 2018
+   9.  Ionut Ionita (@ionutrazvanionita)   Jan 2017 - Jan 2017
+   10. Julián Moreno Patiño                Feb 2016 - Feb 2016
 
-   All remaining contributors: Vlad Paiu (@vladpaiu), Andrei
-   Dragus, Anca Vamanu.
+   All remaining contributors: Dusan Klinec (@ph4r05), Ryan
+   Bullock (@rrb3942), Vlad Paiu (@vladpaiu), Andrei Dragus, Anca
+   Vamanu.
 
    (1) including any documentation-related commits, excluding
    merge commits
@@ -328,9 +331,10 @@ Chapter 4. Documentation
 
 4.1. Contributors
 
-   Last edited by: Bogdan-Andrei Iancu (@bogdan-iancu), Fabian
-   Gast (@fgast), Peter Lemenkov (@lemenkov), Liviu Chircu
-   (@liviuchircu), Ionut Ionita (@ionutrazvanionita), Vlad Paiu
+   Last edited by: Liviu Chircu (@liviuchircu), Vlad Patrascu
+   (@rvlad-patrascu), Zero King (@l2dy), Bogdan-Andrei Iancu
+   (@bogdan-iancu), Fabian Gast (@fgast), Peter Lemenkov
+   (@lemenkov), Ionut Ionita (@ionutrazvanionita), Vlad Paiu
    (@vladpaiu), Andrei Dragus, Anca Vamanu.
 
    Documentation Copyrights:

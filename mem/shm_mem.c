@@ -211,53 +211,6 @@ end:
 }
 #endif
 
-
-
-inline static void* sh_realloc(void* p, unsigned int size)
-{
-	void *r;
-
-	shm_lock(); 
-
-#ifndef HP_MALLOC
-	shm_free_unsafe(p);
-	r = shm_malloc_unsafe(size);
-#else
-	shm_free(p);
-	r = shm_malloc(size);
-#endif
-
-	shm_threshold_check();
-
-	shm_unlock(); 
-
-	return r;
-}
-
-/* look at a buffer if there is perhaps enough space for the new size
-    if so, we return current buffer again; otherwise, we free it,
-	allocate a new one and return it; no guarantee for buffer content;
-	if allocation fails, we return NULL
-*/
-
-#ifdef DBG_MALLOC
-void* _shm_resize( void* p, unsigned int s, const char* file, const char* func,
-							int line)
-#else
-void* _shm_resize( void* p , unsigned int s)
-#endif
-{
-	if (p==0) {
-		LM_DBG("resize(0) called\n");
-		return shm_malloc( s );
-	}
-
-	return sh_realloc( p, s );
-}
-
-
-
-
 /*
  * Allocates memory using mmap or sysv shmap
  *  - fd: a handler to a file descriptor pointing to a map file
@@ -706,12 +659,16 @@ mi_response_t *mi_shm_check(const mi_params_t *params,
 void init_shm_post_yyparse(void)
 {
 #ifdef HP_MALLOC
-	if (mem_warming_enabled && hp_mem_warming(shm_block) != 0) {
-		LM_INFO("skipped memory warming\n");
-	}
 	if (mem_allocator_shm == MM_HP_MALLOC ||
-	    mem_allocator_shm == MM_HP_MALLOC_DBG)
+	    mem_allocator_shm == MM_HP_MALLOC_DBG) {
+
+		if (mem_warming_enabled && hp_mem_warming(shm_block) != 0)
+			LM_INFO("skipped memory warming\n");
+
 		hp_init_shm_statistics(shm_block);
+	} else if (mem_warming_enabled) {
+		LM_WARN("SHM memory warming only makes sense with HP_MALLOC!\n");
+	}
 #endif
 
 #ifdef SHM_EXTRA_STATS
@@ -724,24 +681,24 @@ void init_shm_post_yyparse(void)
 
 #ifdef SHM_SHOW_DEFAULT_GROUP
 		p = (stat_var *)&memory_mods_stats[0].fragments;
-		if (register_stat(STAT_PREFIX "default", "fragments", &p, STAT_NO_RESET|STAT_NO_ALLOC)!=0 ) {
+		if (register_stat(STAT_PREFIX "default", "fragments", &p, STAT_NO_RESET|STAT_NOT_ALLOCATED)!=0 ) {
 			LM_CRIT("can't add stat variable");
 			return;
 		}
 		p = (stat_var *)&memory_mods_stats[0].memory_used;
-		if (register_stat(STAT_PREFIX "default", "memory_used", &p, STAT_NO_RESET|STAT_NO_ALLOC)!=0 ) {
+		if (register_stat(STAT_PREFIX "default", "memory_used", &p, STAT_NO_RESET|STAT_NOT_ALLOCATED)!=0 ) {
 			LM_CRIT("can't add stat variable");
 			return;
 		}
 
 		p = (stat_var *)&memory_mods_stats[0].real_used;
-		if (register_stat(STAT_PREFIX "default", "real_used", &p, STAT_NO_RESET|STAT_NO_ALLOC)!=0 ) {
+		if (register_stat(STAT_PREFIX "default", "real_used", &p, STAT_NO_RESET|STAT_NOT_ALLOCATED)!=0 ) {
 			LM_CRIT("can't add stat variable");
 			return;
 		}
 
 		p = (stat_var *)&memory_mods_stats[0].max_real_used;
-		if (register_stat(STAT_PREFIX "default", "max_real_used", &p, STAT_NO_ALLOC)!=0 ) {
+		if (register_stat(STAT_PREFIX "default", "max_real_used", &p, STAT_NOT_ALLOCATED)!=0 ) {
 			LM_CRIT("can't add stat variable");
 			return;
 		}
@@ -758,25 +715,25 @@ void init_shm_post_yyparse(void)
 			strcpy(full_name, STAT_PREFIX);
 			strcat(full_name, mod_name->s);
 			p = (stat_var *)&memory_mods_stats[i].fragments;
-			if (register_stat(full_name, "fragments", &p, STAT_NO_RESET|STAT_NO_ALLOC)!=0 ) {
+			if (register_stat(full_name, "fragments", &p, STAT_NO_RESET|STAT_NOT_ALLOCATED)!=0 ) {
 				LM_CRIT("can't add stat variable");
 				return;
 			}
 
 			p = (stat_var *)&memory_mods_stats[i].memory_used;
-			if (register_stat(full_name, "memory_used", &p, STAT_NO_RESET|STAT_NO_ALLOC)!=0 ) {
+			if (register_stat(full_name, "memory_used", &p, STAT_NO_RESET|STAT_NOT_ALLOCATED)!=0 ) {
 				LM_CRIT("can't add stat variable");
 				return;
 			}
 
 			p = (stat_var *) &memory_mods_stats[i].real_used;
-			if (register_stat(full_name, "real_used", &p, STAT_NO_RESET|STAT_NO_ALLOC)!=0 ) {
+			if (register_stat(full_name, "real_used", &p, STAT_NO_RESET|STAT_NOT_ALLOCATED)!=0 ) {
 				LM_CRIT("can't add stat variable");
 				return;
 			}
 
 			p = (stat_var *) &memory_mods_stats[i].max_real_used;
-			if (register_stat(full_name, "max_real_used", &p, STAT_NO_ALLOC) != 0) {
+			if (register_stat(full_name, "max_real_used", &p, STAT_NOT_ALLOCATED) != 0) {
 				LM_CRIT("can't add stat variable");
 				return;
 			}
@@ -801,7 +758,8 @@ void shm_mem_destroy(void)
 #ifdef HP_MALLOC
 	int j;
 
-	if (mem_allocator_shm == MM_HP_MALLOC)
+	if (mem_allocator_shm == MM_HP_MALLOC ||
+	    mem_allocator_shm == MM_HP_MALLOC_DBG)
 		hp_update_shm_pattern_file();
 #endif
 

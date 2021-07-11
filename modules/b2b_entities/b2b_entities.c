@@ -35,6 +35,7 @@
 #include "../../dprint.h"
 #include "../../error.h"
 #include "../../ut.h"
+#include "../../pt.h"
 #include "../../script_cb.h"
 #include "../../parser/parse_from.h"
 #include "../dialog/dlg_load.h"
@@ -44,8 +45,9 @@
 #include "b2b_entities.h"
 #include "server.h"
 #include "dlg.h"
+#include "b2be_clustering.h"
 
-#define TABLE_VERSION 1
+#define TABLE_VERSION 2
 
 /** Functions declarations */
 static int mod_init(void);
@@ -58,19 +60,25 @@ static mi_response_t *mi_b2be_list(const mi_params_t *params,
 /** Global variables */
 unsigned int server_hsize = 9;
 unsigned int client_hsize = 9;
-static char* script_req_route = NULL;
-static char* script_reply_route = NULL;
+static char* script_req_route;
+static char* script_reply_route;
 int req_routeid  = -1;
 int reply_routeid = -1;
-int replication_mode= 0;
-static str db_url= {0, 0};
-db_con_t *b2be_db = NULL;
+static str db_url;
+db_con_t *b2be_db;
 db_func_t b2be_dbf;
 str b2be_dbtable= str_init("b2b_entities");
 static int b2b_update_period = 100;
 int uac_auth_loaded;
 str b2b_key_prefix = str_init("B2B");
 int b2be_db_mode = WRITE_BACK;
+b2b_table server_htable;
+b2b_table client_htable;
+
+int b2be_cluster;
+int serialize_backend;
+
+int b2b_ctx_idx =-1;
 
 #define DB_COLS_NO  26
 
@@ -81,10 +89,9 @@ struct tm_binds tmb;
 uac_auth_api_t uac_auth_api;
 
 /** Exported functions */
-static cmd_export_t cmds[]=
-{
-	{"load_b2b",  (cmd_function)b2b_entities_bind, 1,  0,  0,  0},
-	{ 0,               0,                          0,  0,  0,  0}
+static cmd_export_t cmds[] = {
+	{"load_b2b",  (cmd_function)b2b_entities_bind, {{0,0,0}}, 0},
+	{0,0,{{0,0,0}},0}
 };
 
 /** Exported parameters */
@@ -93,12 +100,12 @@ static param_export_t params[]={
 	{ "client_hsize",          INT_PARAM,    &client_hsize       },
 	{ "script_req_route",      STR_PARAM,    &script_req_route   },
 	{ "script_reply_route",    STR_PARAM,    &script_reply_route },
-	{ "replication_mode",      INT_PARAM,    &replication_mode   },
 	{ "db_url",                STR_PARAM,    &db_url.s           },
 	{ "db_table",              STR_PARAM,    &b2be_dbtable.s     },
 	{ "db_mode",               INT_PARAM,    &b2be_db_mode       },
 	{ "update_period",         INT_PARAM,    &b2b_update_period  },
 	{ "b2b_key_prefix",        STR_PARAM,    &b2b_key_prefix.s   },
+	{ "cluster_id",            INT_PARAM,    &b2be_cluster		 },
 	{ 0,                       0,            0                   }
 };
 
@@ -118,6 +125,7 @@ static dep_export_t deps = {
 	},
 	{ /* modparam dependencies */
 		{ "db_url", get_deps_sqldb_url },
+		{ "cluster_id", get_deps_clusterer },
 		{ NULL, NULL },
 	},
 };
@@ -128,6 +136,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,               /* class of this module */
 	MODULE_VERSION,                 /* module version */
 	DEFAULT_DLFLAGS,                /* dlopen flags */
+	0,				                /* load function */
 	&deps,                          /* OpenSIPS module dependencies */
 	cmds,                           /* exported functions */
 	NULL,                           /* exported async functions */
@@ -137,15 +146,26 @@ struct module_exports exports= {
 	0,                              /* exported pseudo-variables */
 	0,								/* exported transformations */
 	0,                              /* extra processes */
+	0,                              /* module pre-initialization function */
 	mod_init,                       /* module initialization function */
 	(response_function) 0,          /* response handling function */
 	(destroy_function) mod_destroy, /* destroy function */
-	child_init                      /* per-child init function */
+	child_init,                     /* per-child init function */
+	0                               /* reload confirm function */
 };
 
 void b2be_db_timer_update(unsigned int ticks, void* param)
 {
 	b2b_entities_dump(0);
+}
+
+static void b2b_ctx_free(void *param)
+{
+	struct b2b_context *ctx = (struct b2b_context *)param;
+
+	if (ctx->b2bl_key.s)
+		pkg_free(ctx->b2bl_key.s);
+	pkg_free(param);
 }
 
 /** Module initialize function */
@@ -202,9 +222,12 @@ static int mod_init(void)
 		return -1;
 	}
 	memset(&b2be_dbf, 0, sizeof(db_func_t));
+
+	if(b2be_db_mode)
+		init_db_url(db_url, 1);
+
 	if(b2be_db_mode && db_url.s)
 	{
-		db_url.len = strlen(db_url.s);
 		b2be_dbtable.len = strlen(b2be_dbtable.s);
 
 		/* binding to database module  */
@@ -259,7 +282,8 @@ static int mod_init(void)
 
 	if (script_req_route)
 	{
-		req_routeid = get_script_route_ID_by_name( script_req_route, rlist, RT_NO);
+		req_routeid = get_script_route_ID_by_name( script_req_route,
+			sroutes->request, RT_NO);
 		if (req_routeid < 1)
 		{
 			LM_ERR("route <%s> does not exist\n",script_req_route);
@@ -269,7 +293,8 @@ static int mod_init(void)
 
 	if (script_reply_route)
 	{
-		reply_routeid = get_script_route_ID_by_name( script_reply_route, rlist, RT_NO);
+		reply_routeid = get_script_route_ID_by_name( script_reply_route,
+			sroutes->request, RT_NO);
 		if (reply_routeid < 1)
 		{
 			LM_ERR("route <%s> does not exist\n",script_reply_route);
@@ -285,6 +310,18 @@ static int mod_init(void)
 		register_timer("b2be-dbupdate", b2be_db_timer_update, 0,
 			b2b_update_period, TIMER_FLAG_SKIP_ON_DELAY);
 	//register_timer("b2b2-clean", b2be_clean,  0, b2b_update_period);
+
+	if (b2be_init_clustering() < 0) {
+		LM_ERR("Failed to init clustering support\n");
+		return -1;
+	}
+
+	if (b2be_db_mode != NO_DB)
+		serialize_backend |= B2BCB_BACKEND_DB;
+	if (b2be_cluster)
+		serialize_backend |= B2BCB_BACKEND_CLUSTER;
+
+	b2b_ctx_idx = context_register_ptr(CONTEXT_GLOBAL, b2b_ctx_free);
 
 	return 0;
 }
@@ -303,7 +340,10 @@ void check_htable(b2b_table table, int hsize)
 			dlg_next = dlg->next;
 			if(dlg->b2b_cback == 0)
 			{
-				LM_ERR("Found entity not linked to any logic\n");
+				LM_ERR("Found entity callid=%.*s ftag=%.*s ttag=%.*s "
+						"not linked to any logic\n",
+						dlg->callid.len, dlg->callid.s, dlg->tag[0].len,
+						dlg->tag[0].s, dlg->tag[1].len, dlg->tag[1].s);
 				b2b_delete_record(dlg, table, i);
 			}
 			dlg = dlg_next;
@@ -350,10 +390,14 @@ static int child_init(int rank)
 /** Module destroy function */
 static void mod_destroy(void)
 {
-	if(b2be_db ) {
-		if(b2be_db_mode==WRITE_BACK)
+	if (b2be_dbf.init && b2be_db_mode==WRITE_BACK) {
+		b2be_db = b2be_dbf.init(&db_url);
+		if(!b2be_db) {
+			LM_ERR("connecting to database failed, unable to flush\n");
+		} else {
 			b2b_entities_dump(1);
-		b2be_dbf.close(b2be_db);
+			b2be_dbf.close(b2be_db);
+		}
 	}
 	destroy_b2b_htables();
 }
@@ -379,7 +423,7 @@ int b2b_restore_logic_info(enum b2b_entity_type type, str* key,
 	{
 		table = client_htable;
 	}
-	if(b2b_parse_key(key, &hash_index, &local_index) < 0)
+	if(b2b_parse_key(key, &hash_index, &local_index, NULL) < 0)
 	{
 		LM_ERR("Wrong format for b2b key [%.*s]\n", key->len, key->s);
 		return -1;
@@ -395,11 +439,12 @@ int b2b_restore_logic_info(enum b2b_entity_type type, str* key,
 }
 
 int b2b_update_b2bl_param(enum b2b_entity_type type, str* key,
-		str* param)
+		str* param, int replicate)
 {
 	b2b_dlg_t* dlg;
 	b2b_table table;
 	unsigned int hash_index, local_index;
+	int unlock = 1;
 
 	if(!param)
 	{
@@ -421,22 +466,31 @@ int b2b_update_b2bl_param(enum b2b_entity_type type, str* key,
 	{
 		table = client_htable;
 	}
-	if(b2b_parse_key(key, &hash_index, &local_index) < 0)
+	if(b2b_parse_key(key, &hash_index, &local_index, NULL) < 0)
 	{
 		LM_ERR("Wrong format for b2b key [%.*s]\n", key->len, key->s);
 		return -1;
 	}
-	lock_get(&table[hash_index].lock);
+	if (table[hash_index].locked_by != process_no)
+		lock_get(&table[hash_index].lock);
+	else
+		unlock = 0;
+
 	dlg = b2b_search_htable(table, hash_index, local_index);
 	if(dlg == NULL)
 	{
 		LM_ERR("No dialog found\n");
-		lock_release(&table[hash_index].lock);
+		if (unlock)
+			lock_release(&table[hash_index].lock);
 		return -1;
 	}
 	memcpy(dlg->param.s, param->s, param->len);
 	dlg->param.len = param->len;
-	lock_release(&table[hash_index].lock);
+	if (unlock)
+		lock_release(&table[hash_index].lock);
+
+	if (b2be_cluster && replicate)
+		replicate_entity_update(dlg, type, hash_index, param, -1, NULL);
 
 	return 0;
 }
@@ -456,7 +510,7 @@ int b2b_get_b2bl_key(str* callid, str* from_tag, str* to_tag, str* entity_key, s
 		LM_ERR("Wrong from_tag param\n");
 		return -1;
 	}
-	if(!to_tag || !to_tag->s || !to_tag->len){
+	if(!to_tag){
 		LM_ERR("Wrong to_tag param\n");
 		return -1;
 	}
@@ -466,9 +520,9 @@ int b2b_get_b2bl_key(str* callid, str* from_tag, str* to_tag, str* entity_key, s
 	}
 	/* check if the to tag has the b2b key format
 	 * -> meaning that it is a server request */
-	if(b2b_parse_key(to_tag, &hash_index, &local_index)>=0)
+	if(b2b_parse_key(to_tag, &hash_index, &local_index, NULL)>=0)
 		table = server_htable;
-	else if (b2b_parse_key(callid, &hash_index, &local_index)>=0)
+	else if (b2b_parse_key(callid, &hash_index, &local_index, NULL)>=0)
 		table = client_htable;
 	else
 		return -1; /* to tag and/or callid are not part of this B2B */
@@ -499,6 +553,31 @@ int b2b_get_b2bl_key(str* callid, str* from_tag, str* to_tag, str* entity_key, s
 	return ret;
 }
 
+void *b2b_get_context(void)
+{
+	struct b2b_context *ctx;
+
+	if (!current_processing_ctx) {
+		LM_ERR("no processing ctx found!\n");
+		return NULL;
+	}
+
+	ctx = context_get_ptr(CONTEXT_GLOBAL, current_processing_ctx,
+		b2b_ctx_idx);
+	if (!ctx) {
+		ctx = pkg_malloc(sizeof *ctx);
+		if (!ctx) {
+			LM_ERR("oom!\n");
+			return NULL;
+		}
+		memset(ctx, 0, sizeof *ctx);
+
+		context_put_ptr(CONTEXT_GLOBAL, current_processing_ctx, b2b_ctx_idx,
+			ctx);
+	}
+
+	return ctx;
+}
 
 int b2b_entities_bind(b2b_api_t* api)
 {
@@ -513,10 +592,12 @@ int b2b_entities_bind(b2b_api_t* api)
 	api->send_reply         = b2b_send_reply;
 	api->entity_delete      = b2b_entity_delete;
 	api->restore_logic_info = b2b_restore_logic_info;
+	api->register_cb 		= b2b_register_cb;
 	api->update_b2bl_param  = b2b_update_b2bl_param;
 	api->entities_db_delete = b2b_db_delete;
 	api->get_b2bl_key       = b2b_get_b2bl_key;
 	api->apply_lumps        = b2b_apply_lumps;
+	api->get_context		= b2b_get_context;
 
 	return 0;
 }
@@ -525,6 +606,7 @@ int b2b_entities_bind(b2b_api_t* api)
 static inline int mi_print_b2be_dlg(mi_item_t *resp_arr, b2b_table htable, unsigned int hsize)
 {
 	int i;
+	str param;
 	b2b_dlg_t* dlg;
 	dlg_leg_t* leg;
 	mi_item_t *arr_item, *cseq_item, *rs_item, *ct_item, *legs_arr, *leg_item;
@@ -541,8 +623,15 @@ static inline int mi_print_b2be_dlg(mi_item_t *resp_arr, b2b_table htable, unsig
 
 			if (add_mi_number(arr_item, MI_SSTR("dlg"), dlg->id) < 0)
 				goto error;
+			/* check if param is printable */
+			param = dlg->param;
+			if (!str_check_token(&param))
+				init_str(&param, "");
 			if (add_mi_string(arr_item, MI_SSTR("param"),
-				dlg->param.s, dlg->param.len) < 0)
+				param.s, param.len) < 0)
+				goto error;
+			if (add_mi_string(arr_item, MI_SSTR("mod_name"),
+				dlg->mod_name.s, dlg->mod_name.len) < 0)
 				goto error;
 			if (add_mi_number(arr_item, MI_SSTR("state"), dlg->state) < 0)
 				goto error;
@@ -588,7 +677,7 @@ static inline int mi_print_b2be_dlg(mi_item_t *resp_arr, b2b_table htable, unsig
 				dlg->tag[1].s, dlg->tag[1].len) < 0)
 				goto error;
 
-			cseq_item = add_mi_object(arr_item, MI_SSTR("cseq") < 0);
+			cseq_item = add_mi_object(arr_item, MI_SSTR("cseq"));
 			if (!cseq_item)
 				goto error;
 			if (add_mi_number(cseq_item, MI_SSTR("caller"), dlg->cseq[0]) < 0)
@@ -598,7 +687,7 @@ static inline int mi_print_b2be_dlg(mi_item_t *resp_arr, b2b_table htable, unsig
 
 			if (dlg->route_set[0].len||dlg->route_set[1].len)
 			{
-				rs_item = add_mi_object(arr_item, MI_SSTR("route_set") < 0);
+				rs_item = add_mi_object(arr_item, MI_SSTR("route_set"));
 				if (!rs_item)
 					goto error;
 
@@ -613,7 +702,7 @@ static inline int mi_print_b2be_dlg(mi_item_t *resp_arr, b2b_table htable, unsig
 						goto error;
 			}
 
-			ct_item = add_mi_object(arr_item, MI_SSTR("contact") < 0);
+			ct_item = add_mi_object(arr_item, MI_SSTR("contact"));
 			if (!ct_item)
 				goto error;
 			if (add_mi_string(ct_item, MI_SSTR("caller"),

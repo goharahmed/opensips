@@ -93,11 +93,12 @@ struct cpl_functions  cpl_fct;
 static str cpl_ok_rpl = str_init("OK");
 
 
-static int cpl_invoke_script (struct sip_msg* msg, char* str, char* str2);
+static int cpl_invoke_script (struct sip_msg* msg, void* type, void* mode);
 static int w_process_register(struct sip_msg* msg, char* str, char* str2);
 static int w_process_register_norpl(struct sip_msg* msg, char* str,char* str2);
 static int cpl_process_register(struct sip_msg* msg, int no_rpl);
-static int fixup_cpl_run_script(void** param, int param_no);
+static int fixup_cpl_run_script_1(void** param);
+static int fixup_cpl_run_script_2(void** param);
 static int cpl_init(void);
 static int cpl_child_init(int rank);
 static int cpl_exit(void);
@@ -116,16 +117,18 @@ static proc_export_t cpl_procs[] = {
 /*
  * Exported functions
  */
-static cmd_export_t cmds[] = {
-	{"cpl_run_script",            (cmd_function)cpl_invoke_script,        2,
-			fixup_cpl_run_script, 0, REQUEST_ROUTE},
-	{"cpl_process_register",      (cmd_function)w_process_register,       0,
-			0, 0,                    REQUEST_ROUTE},
-	{"cpl_process_register_norpl",(cmd_function)w_process_register_norpl, 0,
-			0, 0,                    REQUEST_ROUTE},
-	{0, 0, 0, 0, 0, 0}
-};
 
+static cmd_export_t cmds[] = {
+	{"cpl_run_script", (cmd_function)cpl_invoke_script, {
+		{CMD_PARAM_STR,fixup_cpl_run_script_1,0},
+		{CMD_PARAM_STR,fixup_cpl_run_script_2,0}, {0,0,0}},
+		REQUEST_ROUTE},
+	{"cpl_process_register",(cmd_function)w_process_register, {{0,0,0}},
+		REQUEST_ROUTE},
+	{"cpl_process_register_norpl",(cmd_function)w_process_register_norpl, {{0,0,0}},
+		REQUEST_ROUTE},
+	{0,0,{{0,0,0}},0}
+};
 
 /*
  * Exported parameters
@@ -141,10 +144,10 @@ static param_export_t params[] = {
 	{"realm_prefix",   STR_PARAM, &cpl_env.realm_prefix.s            },
 	{"lookup_domain",  STR_PARAM, &lookup_domain                     },
 	{"lookup_append_branches", INT_PARAM, &cpl_env.lu_append_branches},
-	{"username_column",STR_PARAM, &cpl_username_col                  },
-	{"domain_column",  STR_PARAM, &cpl_domain_col                    },
-	{"cpl_xml_column", STR_PARAM, &cpl_xml_col                       },
-	{"cpl_bin_column", STR_PARAM, &cpl_bin_col                       },
+	{"username_column",STR_PARAM, &cpl_username_col.s                },
+	{"domain_column",  STR_PARAM, &cpl_domain_col.s                  },
+	{"cpl_xml_column", STR_PARAM, &cpl_xml_col.s                     },
+	{"cpl_bin_column", STR_PARAM, &cpl_bin_col.s                     },
 	{"use_domain",     INT_PARAM, &cpl_env.use_domain                },
 	{0, 0, 0}
 };
@@ -196,6 +199,7 @@ struct module_exports exports = {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,  /* module version */
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	&deps,           /* OpenSIPS module dependencies */
 	cmds,     /* Exported functions */
 	0,        /* Exported async functions */
@@ -205,47 +209,59 @@ struct module_exports exports = {
 	0,        /* exported pseudo-variables */
 	0,		  /* exported transformations */
 	cpl_procs,/* extra processes */
+	0,        /* Module pre-initialization function */
 	cpl_init, /* Module initialization function */
 	(response_function) 0,
 	(destroy_function) cpl_exit,
-	(child_init_function) cpl_child_init /* per-child init function */
+	(child_init_function) cpl_child_init, /* per-child init function */
+	0         /* reload confirm function */
 };
 
 
 
-static int fixup_cpl_run_script(void** param, int param_no)
+static int fixup_cpl_run_script_1(void** param)
 {
 	long flag;
+	static str incoming_s = str_init("incoming");
+	static str outgoing_s = str_init("outgoing");
 
-	if (param_no==1) {
-		if (!strcasecmp( "incoming", *param))
-			flag = CPL_RUN_INCOMING;
-		else if (!strcasecmp( "outgoing", *param))
-			flag = CPL_RUN_OUTGOING;
-		else {
-			LM_ERR("script directive \"%s\" unknown!\n",(char*)*param);
-			return E_UNSPEC;
-		}
-		pkg_free(*param);
-		*param=(void*)flag;
-		return 0;
-	} else if (param_no==2) {
-		if ( !strcasecmp("is_stateless", *param) ) {
-			flag = 0;
-		} else if ( !strcasecmp("is_stateful", *param) ) {
-			flag = CPL_IS_STATEFUL;
-		} else if ( !strcasecmp("force_stateful", *param) ) {
-			flag = CPL_FORCE_STATEFUL;
-		} else {
-			LM_ERR("flag \"%s\" (second param) unknown!\n",(char*)*param);
-			return E_UNSPEC;
-		}
-		pkg_free(*param);
-		*param=(void*)flag;
+	if (!str_strcasecmp( &incoming_s, (str*)*param))
+		flag = CPL_RUN_INCOMING;
+	else if (!str_strcasecmp( &outgoing_s, (str*)*param))
+		flag = CPL_RUN_OUTGOING;
+	else {
+		LM_ERR("script directive \"%.*s\" unknown!\n",
+			((str*)*param)->len, ((str*)*param)->s);
+		return E_UNSPEC;
 	}
+
+	*param=(void*)flag;
 	return 0;
 }
 
+static int fixup_cpl_run_script_2(void** param)
+{
+	long flag;
+	static str is_stateless_s = str_init("is_stateless");
+	static str is_stateful_s = str_init("is_stateful");
+	static str force_stateful_s = str_init("force_stateful");
+
+	if ( !str_strcasecmp(&is_stateless_s, (str*)*param) ) {
+		flag = 0;
+	} else if ( !str_strcasecmp(&is_stateful_s, (str*)*param) ) {
+		flag = CPL_IS_STATEFUL;
+	} else if ( !str_strcasecmp(&force_stateful_s, (str*)*param) ) {
+		flag = CPL_FORCE_STATEFUL;
+	} else {
+		LM_ERR("flag \"%.*s\" (second param) unknown!\n",
+			((str*)*param)->len, ((str*)*param)->s);
+		return E_UNSPEC;
+	}
+
+	*param=(void*)flag;
+
+	return 0;
+}
 
 
 static int cpl_init(void)
@@ -257,12 +273,16 @@ static int cpl_init(void)
 
 	init_db_url( db_url , 0 /*cannot be null*/);
 	db_table.len = strlen(db_table.s);
+	cpl_username_col.len = strlen(cpl_username_col.s);
+	cpl_domain_col.len = strlen(cpl_domain_col.s);
+	cpl_xml_col.len = strlen(cpl_xml_col.s);
+	cpl_bin_col.len = strlen(cpl_bin_col.s);
 
 	LM_INFO("initializing...\n");
 
 	if (proxy_route && proxy_route[0]) {
 		cpl_env.proxy_route = get_script_route_ID_by_name( proxy_route,
-				rlist, RT_NO);
+				sroutes->request, RT_NO);
 		if (cpl_env.proxy_route==-1) {
 			LM_ERR("route <%s> does not exist\n",proxy_route);
 			return -1;
@@ -339,7 +359,7 @@ static int cpl_init(void)
 	/* bind to usrloc module if requested */
 	if (lookup_domain) {
 		/* import all usrloc functions */
-		bind_usrloc = (bind_usrloc_t)find_export("ul_bind_usrloc", 1, 0);
+		bind_usrloc = (bind_usrloc_t)find_export("ul_bind_usrloc", 0);
 		if (!bind_usrloc) {
 			LM_ERR("can't bind usrloc\n");
 			goto error;
@@ -549,7 +569,7 @@ static inline int get_orig_user(struct sip_msg *msg, str *username, str *domain)
  *   str1 - as unsigned int - can be CPL_RUN_INCOMING or CPL_RUN_OUTGOING
  *   str2 - as unsigned int - flags regarding state(less)|(ful)
  */
-static int cpl_invoke_script(struct sip_msg* msg, char* str1, char* str2)
+static int cpl_invoke_script(struct sip_msg* msg, void* type, void* mode)
 {
 	struct cpl_interpreter  *cpl_intr;
 	str  username = {0,0};
@@ -558,7 +578,7 @@ static int cpl_invoke_script(struct sip_msg* msg, char* str1, char* str2)
 	str  script;
 
 	/* get the user_name */
-	if ( ((unsigned long)str1)&CPL_RUN_INCOMING ) {
+	if ( ((unsigned long)type)&CPL_RUN_INCOMING ) {
 		/* if it's incoming -> get the destination user name */
 		if (get_dest_user( msg, &username, &domain)==-1)
 			goto error0;
@@ -582,13 +602,13 @@ static int cpl_invoke_script(struct sip_msg* msg, char* str1, char* str2)
 	if ( (cpl_intr=new_cpl_interpreter(msg,&script))==0 )
 		goto error1;
 	/* set the flags */
-	cpl_intr->flags =(unsigned int)((unsigned long)str1)|((unsigned long)str2);
+	cpl_intr->flags =(unsigned int)((unsigned long)type)|((unsigned long)mode);
 	/* build user AOR */
 	if (build_user_AOR( &username, &domain, &(cpl_intr->user), 0)!=0 )
 		goto error2;
 	/* for OUTGOING we need also the destination user for init. with him
 	 * the location set */
-	if ( ((unsigned long)str1)&CPL_RUN_OUTGOING ) {
+	if ( ((unsigned long)type)&CPL_RUN_OUTGOING ) {
 		/* build user initial location -> get the destination user name */
 		if (get_dest_user( msg, &username, &domain)==-1)
 			goto error2;

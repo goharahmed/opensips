@@ -82,15 +82,19 @@ static pv_spec_t callee_spec;
 static int osips_ps = 1;
 static int publish_on_trying = 0;
 static int nopublish_flag = -1;
+static char *nopublish_flag_str = 0;
+send_publish_t pua_send_publish = NULL;
+
 
 
 /** module functions */
 
 static int mod_init(void);
-int dialoginfo_set(struct sip_msg* msg, char* str1, char* str2);
-int set_branch_callee(struct sip_msg* msg, char* callee);
-static int fixup_dlginfo(void** param, int param_no);
+int dialoginfo_set(struct sip_msg* msg, str* str1);
+int set_branch_callee(struct sip_msg* msg, str* callee);
+int set_mute_branch(struct sip_msg* msg, str *parties);
 static void build_branch_callee_var_names( int branch, str *var_b, str *var_u);
+static void build_branch_mute_var_name( int branch, str *mute_var);
 
 struct dlginfo_cb_params {
 	char flags;
@@ -105,15 +109,17 @@ static struct dlginfo_cb_params * build_cb_param(int flags,
 		struct to_body *entity_p, struct to_body *peer_p);
 
 
-static cmd_export_t cmds[]=
-{
-	{"dialoginfo_set", (cmd_function)dialoginfo_set, 0,
-		0, 0, REQUEST_ROUTE},
-	{"dialoginfo_set", (cmd_function)dialoginfo_set, 1,
-		fixup_dlginfo, 0, REQUEST_ROUTE},
-	{"dialoginfo_set_branch_callee", (cmd_function)set_branch_callee, 1,
-		fixup_spve_null, 0, BRANCH_ROUTE},
-	{0, 0, 0, 0, 0, 0}
+static cmd_export_t cmds[]={
+	{"dialoginfo_set", (cmd_function)dialoginfo_set, {
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE},
+	{"dialoginfo_set_branch_callee", (cmd_function)set_branch_callee, {
+		{CMD_PARAM_STR,0,0}, {0,0,0}},
+		BRANCH_ROUTE},
+	{"dialoginfo_mute_branch", (cmd_function)set_mute_branch, {
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		BRANCH_ROUTE},
+	{0,0,{{0,0,0}},0}
 };
 
 static param_export_t params[]={
@@ -126,7 +132,7 @@ static param_export_t params[]={
 	{"caller_spec_param",   STR_PARAM, &caller_spec_param.s },
 	{"callee_spec_param",   STR_PARAM, &callee_spec_param.s },
 	{"osips_ps",            INT_PARAM, &osips_ps },
-	{"nopublish_flag",      INT_PARAM, &nopublish_flag },
+	{"nopublish_flag",      STR_PARAM, &nopublish_flag_str },
 	{0, 0, 0 }
 };
 
@@ -148,6 +154,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,       /* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,		/* dlopen flags */
+	0,						/* load function */
 	&deps,                  /* OpenSIPS module dependencies */
 	cmds,					/* exported functions */
 	0,						/* exported async functions */
@@ -157,12 +164,20 @@ struct module_exports exports= {
 	0,						/* exported pseudo-variables */
 	0,						/* exported transformations */
 	0,						/* extra processes */
+	0,						/* module pre-initialization function */
 	mod_init,				/* module initialization function */
 	0,						/* response handling function */
 	0,						/* destroy function */
-	NULL					/* per-child init function */
+	NULL,					/* per-child init function */
+	NULL					/* reload confirm function */
 };
 
+
+#define should_publish_A(_flags,_mute_s) \
+	( (_flags & DLG_PUB_A) && (_mute_s.len==0 || _mute_s.s[0]!='Y') )
+
+#define should_publish_B(_flags,_mute_s) \
+	( (_flags & DLG_PUB_B) && (_mute_s.len==0 || _mute_s.s[1]!='Y') )
 
 static void
 __tm_sendpublish(struct cell *t, int type, struct tmcb_params *_params)
@@ -172,8 +187,9 @@ __tm_sendpublish(struct cell *t, int type, struct tmcb_params *_params)
 	struct dlginfo_part *peer, *entity, custom;
 	struct dlg_cell *dlg;
 	str callid, *ttag, *ftag;
-	str name_d, name_u;
+	str name_d, name_u, mute_var;
 	int branch, n, expire;
+	str mute_val = {NULL,0};
 
 	param = (struct dlginfo_cb_params*)(*_params->param);
 	peer = &(param->peer);
@@ -187,9 +203,12 @@ __tm_sendpublish(struct cell *t, int type, struct tmcb_params *_params)
 		entity->uri.len, entity->uri.s,
 		peer->uri.len, peer->uri.s, param->flags);
 
+	/* we shall always parse callid */
+	if (get_callid(msg, &callid) < 0)
+		return;
+
 	if (include_tags) {
-		if ( get_callid( msg, &callid)<0
-		|| parse_from_header( msg )<0
+		if(parse_from_header( msg )<0
 		|| parse_to_header( msg )<0 ) {
 			LM_ERR("failed to parse the reply\n");
 			return;
@@ -201,8 +220,25 @@ __tm_sendpublish(struct cell *t, int type, struct tmcb_params *_params)
 	}
 
 	memset( &custom, 0, sizeof(custom) );
+
 	dlg = dlg_api.get_dlg();
-	if (dlg && param->flags & DLG_PUB_B) {
+
+	if (dlg) {
+
+		/* try to see if there are any muting settings per branch */
+		build_branch_mute_var_name( branch, &mute_var );
+		if (dlg_api.fetch_dlg_value(dlg, &mute_var, &mute_val, 1)== 0) {
+			if (mute_val.len!=2) {/* we expect a new letters string */
+				pkg_free(mute_val.s);
+				mute_val.s=NULL;
+				mute_val.len=0;
+			} else {
+				LM_DBG("per-branch mute information was found as [%.*s]\n",
+					mute_val.len, mute_val.s);
+			}
+		}
+
+		/* try to see if there is any custom callee per branch */
 		build_branch_callee_var_names( branch, &name_d, &name_u);
 		if (dlg_api.fetch_dlg_value(dlg, &name_u, &custom.uri, 1)== 0) {
 			/* there is a custom URI for the branch, check for display too */
@@ -212,22 +248,23 @@ __tm_sendpublish(struct cell *t, int type, struct tmcb_params *_params)
 		}
 	}
 
-	LM_DBG("using entity [%.*s]/[%.*s] and peer [%.*s]-/[%.*s]\n",
+	LM_DBG("using entity [%.*s]/[%.*s] and peer [%.*s]-/[%.*s], muting [%.*s]\n",
 		entity->display.len, entity->display.s,
 		entity->uri.len, entity->uri.s,
 		peer->display.len, peer->display.s,
-		peer->uri.len, peer->uri.s);
+		peer->uri.len, peer->uri.s,
+		mute_val.len, mute_val.s);
 
 	/* depending on the reply code, see what to publish */
 	if (_params->code<180 && _params->code>=100) {
 
 		expire = t->uac[branch].request.fr_timer.time_out - get_ticks();
 		if (publish_on_trying) {
-			if (param->flags & DLG_PUB_A)
+			if (should_publish_A( param->flags, mute_val))
 				dialog_publish("trying", entity, peer,
 					&callid, branch, 1, expire,
 					ftag, ttag);
-			if(param->flags & DLG_PUB_B)
+			if (should_publish_B( param->flags, mute_val))
 				dialog_publish("trying", peer, entity,
 					&callid, branch, 0, expire,
 					ttag, ftag);
@@ -248,12 +285,12 @@ __tm_sendpublish(struct cell *t, int type, struct tmcb_params *_params)
 
 		if (n) {
 			expire = t->uac[branch].request.fr_timer.time_out - get_ticks();
-			if(param->flags & DLG_PUB_A)
+			if (should_publish_A( param->flags, mute_val))
 				dialog_publish(caller_confirmed?"confirmed":"early",
 					entity, peer,
 					&callid, branch, 1, expire,
 					ftag, ttag);
-			if(param->flags & DLG_PUB_B)
+			if (should_publish_B( param->flags, mute_val))
 				dialog_publish("early", peer, entity,
 					&callid, branch, 0, expire,
 					ttag, ftag);
@@ -273,11 +310,11 @@ __tm_sendpublish(struct cell *t, int type, struct tmcb_params *_params)
 		lock_release(&t->reply_mutex);
 
 		if (n) {
-			if(param->flags & DLG_PUB_A)
+			if (should_publish_A( param->flags, mute_val))
 				dialog_publish("terminated", entity, peer,
 					&callid, branch, 1, 0,
 					ftag, ttag);
-			if(param->flags & DLG_PUB_B)
+			if (should_publish_B( param->flags, mute_val))
 				dialog_publish("terminated", peer, entity,
 					&callid, branch, 0, 0,
 					ttag, ftag);
@@ -287,6 +324,7 @@ __tm_sendpublish(struct cell *t, int type, struct tmcb_params *_params)
 
 	if (custom.uri.s) pkg_free(custom.uri.s);
 	if (custom.display.s) pkg_free(custom.display.s);
+	if (mute_val.s) pkg_free(mute_val.s);
 }
 
 
@@ -297,10 +335,15 @@ __dialog_sendpublish(struct dlg_cell *dlg, int type,
 	static str dlg_branch_var = str_init("__dlg_brX");
 	struct dlginfo_cb_params *param;
 	struct dlginfo_part *peer, *entity, custom;
+	struct sip_msg* msg = _params->msg;
 	str *ftag, *ttag, s;
-	str name_d, name_u;
+	str name_d, name_u, mute_var;
 	int branch, expire;
 	char *state;
+	str mute_val = {NULL,0};
+
+	if (!_params->is_active)
+		return;
 
 	param = (struct dlginfo_cb_params*)(*_params->param);
 	peer = &(param->peer);
@@ -348,6 +391,19 @@ __dialog_sendpublish(struct dlg_cell *dlg, int type,
 
 	}
 
+	/* try to see if there are any muting settings per branch */
+	build_branch_mute_var_name( branch, &mute_var );
+	if (dlg_api.fetch_dlg_value(dlg, &mute_var, &mute_val, 1)== 0) {
+		if (mute_val.len!=2) {/* we expect a new letters string */
+			pkg_free(mute_val.s);
+			mute_val.s=NULL;
+			mute_val.len=0;
+		} else {
+			LM_DBG("per-branch mute information was found as [%.*s]\n",
+				mute_val.len, mute_val.s);
+		}
+	}
+
 	memset( &custom, 0, sizeof(custom) );
 	if (param->flags & DLG_PUB_B) {
 		build_branch_callee_var_names( branch, &name_d, &name_u);
@@ -371,26 +427,29 @@ __dialog_sendpublish(struct dlg_cell *dlg, int type,
 	switch (type) {
 	case DLGCB_REQ_WITHIN:
 
+		if (get_cseq(msg)->method_id!=METHOD_INVITE ||
+		msg->flags & nopublish_flag )
+			break;
 		expire = dlg->lifetime;
 		state = "confirmed";
 
 	case DLGCB_TERMINATED:
 	case DLGCB_EXPIRED:
 
-		if(param->flags & DLG_PUB_A)
+		if (should_publish_A( param->flags, mute_val))
 			dialog_publish(state, entity, peer,
 				&(dlg->callid), branch, 1, expire, ftag, ttag);
-		if(param->flags & DLG_PUB_B)
+		if (should_publish_B( param->flags, mute_val))
 			dialog_publish(state, peer, entity,
 				&(dlg->callid), branch, 0, expire,  ttag, ftag);
 		break;
 
 	case DLGCB_CONFIRMED:
 
-		if(param->flags & DLG_PUB_A)
+		if (should_publish_A( param->flags, mute_val))
 			dialog_publish("confirmed", entity, peer,
 				&(dlg->callid), branch, 1, dlg->lifetime, ftag, ttag);
-		if(param->flags & DLG_PUB_B)
+		if (should_publish_B( param->flags, mute_val))
 			dialog_publish("confirmed", peer, entity,
 				&(dlg->callid), branch, 0, dlg->lifetime, ttag, ftag);
 		break;
@@ -400,6 +459,7 @@ __dialog_sendpublish(struct dlg_cell *dlg, int type,
 
 	if (custom.uri.s) pkg_free(custom.uri.s);
 	if (custom.display.s) pkg_free(custom.display.s);
+	if (mute_val.s) pkg_free(mute_val.s);
 }
 
 
@@ -589,7 +649,7 @@ static int mod_init(void)
 	bind_pua_t bind_pua;
 	evs_process_body_t* evp=0;
 
-	bind_pua= (bind_pua_t)find_export("bind_pua", 1,0);
+	bind_pua= (bind_pua_t)find_export("bind_pua",0);
 	if (!bind_pua)
 	{
 		LM_ERR("Can't bind pua\n");
@@ -608,11 +668,8 @@ static int mod_init(void)
 	}
 	pua_send_publish= pua.send_publish;
 
-	if (nopublish_flag!= -1 && nopublish_flag > MAX_FLAG) {
-		LM_ERR("invalid nopublish flag %d!!\n", nopublish_flag);
-		return -1;
-	}
-	nopublish_flag = (nopublish_flag!=-1)?(1<<nopublish_flag):0;
+	nopublish_flag = get_flag_id_by_name(FLAG_TYPE_MSG, nopublish_flag_str, 0);
+	nopublish_flag = (nopublish_flag>=0)?(1<<nopublish_flag):0;
 
 	if(!osips_ps)
 		evp = dialoginfo_process_body;
@@ -736,7 +793,34 @@ static struct dlginfo_cb_params * build_cb_param(int flags,
 }
 
 
-static int pack_cb_params(struct sip_msg * msg, char* flag_pv,
+static inline int parse_dialoginfo_parties_flag(str *flag_s)
+{
+	int i, flags = 0;
+
+	if (flag_s) {
+		for( i=0 ; i<flag_s->len ; i++) {
+			switch (flag_s->s[i]) {
+				case DLG_PUB_A_CHAR:
+					flags |= DLG_PUB_A;
+					break;
+				case DLG_PUB_B_CHAR:
+					flags |= DLG_PUB_B;
+					break;
+				default:
+					LM_ERR("unsupported party flag [%c], ignoring\n",flag_s->s[i]);
+			}
+		}
+
+	}
+
+	if (flags==0)
+		flags = DLG_PUB_A | DLG_PUB_B;
+
+	return flags;
+}
+
+
+static int pack_cb_params(struct sip_msg * msg, str* flag_s,
 		struct dlginfo_cb_params **param1, struct dlginfo_cb_params **param2)
 {
 	struct to_body entity, peer;
@@ -744,8 +828,8 @@ static int pack_cb_params(struct sip_msg * msg, char* flag_pv,
 	pv_value_t tok;
 	char *c_buf = NULL;
 	char *p_buf = NULL;
-	int len, flags, i;
-	str *ruri, s;
+	int len, flags;
+	str *ruri;
 	int ret;
 
 	ret = -1;
@@ -832,31 +916,7 @@ static int pack_cb_params(struct sip_msg * msg, char* flag_pv,
 	peer_p = &peer;
 
 	/* store flag  */
-	flags = 0;
-
-	if (flag_pv) {
-
-		if(pv_printf_s(msg, (pv_elem_t*)flag_pv, &s)<0) {
-			LM_ERR("cannot print the format\n");
-			goto error2;
-		}
-		for( i=0 ; i<s.len ; i++) {
-			switch (s.s[i]) {
-				case DLG_PUB_A_CHAR:
-					flags |= DLG_PUB_A;
-					break;
-				case DLG_PUB_B_CHAR:
-					flags |= DLG_PUB_B;
-					break;
-				default:
-					LM_ERR("unsupported flag [%c], ignoring\n",s.s[i]);
-			}
-		}
-
-	}
-
-	if (flags==0)
-		flags = DLG_PUB_A | DLG_PUB_B;
+	flags = parse_dialoginfo_parties_flag(flag_s);
 
 	/* now finally pack everything */
 	*param1 = build_cb_param(flags, entity_p, peer_p);
@@ -864,7 +924,7 @@ static int pack_cb_params(struct sip_msg * msg, char* flag_pv,
 		goto error2;
 
 	*param2 = build_cb_param(flags, entity_p, peer_p);
-	if (*param1==NULL) {
+	if (*param2==NULL) {
 		shm_free(*param1);
 		goto error2;
 	}
@@ -906,7 +966,7 @@ static void free_cb_param(void *param)
  *	If the pseudovariables for caller or callee are defined, those values are used
  * */
 
-int dialoginfo_set(struct sip_msg* msg, char* flag_pv, char* str2)
+int dialoginfo_set(struct sip_msg* msg, str* flag_s)
 {
 	struct dlginfo_cb_params *param_dlg, *param_tm;
 	struct dlg_cell * dlg;
@@ -926,7 +986,7 @@ int dialoginfo_set(struct sip_msg* msg, char* flag_pv, char* str2)
 	LM_DBG("new INVITE dialog created for callid [%.*s]\n",
 		dlg->callid.len, dlg->callid.s);
 
-	if (pack_cb_params( msg, flag_pv, &param_dlg, &param_tm)<0) {
+	if (pack_cb_params( msg, flag_s, &param_dlg, &param_tm)<0) {
 		LM_ERR("Failed to allocate parameters\n");
 		return -1;
 	}
@@ -957,30 +1017,6 @@ end:
 	return ret;
 }
 
-static int fixup_dlginfo(void** param, int param_no)
-{
-	pv_elem_t *model;
-	str s;
-
-	if(param_no== 0)
-		return 0;
-
-	if(*param)
-	{
-		s.s = (char*)(*param); s.len = strlen(s.s);
-		if(pv_parse_format(&s, &model)<0)
-		{
-			LM_ERR( "wrong format[%s]\n",(char*)(*param));
-			return E_UNSPEC;
-		}
-
-		*param = (void*)model;
-		return 0;
-	}
-	LM_ERR( "null format\n");
-	return E_UNSPEC;
-}
-
 
 static void build_branch_callee_var_names( int branch, str *var_d, str *var_u)
 {
@@ -1003,21 +1039,16 @@ static void build_branch_callee_var_names( int branch, str *var_d, str *var_u)
 	int2reverse_hex( &p, &s, (unsigned int)branch );
 	var_u->s = br_calleeU_var;
 	var_u->len = sizeof(URI_PATTERN)-1 - s;
-
 }
 
-int set_branch_callee(struct sip_msg* msg, char* callee)
+
+int set_branch_callee(struct sip_msg* msg, str* callee)
 {
 	struct dlg_cell * dlg;
 	struct to_body to_b;
 	int branch, len;
-	str v, name_u, name_d;
+	str name_u, name_d;
 	char *c_buf;
-
-	if (fixup_get_svalue(msg, (gparam_p)callee, &v)!=0) {
-		LM_ERR("cannot print the format for callee\n");
-		return -1;
-	}
 
 	dlg = dlg_api.get_dlg();
 
@@ -1029,17 +1060,17 @@ int set_branch_callee(struct sip_msg* msg, char* callee)
 	/* build var name */
 	build_branch_callee_var_names( branch, &name_d, &name_u );
 
-	if (v.s!=NULL || v.len!=0) {
+	if (callee->s!=NULL && callee->len!=0) {
 
 		/* parse input as nameaddr */
-		trim( &v );
-		c_buf = (char*)pkg_malloc(v.len + CRLF_LEN + 1);
+		trim( callee );
+		c_buf = (char*)pkg_malloc(callee->len + CRLF_LEN + 1);
 		if (c_buf==NULL) {
 			LM_ERR("no more pkg memory\n");
 			return -1;
 		}
-		memcpy(c_buf, v.s, v.len);
-		len = v.len;
+		memcpy(c_buf, callee->s, callee->len);
+		len = callee->len;
 		memcpy(c_buf + len, CRLF, CRLF_LEN);
 		len += CRLF_LEN;
 
@@ -1085,4 +1116,56 @@ error:
 	free_to_params(&to_b);
 	return -1;
 }
+
+
+static void build_branch_mute_var_name( int branch, str *var_m)
+{
+	#define MUTE_PATTERN "__dlginfo_br_MUTE_XXXX"
+	#define br_mute_var_end_offset 3
+	static char br_mute_var[] = MUTE_PATTERN;
+	char *p;
+	int s;
+
+	p = br_mute_var + sizeof(MUTE_PATTERN)-1 - br_mute_var_end_offset;
+	s = br_mute_var_end_offset;
+	int2reverse_hex( &p, &s, (unsigned int)branch );
+	var_m->s = br_mute_var;
+	var_m->len = sizeof(MUTE_PATTERN)-1 - s;
+}
+
+
+int set_mute_branch(struct sip_msg* msg, str* parties)
+{
+	struct dlg_cell * dlg;
+	int branch, flags;
+	str mute_var;
+	char buf[2];
+	str val = {buf,2};
+
+	dlg = dlg_api.get_dlg();
+
+	if (dlg==NULL)
+		return -1;
+
+	branch = tm_api.get_branch_index();
+
+	/* build var name */
+	build_branch_mute_var_name( branch, &mute_var );
+
+	/* parse the parties to be muted  */
+	flags = parse_dialoginfo_parties_flag( parties );
+	val.s[0] = (flags&DLG_PUB_A)?'Y':'N';
+	val.s[1] = (flags&DLG_PUB_B)?'Y':'N';
+
+	LM_DBG("storing muting setting [%.*s]->[%.*s]\n",
+		mute_var.len, mute_var.s, val.len, val.s);
+
+	if (dlg_api.store_dlg_value(dlg, &mute_var, &val)< 0) {
+		LM_ERR("Failed to store mute flags for branch %d\n",branch);
+		return -1;
+	}
+
+	return 1;
+}
+
 

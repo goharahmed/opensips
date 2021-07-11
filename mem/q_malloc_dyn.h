@@ -51,7 +51,7 @@ int qm_split_frag(struct qm_block *qm, struct qm_frag *f,
 		/*split the fragment*/
 		end=FRAG_END(f);
 		end->size=new_size;
-		n=(struct qm_frag*)((char*)end+sizeof(struct qm_frag_end));
+		n=(struct qm_frag*)(end+1);
 		n->size=rest-FRAG_OVERHEAD;
 		FRAG_END(n)->size=n->size;
 		FRAG_CLEAR_USED(n); /* never used */
@@ -432,13 +432,19 @@ void qm_status(struct qm_block *qm)
 #ifdef DBG_MALLOC
 	dbg_ht_init(allocd);
 
-	for (f=qm->first_frag; (char*)f<(char*)qm->last_frag_end; f=FRAG_NEXT(f))
-		if (!f->u.is_free)
+	for (f = qm->first_frag; f >= qm->first_frag &&
+	        (void *)f < (void *)qm->last_frag_end; f = FRAG_NEXT(f)) {
+		if (!f->u.is_free && f->file)
 			if (dbg_ht_update(allocd, f->file, f->func, f->line, f->size) < 0) {
 				LM_ERR("Unable to update alloc'ed. memory summary\n");
 				dbg_ht_free(allocd);
 				return;
 			}
+	}
+
+	if ((void *)f != (void *)qm->last_frag_end)
+		LM_GEN1(memdump, "failed to walk through all fragments (%p %p %p)\n",
+		        f, qm->first_frag, qm->last_frag_end);
 
 	LM_GEN1(memdump, " dumping summary of all alloc'ed. fragments:\n");
 	LM_GEN1(memdump, "----------------------------------------------------\n");

@@ -110,6 +110,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,           /* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,            /* dlopen flags */
+	0,				            /* load function */
 	&deps,                      /* OpenSIPS module dependencies */
 	 0,							/* exported functions */
 	 0,							/* exported async functions */
@@ -119,10 +120,12 @@ struct module_exports exports= {
 	 0,							/* exported pseudo-variables */
 	 0,							/* exported transformations */
 	 0,							/* extra processes */
+	 0,							/* module pre-initialization function */
 	 mod_init,					/* module initialization function */
 	 (response_function) 0,		/* response handling function */
  	 destroy,					/* destroy function */
-	 child_init                 /* per-child init function */
+	 child_init,                /* per-child init function */
+	 0                          /* reload confirm function */
 };
 
 /**
@@ -135,7 +138,7 @@ static int mod_init(void)
 	if(presence_server.s)
 		presence_server.len = strlen(presence_server.s);
 
-	bind_pua= (bind_pua_t)find_export("bind_pua", 1,0);
+	bind_pua= (bind_pua_t)find_export("bind_pua", 0);
 	if (!bind_pua)
 	{
 		LM_ERR("Can't bind pua (check if pua module is loaded)\n");

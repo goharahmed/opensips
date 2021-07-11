@@ -93,9 +93,10 @@ void siplua_notice(int local, const char *format, ...)
   va_end(ap);
 }
 
-static int siplua_exec(struct sip_msg* _msg, const char *fnc, const char *mystr)
+int siplua_exec(struct sip_msg* _msg, const str *fnc, const str *mystr)
 {
   str reason;
+  int ret;
 
   if ((_msg->first_line).type != SIP_INVALID)
     if (parse_headers(_msg, ~0, 0) < 0) {
@@ -109,7 +110,7 @@ static int siplua_exec(struct sip_msg* _msg, const char *fnc, const char *mystr)
 
       reason.s = "Bad Request-URI";
       reason.len = sizeof("Bad Request-URI")-1;
-      if (slb.reply(_msg, 400, &reason) == -1) {
+      if (slb.reply(_msg, 400, &reason, NULL) == -1) {
 	LM_ERR("failed to send reply\n");
       }
       return -1;
@@ -121,25 +122,9 @@ static int siplua_exec(struct sip_msg* _msg, const char *fnc, const char *mystr)
     LM_ERR("invalid firstline\n");
     return -1;
   }
-  return sipstate_call(_msg, fnc, mystr);
-}
 
-int siplua_exec1(struct sip_msg* _msg, char *fnc, char *str)
-{
-/*   siplua_log(L_DBG, "exec1(,,%s)", str); */
-	int ret;
-	ret = siplua_exec(_msg, fnc, NULL);
-	return (ret>=0)?1:-1;
-}
-
-int siplua_exec2(struct sip_msg* _msg, char *fnc, char *str)
-{
-	int ret;
-
-/*   siplua_log(L_DBG, "exec2(,,%s)", str); */
-	ret =  siplua_exec(_msg, fnc, str);
-/*   siplua_log(L_DBG, "exec2 RETURN %d", n); */
-	return (ret>=0)?1:-1;
+  ret = sipstate_call(_msg, fnc, mystr);
+  return (ret>=0)?1:-1;
 }
 
 int siplua_meminfo(struct sip_msg *msg)
@@ -147,7 +132,7 @@ int siplua_meminfo(struct sip_msg *msg)
   struct mem_info info;
 
   shm_info(&info);
-  siplua_log(L_INFO, "free/%d used/%d real_used/%d max_used/%d min_frag/%d total_frags/%d",
+  siplua_log(L_INFO, "free/%lu used/%lu real_used/%lu max_used/%lu min_frag/%lu total_frags/%lu\n",
 	     info.free, info.used, info.real_used, info.max_used, info.min_frag, info.total_frags);
   return -1;
 }

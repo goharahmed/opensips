@@ -45,6 +45,19 @@
 #define is_valid_bin_packet(_p) \
 	(memcmp(_p, BIN_PACKET_MARKER, BIN_PACKET_MARKER_SIZE) == 0)
 
+#define _ensure_bin_version(pkt, needed, pkt_desc) \
+	do { \
+		if (get_bin_pkg_version(pkt) != (needed)) { \
+			if (pkt_desc && *pkt_desc) \
+				LM_INFO("discarding %s, ver %d: need ver %d\n", \
+				        pkt_desc, get_bin_pkg_version(pkt), (needed)); \
+			else \
+				LM_INFO("discarding packet type %d, ver %d: need ver %d\n", \
+				        pkt->type, get_bin_pkg_version(pkt), (needed)); \
+			return; \
+		} \
+	} while (0)
+#define ensure_bin_version(pkt, needed) _ensure_bin_version(pkt, needed, "")
 
 typedef struct bin_packet {
 	str buffer;
@@ -65,11 +78,22 @@ struct packet_cb_list {
 	struct packet_cb_list *next;
 };
 
+/* returns the version of the bin protocol from the given message */
+static inline short get_bin_pkg_version(bin_packet_t *packet)
+{
+	short rval;
 
-/**
-	returns the version of the bin protocol from the received message
-*/
-short get_bin_pkg_version(bin_packet_t *packet);
+	memcpy(&rval, packet->buffer.s + BIN_PACKET_MARKER_SIZE
+			+ PKG_LEN_FIELD_SIZE, sizeof(rval));
+	return rval;
+}
+
+/* overrides the version of the bin protocol from the given message */
+static inline void set_bin_pkg_version(bin_packet_t *packet, short new_version)
+{
+	memcpy(packet->buffer.s + BIN_PACKET_MARKER_SIZE
+	           + PKG_LEN_FIELD_SIZE, &new_version, sizeof(new_version));
+}
 
 /*
  * returns the capability from the message
@@ -111,6 +135,17 @@ int bin_init(bin_packet_t *packet, str *capability, int packet_type, short versi
  * @length: the length of the buffer attached
  */
 void bin_init_buffer(bin_packet_t *packet, char *buffer, int length);
+
+/*
+ * appends a buffer to a binary packet
+ * @buf: buffer to be appended
+ * @len: length of @buf
+ *
+ * @return:
+ *		> 0: success, the size of the buffer
+ *		< 0: internal buffer limit reached
+ */
+int bin_append_buffer(bin_packet_t *packet, str *buf);
 
 /*
  * adds a new string value to the packet being currently built
@@ -221,6 +256,18 @@ int bin_reset_back_pointer(bin_packet_t *packet);
  * returns the buffer with the data in the bin packet
 */
 int bin_get_buffer(bin_packet_t *packet, str *buffer);
+
+/*
+ * returns the bin packet's buffer from the position where
+ * the serialized content actually starts
+*/
+int bin_get_content_start(bin_packet_t *packet, str *buf);
+
+/*
+ * returns the bin packet's buffer from the position of the
+ * next field to be consumed
+*/
+int bin_get_content_pos(bin_packet_t *packet, str *buf);
 
 #endif /* __BINARY_INTERFACE__ */
 

@@ -56,6 +56,8 @@ typedef struct lcache_col {
 	 * if not used we'll need to throw an error */
 	int is_used;
 
+	int replicated;
+
 	struct lcache_col* next;
 } lcache_col_t;
 
@@ -63,6 +65,10 @@ typedef struct url_lst {
 	str url;
 	struct url_lst* next;
 } url_lst_t;
+
+int _lcache_htable_insert(lcache_col_t *cache_col, str* attr, str* value,
+	int expires, int isrepl);
+int _lcache_htable_remove(lcache_col_t *cache_col ,str* attr, int isrepl);
 
 extern lcache_col_t* lcache_collection;
 extern url_lst_t* url_list;

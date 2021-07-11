@@ -25,12 +25,13 @@
 
 #include "evi_params.h"
 #include "../mem/mem.h"
+#include "../mem/shm_mem.h"
 #include <string.h>
 
 
 /* creates an element and links it to the parameters list
  * but without populating the parameter value */
-evi_param_p evi_param_create(evi_params_p list, str *name)
+evi_param_p evi_param_create(evi_params_p list, const str *name)
 {
 	evi_param_p new_p;
 
@@ -46,10 +47,8 @@ evi_param_p evi_param_create(evi_params_p list, str *name)
 	}
 	memset(new_p, 0, sizeof(evi_param_t));
 
-	if (name) {
-		new_p->name.s = name->s;
-		new_p->name.len = name->len;
-	}
+	if (name)
+		new_p->name = *name;
 
 	new_p->next = NULL;
 	if (list->last) {
@@ -61,25 +60,29 @@ evi_param_p evi_param_create(evi_params_p list, str *name)
 	return new_p;
 }
 
-int evi_param_set(evi_param_p el, void *param, int flags)
+int evi_param_set(evi_param_p el, const void *param, int flags)
 {
 	if (!el) {
 		LM_ERR("no parameter specified\n");
 		return 1;
 	}
-	if (!(EVI_INT_VAL & flags) && !(EVI_STR_VAL & flags)) {
+
+	if (!(flags & (EVI_INT_VAL|EVI_STR_VAL))) {
 		LM_ERR("params should be int or str [%x]\n", flags);
 		return -1;
 	}
 
-	LM_DBG("adding %s param\n", EVI_INT_VAL & flags ? "int" : "string");
-
 	el->flags = flags;
 
-	if (flags & EVI_INT_VAL)
+	if (flags & EVI_INT_VAL) {
 		el->val.n = *((int*)param);
-	else
+		LM_DBG("set int %.*s=%d\n", el->name.len, el->name.s,
+		       el->val.n);
+	} else {
 		memcpy(&el->val, param, sizeof(str));
+		LM_DBG("set str %.*s='%.*s'\n", el->name.len, el->name.s,
+		       el->val.s.len, el->val.s.s);
+	}
 
 	return 0;
 }
@@ -87,7 +90,7 @@ int evi_param_set(evi_param_p el, void *param, int flags)
 
 
 /* adds a new parameter to the list */
-int evi_param_add(evi_params_p list, str *name, void *param, int flags)
+int evi_param_add(evi_params_p list, const str *name, const void *param, int flags)
 {
 	evi_param_p new_p;
 
@@ -140,4 +143,63 @@ void evi_free_params(evi_params_p list)
 
 	/* list should be freed */
 	pkg_free(list);
+}
+
+evi_params_p evi_dup_shm_params(evi_params_p pkg_params)
+{
+	int parambufs_size, strbufs_size;
+	evi_params_p shm_params;
+	evi_param_p param, prev, sp;
+	char *p;
+
+	if(!pkg_params)
+		return NULL;
+
+	parambufs_size = sizeof(evi_params_t);
+	strbufs_size = 0;
+	for (param = pkg_params->first; param; param = param->next) {
+		parambufs_size += sizeof(evi_param_t);
+		strbufs_size += param->name.len;
+		if (param->flags & EVI_STR_VAL)
+			strbufs_size += param->val.s.len;
+	}
+
+	shm_params = shm_malloc(parambufs_size + strbufs_size);
+	if (!shm_params) {
+		return NULL;
+	}
+	shm_params->flags = 0;
+
+	sp = (evi_param_p)(shm_params + 1);
+	p = (char *)(shm_params) + parambufs_size;
+	for (param = pkg_params->first, prev = NULL; param;
+			prev = sp, param = param->next) {
+		sp->flags = param->flags;
+		sp->next = NULL;
+		sp->name.len = param->name.len;
+		if (sp->name.len) {
+			sp->name.s = p;
+			p += param->name.len;
+			memcpy(sp->name.s, param->name.s, param->name.len);
+		}
+		if (param->flags & EVI_STR_VAL) {
+			sp->val.s.len = param->val.s.len;
+			sp->val.s.s = p;
+			p += param->val.s.len;
+			memcpy(sp->val.s.s, param->val.s.s, param->val.s.len);
+		} else
+			sp->val.n = param->val.n;
+		if (prev) {
+			prev->next = sp;
+			shm_params->last = sp;
+		} else
+			shm_params->first = sp;
+		sp++;
+	}
+	return shm_params;
+}
+
+void evi_free_shm_params(evi_params_p shm_params)
+{
+	shm_free(shm_params);
 }

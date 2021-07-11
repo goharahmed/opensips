@@ -38,6 +38,7 @@ extern struct tm_binds cgr_tmb;
 #define CGR_KVF_TYPE_INT	0x1
 #define CGR_KVF_TYPE_STR	0x2
 #define CGR_KVF_TYPE_NULL	0x4
+#define CGR_KVF_TYPE_JSON	0x8
 
 
 struct cgr_kv {
@@ -174,8 +175,7 @@ int cgrates_process(json_object *jobj,
 		struct cgr_conn *c, cgr_proc_reply_f proc_reply, void *p);
 
 /* parameters manipulation */
-str *cgr_get_tag(struct sip_msg *msg, char *tag_p);
-str *cgr_get_acc(struct sip_msg *msg, char *acc_p);
-str *cgr_get_dst(struct sip_msg *msg, char *acc_p);
+str *cgr_get_acc(struct sip_msg *msg, str *acc_p);
+str *cgr_get_dst(struct sip_msg *msg, str *acc_p);
 
 #endif /* _CGRATES_COMMON_H_ */

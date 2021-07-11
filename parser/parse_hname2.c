@@ -84,6 +84,8 @@ static inline char* skip_ws(char* p, char *end)
 #include "case_priv.h"     /* Privacy */
 #include "case_retr.h"     /* Retry-After */
 #include "case_www.h"      /* WWW-Authenticate */
+#include "case_feat.h"     /* Feature-Caps */
+#include "case_repl.h"     /* Replaces */
 
 
 #define READ(val) \
@@ -124,6 +126,8 @@ static inline char* skip_ws(char* p, char *end)
 	case _priv_: priv_CASE; \
 	case _retr_: retr_CASE; \
 	case _www__: www_CASE;  \
+	case _feat_: feat_CASE; \
+	case _repl_: repl_CASE; \
 
 
 #define PARSE_COMPACT(id)      \
@@ -159,6 +163,7 @@ char* parse_hname2(char* begin, char* end, struct hdr_field* hdr)
 	switch(val) {
 
 		FIRST_QUATERNIONS;
+		/* fall through */
 
 		default:
 			switch(LOWER_BYTE(*p)) {

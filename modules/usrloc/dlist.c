@@ -40,6 +40,7 @@
 #include "../../ut.h"
 #include "../../db/db_ut.h"
 #include "../../mem/shm_mem.h"
+#include "../../daemonize.h"
 #include "../../dprint.h"
 #include "../../ip_addr.h"
 #include "../../socket_info.h"
@@ -49,6 +50,7 @@
 #include "udomain.h"           /* new_udomain, free_udomain */
 #include "utime.h"
 #include "ul_mod.h"
+#include "ul_evi.h"
 #include "ul_callback.h"
 #include "ul_cluster.h"
 #include "usrloc.h"
@@ -61,7 +63,6 @@
 dlist_t* root = 0;
 
 
-extern event_id_t ei_c_latency_update_id;
 /*! \brief
  * Returned the first udomain if input param in NULL or the next following
  * udomain after the given udomain
@@ -118,12 +119,9 @@ static int get_domain_db_ucontacts(udomain_t *d, void *buf, int *len,
 
 	struct socket_info *sock;
 	struct proxy_l next_hop;
-	char *next_hop_host;
-	int next_hop_offset;
 	db_res_t *res = NULL;
 	db_row_t *row;
 	db_val_t *val;
-	str uri, host, flag_list;
 	int i, no_rows = 10;
 	time_t now;
 	char *p, *p1;
@@ -132,6 +130,7 @@ static int get_domain_db_ucontacts(udomain_t *d, void *buf, int *len,
 	int needed;
 	int shortage = 0;
 	uint64_t contact_id;
+	void *record_start;
 
 	/* Reserve space for terminating 0000 */
 	if (zero_end)
@@ -199,9 +198,10 @@ static int get_domain_db_ucontacts(udomain_t *d, void *buf, int *len,
 
 	do {
 		for (i = 0; i < RES_ROW_N(res); i++) {
+			str_const flag_list;
 			row = RES_ROWS(res) + i;
 			val = ROW_VALUES(row) + 3; /* cflags */
-			flag_list.s   = (char *)VAL_STRING(val);
+			flag_list.s   = VAL_STRING(val);
 			flag_list.len = flag_list.s ? strlen(flag_list.s) : 0;
 
 			LM_DBG("contact cflags: '%.*s'\n", flag_list.len, flag_list.s);
@@ -255,13 +255,36 @@ static int get_domain_db_ucontacts(udomain_t *d, void *buf, int *len,
 				continue;
 			}
 
+			/* We cannot add items that point to p or p1 here,
+			 * unless they point into the buffer we're keeping.
+			 * So: we write to buf, but keep a pointer to the
+			 * start, so we can revert this record if needed. */
+			record_start = buf;
+
+			/* write received/contact */
+			memcpy(buf, &p_len, sizeof p_len);
+			buf += sizeof p_len;
+			memcpy(buf, p, p_len);
+			p = buf; /* point to to-be-kept copy of p */
+			buf += p_len;
+
+			/* write path */
+			memcpy(buf, &p1_len, sizeof p1_len);
+			buf += sizeof p1_len;
+			memcpy(buf, p1, (unsigned)p1_len);
+			p1 = buf; /* point to to-be-kept copy of p1 */
+			buf += p1_len;
+
 			/* determine and parse the URI of this contact's next hop */
 			if (p1_len > 0) {
 				/* send to first URI in path */
+				str uri, host;
 				host.s   = p1;
 				host.len = p1_len;
 				if (get_path_dst_uri(&host, &uri) < 0) {
 					LM_ERR("failed to get dst_uri for Path\n");
+					/* revert writing this record, continue with next */
+					buf = record_start;
 					continue;
 				}
 				if (parse_uri(uri.s, uri.len, &puri) < 0) {
@@ -269,37 +292,20 @@ static int get_domain_db_ucontacts(udomain_t *d, void *buf, int *len,
 					        p1_len, p1);
 					return -1;
 				}
-				/* next_hop_offset skips the 'sip:[...@]' */
-				next_hop_offset = puri.host.s - uri.s;
 			} else {
 				if (parse_uri(p, p_len, &puri) < 0) {
 					LM_ERR("failed to parse contact of next hop: '%.*s'\n",
 					        p_len, p);
 					return -1;
 				}
-				next_hop_offset = puri.host.s - p;
 			}
-
-			/* write received/contact */
-			memcpy(buf, &p_len, sizeof p_len);
-			buf += sizeof p_len;
-			memcpy(buf, p, p_len);
-			next_hop_host = buf + next_hop_offset;
-			buf += p_len;
-
-			/* write path */
-			memcpy(buf, &p1_len, sizeof p1_len);
-			buf += sizeof p1_len;
-			memcpy(buf, p1, p1_len);
-			if (p1_len > 0)
-				next_hop_host = buf + next_hop_offset;
-			buf += p1_len;
 
 			/* sock */
 			p  = (char*)VAL_STRING(ROW_VALUES(row) + 2);
 			if (VAL_NULL(ROW_VALUES(row)+2) || !p || *p == '\0') {
 				sock = NULL;
 			} else {
+				str host;
 				if (parse_phostport(p, strlen(p), &host.s, &host.len,
 				    &port, &proto) != 0) {
 					LM_ERR("bad socket <%s>...ignoring\n", p);
@@ -320,9 +326,8 @@ static int get_domain_db_ucontacts(udomain_t *d, void *buf, int *len,
 			memset(&next_hop, 0, sizeof next_hop);
 			next_hop.port  = puri.port_no;
 			next_hop.proto = puri.proto;
-			/* re-point next hop inside buffer */
 			next_hop.name.len  = puri.host.len;
-			next_hop.name.s  = next_hop_host;
+			next_hop.name.s  = puri.host.s; /* points into buffer already */
 
 			/* write the next hop */
 			memcpy(buf, &next_hop, sizeof next_hop);
@@ -387,8 +392,7 @@ cdb_pack_ping_data(const str *aor, const cdb_pair_t *contact,
 	unsigned int cflags = 0;
 	struct socket_info *sock = NULL;
 	struct proxy_l next_hop;
-	str ct_uri, received = STR_NULL, path, next_hop_uri;
-	char *next_hop_host;
+	str ct_uri, received = STR_NULL, path = STR_NULL;
 	int needed;
 	char *cp = *cpos;
 	int cols_needed = COL_CONTACT | COL_RECEIVED | COL_PATH | COL_CFLAGS;
@@ -423,7 +427,7 @@ skip_coords:
 				break;
 
 			case 'f':
-				cflags = flag_list_to_bitmask(&pair->val.val.st,
+				cflags = flag_list_to_bitmask(str2const(&pair->val.val.st),
 				                              FLAG_TYPE_BRANCH, FLAG_DELIM);
 				cols_needed &= ~COL_CFLAGS;
 				break;
@@ -468,34 +472,16 @@ skip_coords:
 	if (*len < needed)
 		return needed;
 
-	/* determine the next hop towards this contact */
-	if (ZSTR(path)) {
-		next_hop_uri = ct_uri;
-	} else {
-		if (get_path_dst_uri(&path, &next_hop_uri) < 0) {
-			LM_ERR("failed to get dst_uri for Path\n");
-			goto out_free;
-		}
-	}
-
-	if (parse_uri(next_hop_uri.s, next_hop_uri.len, &puri) < 0) {
-		LM_ERR("failed to parse URI of next hop: '%.*s'\n",
-		       next_hop_uri.len, next_hop_uri.s);
-		goto out_free;
-	}
-
 	memcpy(cp, &ct_uri.len, sizeof ct_uri.len);
 	cp += sizeof ct_uri.len;
 	memcpy(cp, ct_uri.s, ct_uri.len);
-	if (path.len == 0)
-		next_hop_host = cp + (puri.host.s - next_hop_uri.s);
+	ct_uri.s = cp; /* point into to-be-kept buffer */
 	cp += ct_uri.len;
 
 	memcpy(cp, &path.len, sizeof path.len);
 	cp += sizeof path.len;
 	memcpy(cp, path.s, path.len);
-	if (path.len > 0)
-		next_hop_host = cp + (puri.host.s - next_hop_uri.s);
+	path.s = cp; /* point into to-be-kept buffer */
 	cp += path.len;
 
 	memcpy(cp, &sock, sizeof sock);
@@ -504,11 +490,29 @@ skip_coords:
 	memcpy(cp, &cflags, sizeof cflags);
 	cp += sizeof cflags;
 
+	/* determine the next hop towards this contact */
+	{
+		str next_hop_uri;
+		if (ZSTR(path)) {
+			next_hop_uri = ct_uri;
+		} else {
+			if (get_path_dst_uri(&path, &next_hop_uri) < 0) {
+				LM_ERR("failed to get dst_uri for Path\n");
+				goto out_free;
+			}
+		}
+		if (parse_uri(next_hop_uri.s, next_hop_uri.len, &puri) < 0) {
+			LM_ERR("failed to parse URI of next hop: '%.*s'\n",
+				   next_hop_uri.len, next_hop_uri.s);
+			goto out_free;
+		}
+	}
+
 	memset(&next_hop, 0, sizeof next_hop);
 	next_hop.port  = puri.port_no;
 	next_hop.proto = puri.proto;
 	next_hop.name.len = puri.host.len;
-	next_hop.name.s = next_hop_host;
+	next_hop.name.s = puri.host.s; /* points into buffer already */
 	memcpy(cp, &next_hop, sizeof next_hop);
 	cp += sizeof next_hop;
 
@@ -604,7 +608,7 @@ get_domain_cdb_ucontacts(udomain_t *d, void *buf, int *len,
 				if (contacts)
 					goto pack_data;
 			} else {
-				if (!str_strcmp(&pair->key.name, &contacts_key)) {
+				if (str_match(&pair->key.name, &contacts_key)) {
 					if (pair->val.type == CDB_NULL)
 						goto done_packing;
 
@@ -653,7 +657,6 @@ get_domain_mem_ucontacts(udomain_t *d,void *buf, int *len, unsigned int flags,
 	int needed;
 	int count;
 	int i = 0;
-	char *next_hop_host;
 	int cur_node_idx = 0, nr_nodes = 0;
 
 	cp = buf;
@@ -726,37 +729,43 @@ get_domain_mem_ucontacts(udomain_t *d,void *buf, int *len, unsigned int flags,
 					needed += sizeof(ucontact_coords);
 
 				if (*len >= needed) {
+					struct proxy_l next_hop;
+					memcpy(&next_hop, &c->next_hop, sizeof(c->next_hop));
+
 					if (c->received.s) {
 						memcpy(cp,&c->received.len,sizeof(c->received.len));
 						cp = (char*)cp + sizeof(c->received.len);
 						memcpy(cp, c->received.s, c->received.len);
-						/* next_hop_host needs to skip the 'sip:[...@]' part
-						 * of the uri */
+						/* next_hop host needs to skip the 'sip:[...@]' part
+						 * of the uri; it's already relative to c->received
+						 * (a potentially fragile assumption) */
 						if (c->path.len == 0)
-							next_hop_host = cp + (c->next_hop.name.s - c->received.s);
+							next_hop.name.s = cp + (c->next_hop.name.s - c->received.s);
 						cp = (char*)cp + c->received.len;
 					} else {
 						memcpy(cp,&c->c.len,sizeof(c->c.len));
 						cp = (char*)cp + sizeof(c->c.len);
 						memcpy(cp, c->c.s, c->c.len);
 						if (c->path.len == 0)
-							next_hop_host = cp + (c->next_hop.name.s - c->c.s);
+							/* c->next_hop.name is relative to c->c
+							 * (a potentially fragile assumption) */
+							next_hop.name.s = cp + (c->next_hop.name.s - c->c.s);
 						cp = (char*)cp + c->c.len;
 					}
 					memcpy(cp, &c->path.len, sizeof(c->path.len));
 					cp = (char*)cp + sizeof(c->path.len);
 					memcpy(cp, c->path.s, c->path.len);
-					if (c->path.len)
-						next_hop_host = cp + (c->next_hop.name.s - c->path.s);
+					if (c->path.len != 0)
+						/* c->next_hop.name is relative to c->path
+						 * (a potentially fragile assumption) */
+						next_hop.name.s = cp + (c->next_hop.name.s - c->path.s);
 					cp = (char*)cp + c->path.len;
 					memcpy(cp, &c->sock, sizeof(c->sock));
 					cp = (char*)cp + sizeof(c->sock);
 					memcpy(cp, &c->cflags, sizeof(c->cflags));
 					cp = (char*)cp + sizeof(c->cflags);
-					memcpy(cp, &c->next_hop, sizeof(c->next_hop));
-					/* re-point the next hop inside buffer */
-					((struct proxy_l *)cp)->name.s = next_hop_host;
-					cp = (char*)cp + sizeof(c->next_hop);
+					memcpy(cp, &next_hop, sizeof(next_hop)); /* points into buffer already */
+					cp = (char*)cp + sizeof(next_hop);
 
 					*len -= needed;
 					if (!pack_coords)
@@ -789,28 +798,8 @@ get_domain_mem_ucontacts(udomain_t *d,void *buf, int *len, unsigned int flags,
 
 /*! \brief
  * Return list of all contacts for all currently registered
- * users in all domains. Caller must provide buffer of
- * sufficient length for fitting all those contacts. In the
- * case when buffer was exhausted, the function returns
- * estimated amount of additional space needed, in this
- * case the caller is expected to repeat the call using
- * this value as the hint.
- *
- * Information is packed into the buffer as follows:
- *
- * +------------+----------+-----+------+-----+----------------+
- * |contact1.len|contact1.s|sock1|flags1|path1|contact_coords1 |
- * +------------+----------+-----+------+-----+----------------+
- * |contact2.len|contact2.s|sock2|flags2|path1|contact_coords2 |
- * +------------+----------+-----+------+-----+----------------+
- * |..........................................|................|
- * +------------+----------+-----+------+-----+----------------+
- * |contactN.len|contactN.s|sockN|flagsN|pathN|contact_coordsN |
- * +------------+----------+-----+------+-----+----------------+
- * |000000000000|
- * +------------+
- *
- * if @pack_coords is false, all "contact_coordsX" parts will be omitted
+ * users in all currently defined domains.  The packed data format is identical
+ * to @get_domain_ucontacts.
  */
 int get_all_ucontacts(void *buf, int len, unsigned int flags,
                  unsigned int part_idx, unsigned int part_max, int pack_coords)
@@ -853,34 +842,32 @@ int get_all_ucontacts(void *buf, int len, unsigned int flags,
 }
 
 
-
 /*! \brief
  * Return list of all contacts for all currently registered
- * users in given domain. Caller must provide buffer of
- * sufficient length for fitting all those contacts. In the
- * case when buffer was exhausted, the function returns
- * estimated amount of additional space needed, in this
- * case the caller is expected to repeat the call using
- * this value as the hint.
+ * users in the given domain. Caller must provide a buffer of
+ * sufficient length to fit all those contacts. If the buffer
+ * is exhausted, the function returns the estimated amount
+ * of additional space needed. In this case the caller is
+ * expected to repeat the call using this value as the hint.
  *
  * Information is packed into the buffer as follows:
  *
- * +------------+----------+-----+------+-----+-----------------+
- * |contact1.len|contact1.s|sock1|flags1|path1| contact_coords1 |
- * +------------+----------+-----+------+-----+-----------------+
- * |contact2.len|contact2.s|sock2|flags2|path1| contact_coords2 |
- * +------------+----------+-----+------+-----+-----------------+
- * |..........................................|.................|
- * +------------+----------+-----+------+-----+-----------------+
- * |contactN.len|contactN.s|sockN|flagsN|pathN| contact_coordsN |
- * +------------+----------+-----+------+-----+-----------------+
+ * +------------+----------+---------+-------+------------+--------+--------+---------------+
+ * |int         |char[]    |int      |char[] |socket_info*|unsigned|proxy_l |uint64         |
+ * +============+==========+=========+=======+============+========+========+===============+
+ * |contact1.len|contact1.s|path1.len|path1.s|sock1       |dbflags |next_hop|contact_coords1|
+ * +------------+----------+---------+-------+------------+--------+--------+---------------+
+ * |contact2.len|contact2.s|path2.len|path2.s|sock2       |dbflags |next_hop|contact_coords2|
+ * +------------+----------+---------+-------+------------+--------+--------+---------------+
+ * |........................................................................................|
+ * +------------+----------+---------+-------+------------+--------+--------+---------------+
+ * |contactN.len|contactN.s|pathN.len|pathN.s|sockN       |dbflags |next_hop|contact_coordsN|
+ * +------------+----------+---------+-------+------------+--------+--------+---------------+
  * |000000000000|
  * +------------+
  *
  * if @pack_coords is false, all "contact_coordsX" parts will be omitted
  */
-
-
 int get_domain_ucontacts(udomain_t *d, void *buf, int len, unsigned int flags,
                  unsigned int part_idx, unsigned int part_max, int pack_coords)
 {
@@ -896,9 +883,6 @@ int get_domain_ucontacts(udomain_t *d, void *buf, int len, unsigned int flags,
 }
 
 
-
-
-
 /*! \brief
  * Create a new domain structure
  * \return 0 if everything went OK, otherwise value < 0 is returned
@@ -910,6 +894,11 @@ int get_domain_ucontacts(udomain_t *d, void *buf, int len, unsigned int flags,
 static inline int new_dlist(str* _n, dlist_t** _d)
 {
 	dlist_t* ptr;
+
+	if (get_osips_state()>STATE_STARTING) {
+		LM_ERR("cannot register new domain during runtime\n");
+		return -1;
+	}
 
 	/* Domains are created before ser forks,
 	 * so we can create them using pkg_malloc
@@ -1055,7 +1044,7 @@ unsigned long get_number_of_users(void* foo)
  *		* update DB state (bulk inserts/updates/deletes)
  *		* clean up any in-memory expired contacts or empty records
  */
-int synchronize_all_udomains(void)
+int _synchronize_all_udomains(void)
 {
 	int res = 0;
 	dlist_t* ptr;
@@ -1089,13 +1078,7 @@ int find_domain(str* _d, udomain_t** _p)
 	return 1;
 }
 
-/*
- * retrieve the ucontact from a domain using the contact id
- *
- * Returns:
- *	NULL, if contact not found
- *  contact, *with grabbed ulslot lock*
- */
+
 ucontact_t* get_ucontact_from_id(udomain_t *d, uint64_t contact_id, urecord_t **_r)
 {
 	int count;
@@ -1188,7 +1171,7 @@ int cdb_delete_ucontact_coords(ucontact_sip_coords *sip_key)
 }
 
 int delete_ucontact_from_coords(udomain_t *d, ucontact_coords ct_coords,
-                                char is_replicated)
+                                char skip_replication)
 {
 	ucontact_t *c, virt_c;
 	urecord_t *r;
@@ -1207,7 +1190,7 @@ int delete_ucontact_from_coords(udomain_t *d, ucontact_coords ct_coords,
 		}
 		return 0;
 	} else if (cluster_mode == CM_FULL_SHARING_CACHEDB) {
-		if (cdb_delete_ucontact_coords((ucontact_sip_coords *)ct_coords)) {
+		if (cdb_delete_ucontact_coords((ucontact_sip_coords *)(unsigned long)ct_coords)) {
 			LM_ERR("failed to remove contact from cache\n");
 			return -1;
 		}
@@ -1221,8 +1204,8 @@ int delete_ucontact_from_coords(udomain_t *d, ucontact_coords ct_coords,
 		return 0;
 	}
 
-	if (!is_replicated && location_cluster)
-		replicate_ucontact_delete(r, c);
+	if (!skip_replication && location_cluster)
+		replicate_ucontact_delete(r, c, NULL);
 
 	if (exists_ulcb_type(UL_CONTACT_DELETE)) {
 		run_ul_callbacks( UL_CONTACT_DELETE, c);

@@ -2,6 +2,7 @@
  * Lookup contacts in usrloc
  *
  * Copyright (C) 2001-2003 FhG Fokus
+ * Copyright (C) 2020 OpenSIPS Solutions
  *
  * This file is part of opensips, a free SIP server.
  *
@@ -17,7 +18,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 /*!
@@ -35,8 +36,10 @@
 
 /*! \brief
  * Lookup a contact in usrloc and rewrite R-URI if found
+ *
+ * Return: see lookup_rc
  */
-int lookup(struct sip_msg* _m, char* _table, char* _flags, char* _aor);
+int reg_lookup(struct sip_msg* _m, void* _t, const str* flags_s, str* uri);
 
 /*! \brief the is_registered() function
  * Return 1 if the AOR is registered, -1 otherwise
@@ -45,7 +48,7 @@ int lookup(struct sip_msg* _m, char* _table, char* _flags, char* _aor);
  *	- "to" header on any other SIP REQUEST
  *	- aor parameter of the function
  */
-int is_registered(struct sip_msg* _m, char *_d, char* _a);
+int is_registered(struct sip_msg* _m, void *_d, str* _a);
 
 /*! \brief the is_contact_registered() function
  * Return 1 if the contact and/or callid is registered
@@ -60,8 +63,8 @@ int is_registered(struct sip_msg* _m, char *_d, char* _a);
  *  callid params are provided
  *  - the contact parameter (third parameter)
  */
-int is_contact_registered(struct sip_msg* _m, char *_d, char* _a,
-							char* _c, char* _cid);
+int is_contact_registered(struct sip_msg* _m, void *_d, str* _a,
+							str* _c, str* _cid);
 
 /*! \brief the is_ip_registered() function
  * Return 1 if the IPs are registered for the received parameter
@@ -71,5 +74,5 @@ int is_contact_registered(struct sip_msg* _m, char *_d, char* _a,
  * IPs comes from:
  * - the IPs avp given as a third parameter
  */
-int is_ip_registered(struct sip_msg* _m, char* _d, char* _a, char *_avp);
+int is_ip_registered(struct sip_msg* _m, void* _d, str* _a, pv_spec_t *spec);
 #endif /* LOOKUP_H */

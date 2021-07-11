@@ -44,7 +44,8 @@ static int mod_init(void);
 static int proto_udp_init(struct proto_info *pi);
 static int proto_udp_init_listener(struct socket_info *si);
 static int proto_udp_send(struct socket_info* send_sock,
-		char* buf, unsigned int len, union sockaddr_union* to, int id);
+		char* buf, unsigned int len, union sockaddr_union* to,
+		unsigned int id);
 
 static int udp_read_req(struct socket_info *src, int* bytes_read);
 
@@ -54,8 +55,8 @@ static int udp_port = SIP_PORT;
 
 
 static cmd_export_t cmds[] = {
-	{"proto_init", (cmd_function)proto_udp_init, 0, 0, 0, 0},
-	{0,0,0,0,0,0}
+	{"proto_init", (cmd_function)proto_udp_init, {{0,0,0}}, 0},
+	{0,0,{{0,0,0}},0}
 };
 
 
@@ -70,6 +71,7 @@ struct module_exports proto_udp_exports = {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,               /* load function */
 	NULL,            /* OpenSIPS module dependencies */
 	cmds,       /* exported functions */
 	0,          /* exported async functions */
@@ -79,10 +81,12 @@ struct module_exports proto_udp_exports = {
 	0,          /* exported pseudo-variables */
 	0,			/* exported transformations */
 	0,          /* extra processes */
+	0,          /* module pre-initialization function */
 	mod_init,   /* module initialization function */
 	0,          /* response function */
 	0,          /* destroy function */
 	0,          /* per-child init function */
+	0           /* reload confirm function */
 };
 
 
@@ -128,6 +132,7 @@ static int udp_read_req(struct socket_info *si, int* bytes_read)
 	str msg;
 
 	fromlen=sockaddru_len(si->su);
+	/* coverity[overrun-buffer-arg: FALSE] - union has 28 bytes, CID #200029 */
 	len=recvfrom(bind_address->socket, buf, BUF_SIZE,0,&ri.src_su.s,&fromlen);
 	if (len==-1){
 		if (errno==EAGAIN)
@@ -194,7 +199,8 @@ static int udp_read_req(struct socket_info *si, int* bytes_read)
  * \return -1 on error, the return value from sento on success
  */
 static int proto_udp_send(struct socket_info* source,
-		char* buf, unsigned int len, union sockaddr_union* to, int id)
+		char* buf, unsigned int len, union sockaddr_union* to,
+		unsigned int id)
 {
 	int n, tolen;
 

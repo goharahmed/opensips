@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2009-2020 OpenSIPS Solutions
  * Copyright (C) 2006-2009 Voice System SRL
  *
  * This file is part of opensips, a free SIP server.
@@ -15,31 +16,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
- *
- * History:
- * --------
- * 2006-04-14  initial version (bogdan)
- * 2007-03-06  syncronized state machine added for dialog state. New tranzition
- *             design based on events; removed num_1xx and num_2xx (bogdan)
- * 2007-04-30  added dialog matching without DID (dialog ID), but based only
- *             on RFC3261 elements - based on an original patch submitted
- *             by Michel Bensoussan <michel@extricom.com> (bogdan)
- * 2007-07-06  additional information stored in order to save it in the db:
- *             cseq, route_set, contact and sock_info for both caller and
- *             callee (ancuta)
- * 2007-07-10  Optimized dlg_match_mode 2 (DID_NONE), it now employs a proper
- *             hash table lookup and isn't dependant on the is_direction
- *             function (which requires an RR param like dlg_match_mode 0
- *             anyways.. ;) ; based on a patch from
- *             Tavis Paquette <tavis@galaxytelecom.net>
- *             and Peter Baer <pbaer@galaxytelecom.net>  (bogdan)
- * 2008-04-17  added new type of callback to be triggered right before the
- *              dialog is destroyed (deleted from memory) (bogdan)
- * 2008-04-17  added new dialog flag to avoid state tranzitions from DELETED to
- *             CONFIRMED_NA due delayed "200 OK" (bogdan)
- * 2009-09-09  support for early dialogs added; proper handling of cseq
- *             while PRACK is used (bogdan)
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <stdlib.h>
@@ -52,12 +29,14 @@
 #include "../../route.h"
 #include "../../md5utils.h"
 #include "../../parser/parse_to.h"
+#include "../../parser/contact/parse_contact.h"
 #include "../tm/tm_load.h"
 #include "../../script_cb.h"
 #include "dlg_hash.h"
 #include "dlg_profile.h"
 #include "dlg_replication.h"
 #include "dlg_req_within.h"
+#include "dlg_handlers.h"
 #include "dlg_db_handler.h"
 #include "../../evi/evi_params.h"
 #include "../../evi/evi_modules.h"
@@ -65,6 +44,8 @@
 #define MAX_LDG_LOCKS  2048
 #define MIN_LDG_LOCKS  2
 
+/* useful for dialog ref debugging, once -DDBG_DIALOG is enabled */
+struct struct_hist_list *dlg_hist;
 
 struct dlg_table *d_table = NULL;
 int ctx_dlg_idx = 0;
@@ -74,8 +55,8 @@ static inline void raise_state_changed_event(struct dlg_cell *dlg,
 static str ei_st_ch_name = str_init("E_DLG_STATE_CHANGED");
 static evi_params_p event_params;
 
-static str ei_h_entry = str_init("hash_entry");
-static str ei_h_id = str_init("hash_id");
+static str ei_id = str_init("id");
+static str ei_db_id = str_init("db_id");
 static str ei_c_id = str_init("callid");
 static str ei_from_tag = str_init("from_tag");
 static str ei_to_tag = str_init("to_tag");
@@ -84,7 +65,7 @@ static str ei_new_state = str_init("new_state");
 
 static event_id_t ei_st_ch_id = EVI_ERROR;
 
-static evi_param_p hentry_p, hid_p, cid_p, fromt_p, tot_p;
+static evi_param_p id_p, db_id_p, cid_p, fromt_p, tot_p;
 static evi_param_p ostate_p, nstate_p;
 
 int dialog_cleanup( struct sip_msg *msg, void *param )
@@ -114,10 +95,10 @@ struct dlg_cell *get_current_dialog(void)
 		return NULL;
 	}
 	if (current_processing_ctx && trans->dialog_ctx) {
-		/* if we have context, but no dlg info, and we 
+		/* if we have context, but no dlg info, and we
 		   found dlg info into transaction, populate
 		   the dialog too */
-		ref_dlg( trans->dialog_ctx, 1);
+		ref_dlg((struct dlg_cell*)trans->dialog_ctx, 1);
 		ctx_dialog_set(trans->dialog_ctx);
 	}
 	return (struct dlg_cell*)trans->dialog_ctx;
@@ -136,6 +117,14 @@ int init_dlg_table(unsigned int size)
 		LM_ERR("no more shm mem (1)\n");
 		goto error0;
 	}
+
+#if defined(DBG_STRUCT_HIST) && defined(DBG_DIALOG)
+	dlg_hist = shl_init("dialog hist", 10000, 0);
+	if (!dlg_hist) {
+		LM_ERR("oom\n");
+		goto error1;
+	}
+#endif
 
 	memset( d_table, 0, sizeof(struct dlg_table) );
 	d_table->size = size;
@@ -181,10 +170,11 @@ static inline void free_dlg_dlg(struct dlg_cell *dlg)
 
 	if (dlg->cbs.first)
 		destroy_dlg_callbacks_list(dlg->cbs.first);
+	context_destroy(CONTEXT_DIALOG, context_of(dlg));
 
 	if (dlg->profile_links) {
-		destroy_linkers_unsafe(dlg, 0);
-		remove_dlg_prof_table(dlg, 0);
+		destroy_linkers_unsafe(dlg);
+		remove_dlg_prof_table(dlg, 1);
 	}
 
 	if (dlg->legs) {
@@ -205,8 +195,14 @@ static inline void free_dlg_dlg(struct dlg_cell *dlg)
 				shm_free(dlg->legs[i].from_uri.s);
 			if (dlg->legs[i].to_uri.s)
 				shm_free(dlg->legs[i].to_uri.s);
-			if (dlg->legs[i].adv_sdp.s)
-				shm_free(dlg->legs[i].adv_sdp.s);
+			if (dlg->legs[i].out_sdp.s)
+				shm_free(dlg->legs[i].out_sdp.s);
+			if (dlg->legs[i].in_sdp.s)
+				shm_free(dlg->legs[i].in_sdp.s);
+			if (dlg->legs[i].tmp_out_sdp.s)
+				shm_free(dlg->legs[i].tmp_out_sdp.s);
+			if (dlg->legs[i].tmp_in_sdp.s)
+				shm_free(dlg->legs[i].tmp_in_sdp.s);
 		}
 		shm_free(dlg->legs);
 	}
@@ -222,6 +218,13 @@ static inline void free_dlg_dlg(struct dlg_cell *dlg)
 
 	if (dlg->terminate_reason.s)
 		shm_free(dlg->terminate_reason.s);
+
+#ifdef DBG_DIALOG
+	sh_log(dlg->hist, DLG_DESTROY, "ref %d", dlg->ref);
+	sh_unref(dlg->hist);
+	dlg->hist = NULL;
+#endif
+
 	shm_free(dlg);
 }
 
@@ -295,14 +298,24 @@ struct dlg_cell* build_new_dlg( str *callid, str *from_uri, str *to_uri,
 	char *p;
 
 	len = sizeof(struct dlg_cell) + callid->len + from_uri->len +
-		to_uri->len;
+		to_uri->len + context_size(CONTEXT_DIALOG);
 	dlg = (struct dlg_cell*)shm_malloc( len );
 	if (dlg==0) {
 		LM_ERR("no more shm mem (%d)\n",len);
 		return 0;
 	}
 
-	memset( dlg, 0, len);
+	memset(dlg, 0, len);
+
+#if defined(DBG_STRUCT_HIST) && defined(DBG_DIALOG)
+	dlg->hist = sh_push(dlg, dlg_hist);
+	if (!dlg->hist) {
+		LM_ERR("oom\n");
+		shm_free(dlg);
+		return NULL;
+	}
+#endif
+
 	dlg->state = DLG_STATE_UNCONFIRMED;
 
 	dlg->h_entry = dlg_hash( callid);
@@ -312,6 +325,8 @@ struct dlg_cell* build_new_dlg( str *callid, str *from_uri, str *to_uri,
 		to_uri->len,to_uri->s, from_tag->len, from_tag->s, dlg->h_entry);
 
 	p = (char*)(dlg+1);
+	/* dialog context has to be first, otherwise context_of will break */
+	p += context_size(CONTEXT_DIALOG);
 
 	dlg->callid.s = p;
 	dlg->callid.len = callid->len;
@@ -333,35 +348,124 @@ struct dlg_cell* build_new_dlg( str *callid, str *from_uri, str *to_uri,
 
 int dlg_clone_callee_leg(struct dlg_cell *dlg, int cloned_leg_idx)
 {
-	struct dlg_leg *leg, *src_leg = &dlg->legs[cloned_leg_idx];
+	struct dlg_leg *leg, *src_leg;
 
 	if (ensure_leg_array(dlg->legs_no[DLG_LEGS_USED] + 1, dlg) != 0)
 		return -1;
+	src_leg = &dlg->legs[cloned_leg_idx];
 	leg = &dlg->legs[dlg->legs_no[DLG_LEGS_USED]];
 
-	if (dlg_has_reinvite_pinging(dlg)) {
-		if (shm_str_dup(&leg->adv_sdp, &src_leg->adv_sdp) != 0) {
-			LM_ERR("oom sdp\n");
-			return -1;
-		}
+	if (shm_str_dup(&leg->adv_contact, &src_leg->adv_contact) != 0) {
+		LM_ERR("oom contact\n");
+		return -1;
+	}
 
-		if (shm_str_dup(&leg->adv_contact, &src_leg->adv_contact) != 0) {
-			LM_ERR("oom contact\n");
-			shm_free(leg->adv_sdp.s);
-			memset(&leg->adv_sdp, 0, sizeof leg->adv_sdp);
-			return -1;
-		}
+	if (src_leg->out_sdp.s && shm_str_dup(&leg->out_sdp, &src_leg->out_sdp) != 0) {
+		shm_free(leg->adv_contact.s);
+		LM_ERR("oom sdp\n");
+		return -1;
 	}
 
 	return dlg->legs_no[DLG_LEGS_USED]++;
 }
 
+
+static inline int translate_contact_ipport( str *ct, struct socket_info *sock,
+																	str *dst)
+{
+	struct hdr_field ct_hdr;
+	struct contact_body *cb;
+	contact_t *c;
+	struct sip_uri puri;
+	str hostport;
+	str *send_address_str, *send_port_str;
+	char *p;
+
+	/* rely on the fact that the replicated hdr is well formated, so 
+	 * skip the hdr name */
+	if ((p=q_memchr(ct->s, ':', ct->len))==NULL) {
+		LM_ERR("failed find hdr body in "
+			"advertised contact <%.*s>\n", ct->len, ct->s);
+	}
+
+	memset( &ct_hdr, 0, sizeof(ct_hdr));
+	ct_hdr.body.s = p+1;
+	ct_hdr.body.len = (ct->s+ct->len)-ct_hdr.body.s;
+
+	if (parse_contact( &ct_hdr )<0 ||
+	(cb=(contact_body_t*)ct_hdr.parsed)==NULL ||
+	(c=cb->contacts)==NULL || c->next!=NULL ) {
+		LM_ERR("failed to parsed or wrong nr of contacts in "
+			"advertised contact <%.*s>\n", ct->len, ct->s);
+		return -1;
+	}
+
+	if (parse_uri( c->uri.s, c->uri.len, &puri)<0) {
+		LM_ERR("failed to parsed URI in contact <%.*s>\n",
+			c->uri.len, c->uri.s);
+		goto error;
+	}
+	hostport.s = puri.host.s;
+	hostport.len = puri.port.len ?
+		(puri.port.s+puri.port.len-puri.host.s) :  puri.host.len ;
+
+	LM_DBG("replacing <%.*s> from ct <%.*s>\n",
+		hostport.len, hostport.s, ct->len, ct->s);
+
+	/* init send_address_str & send_port_str */
+	if(sock->adv_name_str.len)
+		send_address_str=&(sock->adv_name_str);
+	else if (default_global_address->s)
+		send_address_str=default_global_address;
+	else
+		send_address_str=&(sock->address_str);
+	if(sock->adv_port_str.len)
+		send_port_str=&(sock->adv_port_str);
+	else if (default_global_port->s)
+		send_port_str=default_global_port;
+	else
+		send_port_str=&(sock->port_no_str);
+
+	dst->len = (hostport.s - ct->s) +  /* staring preserved part */
+		(send_address_str->len + 1 + send_port_str->len) + /*new ip:port part*/
+		(ct->s + ct->len - hostport.s - hostport.len);
+	dst->s = (char*)shm_malloc( dst->len );
+	if (dst->s==NULL) {
+		LM_ERR("failed to allocated new host:port, len %d\n",dst->len);
+		goto error;
+	}
+
+	/* start building the new ct hdr */
+	p = dst->s;
+	memcpy( p, ct->s, hostport.s - ct->s);
+	p += hostport.s - ct->s;
+
+	memcpy( p, send_address_str->s, send_address_str->len);
+	p += send_address_str->len;
+	*(p++) = ':';
+	memcpy( p, send_port_str->s, send_port_str->len);
+	p += send_port_str->len;
+
+	memcpy( p, hostport.s+hostport.len, ct->s+ct->len-hostport.s-hostport.len);
+	p += ct->s+ct->len-hostport.s-hostport.len;
+
+	LM_DBG("resulting ct is <%.*s> / %d\n",
+		dst->len, dst->s, dst->len);
+
+	free_contact( &cb );
+	return 0;
+error:
+	free_contact( &cb );
+	return -1;
+}
+
+
 /* first time it will called for a CALLER leg - at that time there will
    be no leg allocated, so automatically CALLER gets the first position, while
    the CALLEE legs will follow into the array in the same order they came */
 int dlg_update_leg_info(int leg_idx, struct dlg_cell *dlg, str* tag, str *rr,
-		str *contact,str *cseq, struct socket_info *sock,
-		str *mangled_from,str *mangled_to,str *sdp)
+		str *contact, str *adv_ct, str *cseq, struct socket_info *sock,
+		str *mangled_from,str *mangled_to,str *in_sdp, str *out_sdp)
 {
 	struct dlg_leg *leg;
 	rr_t *head = NULL, *rrp;
@@ -429,38 +533,46 @@ int dlg_update_leg_info(int leg_idx, struct dlg_cell *dlg, str* tag, str *rr,
 		}
 	}
 
-	/* save mangled from URI, if any */
-	if (mangled_from && mangled_from->s && mangled_from->len) {
-		leg->from_uri.s = shm_malloc(mangled_from->len);
-		if (!leg->from_uri.s) {
-			LM_ERR("no more shm\n");
-			goto error_all;
-		}
-
-		leg->from_uri.len = mangled_from->len;
-		memcpy(leg->from_uri.s,mangled_from->s,mangled_from->len);
+	/* save mangled FROM/TO URIs, if any */
+	if (mangled_from && mangled_from->s && mangled_from->len &&
+	shm_str_dup( &leg->from_uri, mangled_from)==-1 ) {
+		LM_ERR("failed to shm duplicate mangled FROM hdr\n");
+		goto error_all;
 	}
 
-	if (mangled_to && mangled_to->s && mangled_to->len) {
-		leg->to_uri.s = shm_malloc(mangled_to->len);
-		if (!leg->to_uri.s) {
-			LM_ERR("no more shm\n");
-			goto error_all;
-		}
-
-		leg->to_uri.len = mangled_to->len;
-		memcpy(leg->to_uri.s,mangled_to->s,mangled_to->len);
+	if (mangled_to && mangled_to->s && mangled_to->len &&
+	shm_str_dup( &leg->to_uri, mangled_to)==-1 ) {
+		LM_ERR("failed to shm duplicate mangled TO hdr\n");
+		goto error_all;
 	}
 
-	if (sdp && sdp->s && sdp->len) {
-		leg->adv_sdp.s = shm_malloc(sdp->len);
-		if (!leg->adv_sdp.s) {
-			LM_ERR("no more shm\n");
+	/* these are the inbound/outbound SDPs for this leg */
+	if (in_sdp && in_sdp->s && in_sdp->len &&
+	shm_str_dup( &leg->in_sdp, in_sdp)==-1 ) {
+		LM_ERR("failed to shm duplicate inbound SDP\n");
+		goto error_all;
+	}
+
+	if (out_sdp && out_sdp->s && out_sdp->len &&
+	shm_str_dup( &leg->out_sdp, out_sdp)==-1 ) {
+		LM_ERR("failed to shm duplicate outbound SDP\n");
+		goto error_all;
+	}
+
+	/* this is the advertised contact for this leg */
+	if (adv_ct && adv_ct->s && adv_ct->len) {
+		/* if the advertised tag is correlated with an interface indetified 
+		 * by a TAG, it means that the actual IP of the interface may be
+		 * different, so we better re-compute the IP:port part of the contact*/
+		if (sock->tag.s) {
+			if (translate_contact_ipport(adv_ct,sock, &leg->adv_contact)<0){
+				LM_ERR("failed to shm translate advertised contact\n");
+				goto error_all;
+			}
+		} else if (shm_str_dup( &leg->adv_contact, adv_ct)==-1 ) {
+			LM_ERR("failed to shm duplicate advertised contact\n");
 			goto error_all;
 		}
-
-		leg->adv_sdp.len = sdp->len;
-		memcpy(leg->adv_sdp.s,sdp->s,sdp->len);
 	}
 
 	/* tag */
@@ -516,6 +628,11 @@ error_all:
 	if (leg->contact.s) {
 		shm_free(leg->contact.s);
 		leg->contact.s = NULL;
+	}
+
+	if (leg->in_sdp.s) {
+		shm_free(leg->in_sdp.s);
+		leg->in_sdp.s = NULL;
 	}
 error2:
 	shm_free(leg->r_cseq.s);
@@ -645,8 +762,8 @@ struct dlg_cell* lookup_dlg( unsigned int h_entry, unsigned int h_id)
 				dlg_unlock( d_table, d_entry);
 				goto not_found;
 			}
+			DBG_REF(dlg, 1);
 			dlg->ref++;
-			LM_DBG("ref dlg %p with 1 -> %d\n", dlg, dlg->ref);
 			dlg_unlock( d_table, d_entry);
 			LM_DBG("dialog id=%u found on entry %u\n", h_id, h_entry);
 			return dlg;
@@ -703,8 +820,8 @@ struct dlg_cell* get_dlg( str *callid, str *ftag, str *ttag,
 				   with the same callid and fromtag - like in auth/challenge
 				   case -bogdan */
 				continue;
+			DBG_REF(dlg, 1);
 			dlg->ref++;
-			LM_DBG("ref dlg %p with 1 -> %d\n", dlg, dlg->ref);
 			dlg_unlock( d_table, d_entry);
 			LM_DBG("dialog callid='%.*s' found\n on entry %u, dir=%d\n",
 				callid->len, callid->s,h_entry,*dir);
@@ -750,7 +867,7 @@ struct dlg_cell* get_dlg_by_val(str *attr, str *val)
 }
 
 
-struct dlg_cell* get_dlg_by_callid( str *callid, int active_only)
+struct dlg_cell* get_dlg_by_callid(const str *callid, int active_only)
 {
 	struct dlg_cell *dlg;
 	struct dlg_entry *d_entry;
@@ -779,31 +896,74 @@ struct dlg_cell* get_dlg_by_callid( str *callid, int active_only)
 }
 
 
-void link_dlg(struct dlg_cell *dlg, int n)
+struct dlg_cell* get_dlg_by_did(str *did, int active_only)
+{
+	struct dlg_cell *dlg;
+	struct dlg_entry *d_entry;
+	unsigned h_entry, h_id;
+
+	if (parse_dlg_did(did, &h_entry, &h_id) < 0)
+		return NULL;
+
+	if (h_entry>=d_table->size)
+		return NULL;
+
+	LM_DBG("looking for hentry=%d hid=%d\n", h_entry, h_id);
+
+	d_entry = &(d_table->entries[h_entry]);
+	dlg_lock( d_table, d_entry);
+	for( dlg = d_entry->first ; dlg ; dlg = dlg->next ) {
+		if (active_only && dlg->state>DLG_STATE_CONFIRMED )
+			continue;
+		if (dlg->h_id == h_id) {
+			ref_dlg_unsafe( dlg, 1);
+			dlg_unlock( d_table, d_entry);
+			return dlg;
+		}
+	}
+
+	dlg_unlock( d_table, d_entry);
+	return NULL;
+}
+
+struct dlg_cell *get_dlg_by_dialog_id(str *dialog_id)
+{
+	struct dlg_cell *dlg = NULL;
+	unsigned int h_entry, h_id;
+
+	if (parse_dlg_did(dialog_id, &h_entry, &h_id) == 0) {
+		/* we might have a dialog did */
+		LM_DBG("ID: %*s (h_entry %u h_id %u)\n",
+				dialog_id->len, dialog_id->s, h_entry, h_id);
+		dlg = lookup_dlg(h_entry, h_id);
+	}
+	if (!dlg) {
+		/* the ID is not a number, so let's consider
+		 * the value a SIP call-id */
+		LM_DBG("Call-ID: <%.*s>\n", dialog_id->len, dialog_id->s);
+		dlg = get_dlg_by_callid(dialog_id, 1);
+	}
+	return dlg;
+}
+
+
+void link_dlg(struct dlg_cell *dlg, int extra_refs)
 {
 	struct dlg_entry *d_entry;
 
 	d_entry = &(d_table->entries[dlg->h_entry]);
 
-	dlg_lock( d_table, d_entry);
+	dlg_lock(d_table, d_entry);
 
-	dlg->h_id = d_entry->next_id++;
-	if (d_entry->first==0) {
-		d_entry->first = d_entry->last = dlg;
-	} else {
-		d_entry->last->next = dlg;
-		dlg->prev = d_entry->last;
-		d_entry->last = dlg;
-	}
+	link_dlg_unsafe(d_entry, dlg);
 
-	dlg->ref += 1 + n;
-	d_entry->cnt++;
+	DBG_REF(dlg, extra_refs);
+	dlg->ref += extra_refs;
 
-	LM_DBG("ref dlg %p with %d -> %d in h_entry %p - %d \n", dlg, n+1, dlg->ref,
-								d_entry,dlg->h_entry);
+	LM_DBG("ref dlg %p with %d -> %d in h_entry %p - %d \n",
+	       dlg, extra_refs + 1, dlg->ref, d_entry, dlg->h_entry);
 
 	dlg_unlock( d_table, d_entry);
-	return;
 }
 
 
@@ -827,7 +987,7 @@ void unlink_unsafe_dlg(struct dlg_entry *d_entry,
 }
 
 
-void ref_dlg(struct dlg_cell *dlg, unsigned int cnt)
+void _ref_dlg(struct dlg_cell *dlg, unsigned int cnt)
 {
 	struct dlg_entry *d_entry;
 
@@ -838,8 +998,7 @@ void ref_dlg(struct dlg_cell *dlg, unsigned int cnt)
 	dlg_unlock( d_table, d_entry);
 }
 
-
-void unref_dlg(struct dlg_cell *dlg, unsigned int cnt)
+void _unref_dlg(struct dlg_cell *dlg, unsigned int cnt)
 {
 	struct dlg_entry *d_entry;
 
@@ -869,12 +1028,12 @@ int state_changed_event_init(void)
 	}
 	memset(event_params, 0, sizeof(evi_params_t));
 
-	hentry_p = evi_param_create(event_params, &ei_h_entry);
-	if (hentry_p == NULL)
+	id_p = evi_param_create(event_params, &ei_id);
+	if (id_p == NULL)
 		goto create_error;
 
-	hid_p = evi_param_create(event_params, &ei_h_id);
-	if (hid_p == NULL)
+	db_id_p = evi_param_create(event_params, &ei_db_id);
+	if (db_id_p == NULL)
 		goto create_error;
 
 	cid_p = evi_param_create(event_params, &ei_c_id);
@@ -918,22 +1077,20 @@ void state_changed_event_destroy(void)
 static void raise_state_changed_event(struct dlg_cell *dlg,
 									unsigned int ostate, unsigned int nstate)
 {
-	char b1[INT2STR_MAX_LEN], b2[INT2STR_MAX_LEN];
-	str s1, s2;
+	str *did = dlg_get_did(dlg);
 	int callee_leg_idx;
+	str db_id;
 
-	s1.s = int2bstr( (unsigned long)dlg->h_entry, b1, &s1.len);
-	s2.s = int2bstr( (unsigned long)dlg->h_id, b2, &s2.len);
-	if (s1.s==NULL || s2.s==NULL) {
-		LM_ERR("cannot convert hash params\n");
+	if (!evi_probe_event(ei_st_ch_id))
+		return;
+
+	if (evi_param_set_str(id_p, did) < 0) {
+		LM_ERR("cannot set dialog id parameter\n");
 		return;
 	}
-	if (evi_param_set_str(hentry_p, &s1) < 0) {
-		LM_ERR("cannot set hash entry parameter\n");
-		return;
-	}
-	if (evi_param_set_str(hid_p, &s2) < 0) {
-		LM_ERR("cannot set hash id parameter\n");
+	db_id.s = int2str(dlg_get_db_id(dlg), &db_id.len);
+	if (evi_param_set_str(db_id_p, &db_id) < 0) {
+		LM_ERR("cannot set dialog db id parameter\n");
 		return;
 	}
 
@@ -953,11 +1110,13 @@ static void raise_state_changed_event(struct dlg_cell *dlg,
 		return;
 	}
 
+	/* coverity[overrun-buffer-val] */
 	if (evi_param_set_int(ostate_p, &ostate) < 0) {
 		LM_ERR("cannot set old state parameter\n");
 		return;
 	}
 
+	/* coverity[overrun-buffer-val] */
 	if (evi_param_set_int(nstate_p, &nstate) < 0) {
 		LM_ERR("cannot set new state parameter\n");
 		return;
@@ -1096,8 +1255,13 @@ void next_state_dlg(struct dlg_cell *dlg, int event, int dir, int *old_state,
 					 *
 					 * RFC says caller may send BYEs for early dialogs,
 					 * while the callee side MUST not send such requests*/
-					if (last_dst_leg == 0)
+					if (last_dst_leg == 0) {
 						log_next_state_dlg(event, dlg);
+					} else {
+						/* we don't transition, but rather we
+						 * mark the BYE as received */
+						dlg->flags |= DLG_FLAG_HASBYE;
+					}
 			}
 			break;
 		case DLG_EVENT_REQPRACK:
@@ -1157,15 +1321,19 @@ static inline int internal_mi_print_dlg(mi_item_t *dialog_obj,
 	char* p;
 	int i, j;
 	time_t _ts;
-	struct tm* t;
+	struct tm t;
 	char date_buf[MI_DATE_BUF_LEN];
 	int date_buf_len;
 	mi_item_t *callees_arr, *values_arr, *profiles_arr;
 	mi_item_t *context_obj, *callee_item, *values_item, *profiles_item;
+	str *did = dlg_get_did(dlg);
 
-	if (add_mi_string_fmt(dialog_obj, MI_SSTR("ID"), "%llu",
-		(((long long unsigned)dlg->h_entry)<<(8*sizeof(int)))+dlg->h_id) < 0)
+	if (add_mi_string(dialog_obj, MI_SSTR("ID"), did->s, did->len) < 0)
 		goto error;
+	if (add_mi_string_fmt(dialog_obj, MI_SSTR("db_id"), "%llu",
+			(((long long unsigned)dlg->h_entry)<<(8*sizeof(int)))+dlg->h_id) < 0)
+		goto error;
+
 	if (add_mi_number(dialog_obj, MI_SSTR("state"), dlg->state) < 0)
 		goto error;
 	if (add_mi_number(dialog_obj, MI_SSTR("user_flags"), dlg->user_flags) < 0)
@@ -1175,9 +1343,9 @@ static inline int internal_mi_print_dlg(mi_item_t *dialog_obj,
 	if (add_mi_number(dialog_obj, MI_SSTR("timestart"), _ts) < 0)
 		goto error;
 	if (_ts) {
-		t = localtime(&_ts);
+		localtime_r(&_ts, &t);
 		date_buf_len = strftime(date_buf, MI_DATE_BUF_LEN - 1,
-						"%Y-%m-%d %H:%M:%S", t);
+						"%Y-%m-%d %H:%M:%S", &t);
 		if (date_buf_len != 0)
 			if (add_mi_string(dialog_obj, MI_SSTR("datestart"),
 				date_buf, date_buf_len) < 0)
@@ -1189,9 +1357,9 @@ static inline int internal_mi_print_dlg(mi_item_t *dialog_obj,
 	if (add_mi_number(dialog_obj, MI_SSTR("timeout"), _ts) < 0)
 		goto error;
 	if (_ts) {
-		t = localtime(&_ts);
+		localtime_r(&_ts, &t);
 		date_buf_len = strftime(date_buf, MI_DATE_BUF_LEN - 1,
-						"%Y-%m-%d %H:%M:%S", t);
+						"%Y-%m-%d %H:%M:%S", &t);
 		if (date_buf_len != 0)
 			if (add_mi_string(dialog_obj, MI_SSTR("dateout"),
 				date_buf, date_buf_len) < 0)
@@ -1229,9 +1397,15 @@ static inline int internal_mi_print_dlg(mi_item_t *dialog_obj,
 			dlg->legs[DLG_CALLER_LEG].bind_addr->sock_str.s,
 			dlg->legs[DLG_CALLER_LEG].bind_addr->sock_str.len) < 0)
 			goto error;
-		if (add_mi_string(dialog_obj, MI_SSTR("caller_sdp"),
-			dlg->legs[DLG_CALLER_LEG].adv_sdp.s,
-			dlg->legs[DLG_CALLER_LEG].adv_sdp.len) < 0)
+		if (dlg->legs[DLG_CALLER_LEG].in_sdp.s &&
+			add_mi_string(dialog_obj, MI_SSTR("caller_sdp"),
+			dlg->legs[DLG_CALLER_LEG].in_sdp.s,
+			dlg->legs[DLG_CALLER_LEG].in_sdp.len) < 0)
+			goto error;
+		if (dlg->legs[DLG_CALLER_LEG].out_sdp.s &&
+			add_mi_string(dialog_obj, MI_SSTR("caller_sent_sdp"),
+			dlg->legs[DLG_CALLER_LEG].out_sdp.s,
+			dlg->legs[DLG_CALLER_LEG].out_sdp.len) < 0)
 			goto error;
 	}
 
@@ -1267,8 +1441,13 @@ static inline int internal_mi_print_dlg(mi_item_t *dialog_obj,
 				goto error;
 		}
 
-		if (add_mi_string(callee_item, MI_SSTR("callee_sdp"),
-			dlg->legs[i].adv_sdp.s, dlg->legs[i].adv_sdp.len) < 0)
+		if (dlg->legs[i].in_sdp.s &&
+			add_mi_string(callee_item, MI_SSTR("callee_sdp"),
+			dlg->legs[i].in_sdp.s, dlg->legs[i].in_sdp.len) < 0)
+			goto error;
+		if (dlg->legs[i].out_sdp.s &&
+			add_mi_string(callee_item, MI_SSTR("callee_sent_sdp"),
+			dlg->legs[i].out_sdp.s, dlg->legs[i].out_sdp.len) < 0)
 			goto error;
 	}
 
@@ -1475,6 +1654,8 @@ static mi_response_t *mi_match_print_dlg(int with_context,
 
 	dlg_unlock(d_table, d_entry);
 
+	return resp;
+
 error:
 	dlg_unlock(d_table, d_entry);
 	free_mi_response(resp);
@@ -1557,19 +1738,14 @@ mi_response_t *mi_print_dlgs_cnt_ctx(const mi_params_t *params,
 mi_response_t *mi_push_dlg_var(const mi_params_t *params,
 								struct mi_handler *async_hdl)
 {
-	unsigned int h_entry, h_id;
-	unsigned long long d_id;
 	str dlg_var_name,dlg_var_value,dialog_id;
-	char bkp, *end;
 	struct dlg_cell * dlg = NULL;
 	int shtag_state = 1, db_update = 0;
 	mi_item_t *did_param_arr;
 	int i, no_dids;
 
 	if ( d_table == NULL)
-		goto not_found;	
-
-	h_entry = h_id = 0;
+		goto not_found;
 
 	if (get_mi_string_param(params, "dlg_val_name",
 		&dlg_var_name.s, &dlg_var_name.len) < 0)
@@ -1590,32 +1766,8 @@ mi_response_t *mi_push_dlg_var(const mi_params_t *params,
 		/* Get the dialog based of the dialog_id. This may be a
 		 * numerical DID or a string SIP Call-ID */
 
-		/* make value null terminated (in an ugly way) */
-		bkp = dialog_id.s[dialog_id.len];
-		dialog_id.s[dialog_id.len] = 0;
-
-		/* conver to long long */
-		d_id = strtoll( dialog_id.s, &end, 10);
-		dialog_id.s[dialog_id.len] = bkp;
-		if (end-dialog_id.s==dialog_id.len) {
-			/* the ID is numeric, so let's consider it DID */
-			h_entry = (unsigned int)(d_id>>(8*sizeof(int)));
-			h_id = (unsigned int)(d_id &
-				(((unsigned long long)1<<(8*sizeof(int)))-1) );
-			LM_DBG("ID: %llu (h_entry %u h_id %u)\n", d_id, h_entry, h_id);
-			dlg = lookup_dlg(h_entry, h_id);
-			if (dlg == NULL) {
-				LM_DBG("Faiure to match the ID as DLG_ID \n");
-				goto callid_lookup;
-			}
-		} else {
-callid_lookup:
-			/* the ID is not a number, so let's consider
-			 * the value a SIP call-id */
-			LM_DBG("Call-ID: <%.*s>\n", dialog_id.len, dialog_id.s);
-			dlg = get_dlg_by_callid( &dialog_id, 1 );
-		}
-
+		/* convert to unsigned long long */
+		dlg = get_dlg_by_dialog_id(&dialog_id);
 		if (dlg == NULL) {
 			/* XXX - not_found or loop_end here ? */
 			continue;
@@ -1651,9 +1803,9 @@ callid_lookup:
 
 		if (db_update)
 			update_dialog_timeout_info(dlg);
-		if (dialog_repl_cluster && shtag_state != SHTAG_STATE_BACKUP)
+		if (dialog_repl_cluster/* && shtag_state != SHTAG_STATE_BACKUP // already active */)
 			replicate_dialog_updated(dlg);
-			
+
 		unref_dlg(dlg, 1);
 	}
 

@@ -17,12 +17,12 @@ Presence Module
               1.4.1. db_url(str)
               1.4.2. fallback2db (int)
               1.4.3. cluster_id (int)
-              1.4.4. cluster_federation_mode (int)
+              1.4.4. cluster_federation_mode (str)
               1.4.5. cluster_pres_events (str)
               1.4.6. expires_offset (int)
               1.4.7. max_expires_subscribe (int)
               1.4.8. max_expires_publish (int)
-              1.4.9. server_address (str)
+              1.4.9. contact_user (str)
               1.4.10. enable_sphere_check (int)
               1.4.11. waiting_subs_daysno (int)
               1.4.12. mix_dialog_presence (int)
@@ -40,13 +40,13 @@ Presence Module
 
         1.5. Exported Functions
 
-              1.5.1. handle_publish(sender_uri)
+              1.5.1. handle_publish([sender_uri])
               1.5.2. handle_subscribe([force_active]
                       [,sharing_tag])
 
         1.6. Exported MI Functions
 
-              1.6.1. refreshWatchers
+              1.6.1. refresh_watchers
               1.6.2. cleanup
               1.6.3. pres_phtable_list
               1.6.4. subs_phtable_list
@@ -104,7 +104,7 @@ Presence Module
    1.6. Set expires_offset parameter
    1.7. Set max_expires_subscribe parameter
    1.8. Set max_expires_publish parameter
-   1.9. Set server_address parameter
+   1.9. Set contact_user parameter
    1.10. Set enable_sphere_check parameter
    1.11. Set waiting_subs_daysno parameter
    1.12. Set mix_dialog_presence parameter
@@ -129,10 +129,15 @@ Chapter 1. Admin Guide
 
    The modules handles PUBLISH and SUBSCRIBE messages and
    generates NOTIFY messages in a general, event independent way.
-   It allows registering events to it from other OpenSIPS modules.
-   Events that can currently be added to it are: presence,
-   presence.winfo, dialog;sla from presence_xml module and
-   message-summary from presence_mwi module.
+   It allows registering events from other OpenSIPS modules.
+   Events that can currently be added are:
+     * presence, presence.winfo, dialog;sla from presence_xml
+       module
+     * message-summary from presence_mwi module
+     * call-info, line-seize from presence_callinfo module
+     * dialog from presence_dialoginfo module
+     * xcap-diff from presence_xcapdiff module
+     * as-feature-event from presence_dfks module
 
    The module uses database storage. It has later been improved
    with memory caching operations to improve performance. The
@@ -162,6 +167,10 @@ Chapter 1. Admin Guide
    Balancing or Federations, please refer to this article
    https://blog.opensips.org/2018/03/27/clustering-presence-servic
    es-with-opensips-2-4/.
+
+   As data synchronization at startup is performed when using the
+   full-sharing cluster_federation_mode, you should define at
+   least one "seed" node in the cluster in this case.
 
 1.3. Dependencies
 
@@ -225,22 +234,36 @@ modparam("presence", "fallback2db", 1)
 modparam("presence", "cluster_id", 2)
 ...
 
-1.4.4. cluster_federation_mode (int)
+1.4.4. cluster_federation_mode (str)
 
-   When enabling the federation mode, the node inside the presence
-   cluster will start partitioning the data (each node will keep
-   its own data set) and exchange the minimimum of needed
-   information via the clustering support. A non-zero value means
-   enabled.
+   When enabling the federation mode, nodes inside the presence
+   cluster will start broadcasting the data to other nodes via the
+   clustering support.
+
+   Possible values:
+     * disabled - federation mode is disabled
+     * on-demand-sharing - the minimum needed information is kept
+       on each node. Replicated information for non local
+       subscribers is discarded and queries are broadcasted in the
+       cluster for new subscribers.
+     * full-sharing - published state is kept on all presence
+       nodes even when there aren't any local subscribers.
+
+   If you don't want to use a shared database (via fallback2db),
+   but still want a complete data set everywhere, you may choose
+   mode full-sharing. This mode allows you to switch PUBLISH
+   endpoints, even for already published Event States, thus
+   allowing you to add and remove presence servers without losing
+   state.
 
    For more on presence clustering see the Section 1.2, “Presence
    clustering” chapter.
 
-   Default value is “0” (disabled).
+   Default value is “disabled”.
 
    Example 1.4. Set cluster_federation_mode parameter
 ...
-modparam("presence", "cluster_federation_mode", 1)
+modparam("presence", "cluster_federation_mode", "full-sharing")
 ...
 
 1.4.5. cluster_pres_events (str)
@@ -294,21 +317,23 @@ modparam("presence", "max_expires_subscribe", 3600)
 modparam("presence", "max_expires_publish", 3600)
 ...
 
-1.4.9. server_address (str)
+1.4.9. contact_user (str)
 
-   The optional presence server URI address which will become the
-   value of Contact header filed for 200OK replies to Subscribe
-   and Publish and in Notify messages.
+   This is the username that will be used in the Contact header
+   for the 200 OK replies to SUBSCRIBE and in the following
+   in-dialog NOTIFY requests. The IP address, port and transport
+   for the Contact will be automatically determined based on the
+   interface where the SUBSCRIBE was received.
 
-   NOTE: this must be a fully formated SIP URI, with port and
-   transport parameter if the case.
+   If set to an empty string, no username will be added to the
+   contact and the contact will be built just out of the IP, port
+   and transport.
 
-   If not set (as it is by default), OpenSIPS will generate the
-   Contact URI based on the interface it received the SIP traffic.
+   Default value is “presence”.
 
-   Example 1.9. Set server_address parameter
+   Example 1.9. Set contact_user parameter
 ...
-modparam("presence", "server_address", "sip:10.10.10.10:5060")
+modparam("presence", "contact_user", "presence")
 ...
 
 1.4.10. enable_sphere_check (int)
@@ -512,19 +537,21 @@ modparam("presence", "pres_htable_size", 11)
 
 1.5. Exported Functions
 
-1.5.1.  handle_publish(sender_uri)
+1.5.1.  handle_publish([sender_uri])
 
    The function handles PUBLISH requests. It stores and updates
    published information in database and calls functions to send
    NOTIFY messages when changes in the published information
-   occur. It takes one argument -> sender_uri. The parameter was
-   added for enabling BLA implementation. If present, Notification
-   of a change in published state is not sent to the respective
-   uri even though a subscription exists. It should be taken from
-   the Sender header. It was left at the decision of the
-   administrator whether or not to transmit the content of this
-   header as parameter for handle_publish, to prevent security
-   problems.
+   occur.
+
+   It may takes one optional string argument, the 'sender_uri' SIP
+   URI. The parameter was added for enabling BLA implementation.
+   If present, Notification of a change in published state is not
+   sent to the respective uri even though a subscription exists.
+   It should be taken from the Sender header. It was left at the
+   decision of the administrator whether or not to transmit the
+   content of this header as parameter for handle_publish, to
+   prevent security problems.
 
    This function can be used from REQUEST_ROUTE.
 
@@ -539,7 +566,7 @@ modparam("presence", "pres_htable_size", 11)
         if(is_method("PUBLISH"))
         {
                 if($hdr(Sender)!= NULL)
-                        handle_publish("$hdr(Sender)");
+                        handle_publish($hdr(Sender));
                 else
                         handle_publish();
         }
@@ -555,29 +582,29 @@ modparam("presence", "pres_htable_size", 11)
    the wathcer/subscriber.
 
    The function may take the following parameters:
-     * force_active - options parameter that controlls what is the
-       default policy (of the presentity) on accepting new
-       subscriptions (accept or reject) - of course, this
-       parameter makes sense only when using a presence
+     * force_active (int, optional) - optional parameter that
+       controls what is the default policy (of the presentity) on
+       accepting new subscriptions (accept or reject) - of course,
+       this parameter makes sense only when using a presence
        configuration with privacy rules enabled (force_active
        parameter in presence_xml module is not set).
        There are scenarios where the presentity (the party you
-       subscribe to) can not upload an XCAP document with it's
-       privacy rules (to controll which watchers are allowed to
-       subscribe to it). In such case, from script level, you can
+       subscribe to) can not upload an XCAP document with its
+       privacy rules (to control which watchers are allowed to
+       subscribe to it). In such cases, from script level, you can
        force the presence server to consider the current
        subscription allowed (with Subscription-Status:active) by
-       calling the handle_subscribe() function with the string
+       calling the handle_subscribe() function with the integer
        parameter "1".
-     * sharing_tag - options parameter telling the owner tag (for
-       the subscription) in clusetering scenarios where the
-       subscription data is shared between multiple servers - see
-       the Section 1.2, “Presence clustering” chapter for more
-       details.
+     * sharing_tag (string, optional) - optional parameter telling
+       the owner tag (for the subscription) in clusetering
+       scenarios where the subscription data is shared between
+       multiple servers - see the Section 1.2, “Presence
+       clustering” chapter for more details.
 
    Ex:
         if($ru =~ "kphone@opensips.org")
-                handle_subscribe("1");
+                handle_subscribe(1);
 
    This function can be used from REQUEST_ROUTE.
 
@@ -595,12 +622,12 @@ if($rm=="SUBSCRIBE")
 
 1.6. Exported MI Functions
 
-1.6.1.  refreshWatchers
+1.6.1.  refresh_watchers
 
    Triggers sending Notify messages to watchers if a change in
    watchers authorization or in published state occurred.
 
-   Name: refreshWatchers
+   Name: refresh_watchers
 
    Parameters:
      * presentity_uri : the uri of the user who made the change
@@ -615,7 +642,7 @@ if($rm=="SUBSCRIBE")
             is set): refresh type!= 0.
 
    MI FIFO Command Format:
-opensips-cli -x mi refreshWatchers sip:11@192.168.2.132 presence 1
+opensips-cli -x mi refresh_watchers sip:11@192.168.2.132 presence 1
 
 1.6.2.  cleanup
 
@@ -705,7 +732,7 @@ opensips-cli -x mi pres_expose presence ^sip:10\.0\.5\.[0-9]*
    them can be found in presence-create.sql script in the database
    directories in the opensips/scripts folder. You can also find
    the complete database documentation on the project webpage,
-   http://www.opensips.org/html/docs/db/db-schema-devel.html.
+   https://opensips.org/docs/db/db-schema-devel.html.
 
 Chapter 2. Developer Guide
 
@@ -1005,25 +1032,26 @@ Chapter 3. Contributors
    Table 3.1. Top contributors by DevScore^(1), authored
    commits^(2) and lines added/removed^(3)
      Name DevScore Commits Lines ++ Lines --
-   1. Anca Vamanu 663 247 24146 12623
-   2. Bogdan-Andrei Iancu (@bogdan-iancu) 125 72 2765 1680
-   3. Razvan Crainea (@razvancrainea) 27 21 376 135
-   4. Ovidiu Sas (@ovidiusas) 27 19 615 167
-   5. Daniel-Constantin Mierla (@miconda) 24 19 174 165
-   6. Liviu Chircu (@liviuchircu) 23 14 240 365
-   7. Vlad Patrascu (@rvlad-patrascu) 16 7 328 281
-   8. Henning Westerholt (@henningw) 15 6 340 302
-   9. Dan Pascu (@danpascu) 9 7 13 32
-   10. Saúl Ibarra Corretgé (@saghul) 8 6 36 11
+   1. Anca Vamanu 651 247 24146 12623
+   2. Bogdan-Andrei Iancu (@bogdan-iancu) 147 91 3098 1815
+   3. Razvan Crainea (@razvancrainea) 34 27 420 162
+   4. Vlad Patrascu (@rvlad-patrascu) 31 17 629 476
+   5. Ovidiu Sas (@ovidiusas) 29 20 618 170
+   6. Liviu Chircu (@liviuchircu) 29 19 253 375
+   7. Daniel-Constantin Mierla (@miconda) 24 19 174 165
+   8. Dan Pascu (@danpascu) 20 14 162 201
+   9. Henning Westerholt (@henningw) 14 6 340 302
+   10. Walter Doekes (@wdoekes) 10 6 145 94
 
-   All remaining contributors: Walter Doekes (@wdoekes), Edson
-   Gellert Schubert, Vlad Paiu (@vladpaiu), Juha Heinanen
-   (@juha-h), Stanislaw Pitucha, Damien Sandras (@dsandras), Kobi
-   Eshun (@ekobi), Dusan Klinec, Angel Marin, Klaus Darilion,
-   Carlos Oliva, Sergio Gutierrez, Kennard White, Elena-Ramona
-   Modroiu, Vasil Kolev, Benny Prijono, James Criscuolo, Peter
-   Lemenkov (@lemenkov), Vallimamod Abdullah, UnixDev, Denis
-   Bilenko, Julián Moreno Patiño, John Riordan, Julien Blache.
+   All remaining contributors: Saúl Ibarra Corretgé (@saghul),
+   Vlad Paiu (@vladpaiu), Juha Heinanen (@juha-h), Edson Gellert
+   Schubert, Stanislaw Pitucha, Damien Sandras (@dsandras), Kobi
+   Eshun (@ekobi), Dusan Klinec (@ph4r05), Angel Marin, Klaus
+   Darilion, Carlos Oliva, Sergio Gutierrez, Kennard White,
+   Elena-Ramona Modroiu, Vasil Kolev, Benny Prijono, James
+   Criscuolo, Peter Lemenkov (@lemenkov), Vallimamod Abdullah,
+   UnixDev, Denis Bilenko, Julián Moreno Patiño, Maksym Sobolyev
+   (@sobomax), John Riordan, Julien Blache.
 
    (1) DevScore = author_commits + author_lines_added /
    (project_lines_added / project_commits) + author_lines_deleted
@@ -1045,26 +1073,26 @@ Chapter 3. Contributors
 
    Table 3.2. Most recently active contributors^(1) to this module
                       Name                   Commit Activity
-   1.  Bogdan-Andrei Iancu (@bogdan-iancu) Oct 2006 - Mar 2019
-   2.  Razvan Crainea (@razvancrainea)     Sep 2011 - Mar 2019
-   3.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - Jan 2019
-   4.  Liviu Chircu (@liviuchircu)         Mar 2014 - Nov 2018
-   5.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
-   6.  James Criscuolo                     Mar 2016 - Mar 2016
-   7.  Ovidiu Sas (@ovidiusas)             Sep 2010 - Mar 2016
-   8.  Julián Moreno Patiño                Feb 2016 - Feb 2016
-   9.  Dusan Klinec                        Dec 2015 - Dec 2015
-   10. Carlos Oliva                        Mar 2015 - Mar 2015
+   1.  Bogdan-Andrei Iancu (@bogdan-iancu) Oct 2006 - Jun 2021
+   2.  Walter Doekes (@wdoekes)            Apr 2010 - Apr 2021
+   3.  Maksym Sobolyev (@sobomax)          Jan 2021 - Jan 2021
+   4.  Ovidiu Sas (@ovidiusas)             Sep 2010 - Sep 2020
+   5.  Razvan Crainea (@razvancrainea)     Sep 2011 - Aug 2020
+   6.  Liviu Chircu (@liviuchircu)         Mar 2014 - May 2020
+   7.  Dan Pascu (@danpascu)               Nov 2007 - Feb 2020
+   8.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - Jan 2020
+   9.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
+   10. James Criscuolo                     Mar 2016 - Mar 2016
 
-   All remaining contributors: Damien Sandras (@dsandras), Vlad
-   Paiu (@vladpaiu), Saúl Ibarra Corretgé (@saghul), Anca Vamanu,
-   Walter Doekes (@wdoekes), Vallimamod Abdullah, Kennard White,
-   Stanislaw Pitucha, Angel Marin, John Riordan, Vasil Kolev,
-   UnixDev, Sergio Gutierrez, Kobi Eshun (@ekobi), Klaus Darilion,
-   Denis Bilenko, Henning Westerholt (@henningw), Juha Heinanen
-   (@juha-h), Dan Pascu (@danpascu), Daniel-Constantin Mierla
-   (@miconda), Edson Gellert Schubert, Julien Blache, Benny
-   Prijono, Elena-Ramona Modroiu.
+   All remaining contributors: Julián Moreno Patiño, Dusan Klinec
+   (@ph4r05), Carlos Oliva, Damien Sandras (@dsandras), Vlad Paiu
+   (@vladpaiu), Saúl Ibarra Corretgé (@saghul), Anca Vamanu,
+   Vallimamod Abdullah, Kennard White, Stanislaw Pitucha, Angel
+   Marin, John Riordan, Vasil Kolev, UnixDev, Sergio Gutierrez,
+   Kobi Eshun (@ekobi), Klaus Darilion, Denis Bilenko, Henning
+   Westerholt (@henningw), Juha Heinanen (@juha-h),
+   Daniel-Constantin Mierla (@miconda), Edson Gellert Schubert,
+   Julien Blache, Benny Prijono, Elena-Ramona Modroiu.
 
    (1) including any documentation-related commits, excluding
    merge commits
@@ -1073,14 +1101,15 @@ Chapter 4. Documentation
 
 4.1. Contributors
 
-   Last edited by: Razvan Crainea (@razvancrainea), Bogdan-Andrei
-   Iancu (@bogdan-iancu), Peter Lemenkov (@lemenkov), Liviu Chircu
-   (@liviuchircu), Vlad Patrascu (@rvlad-patrascu), Saúl Ibarra
-   Corretgé (@saghul), Ovidiu Sas (@ovidiusas), Anca Vamanu,
-   Kennard White, Angel Marin, Kobi Eshun (@ekobi), Klaus
-   Darilion, Henning Westerholt (@henningw), Dan Pascu
-   (@danpascu), Daniel-Constantin Mierla (@miconda), Edson Gellert
-   Schubert, Juha Heinanen (@juha-h), Elena-Ramona Modroiu.
+   Last edited by: Ovidiu Sas (@ovidiusas), Vlad Patrascu
+   (@rvlad-patrascu), Walter Doekes (@wdoekes), Dan Pascu
+   (@danpascu), Liviu Chircu (@liviuchircu), Bogdan-Andrei Iancu
+   (@bogdan-iancu), Razvan Crainea (@razvancrainea), Peter
+   Lemenkov (@lemenkov), Saúl Ibarra Corretgé (@saghul), Anca
+   Vamanu, Kennard White, Angel Marin, Kobi Eshun (@ekobi), Klaus
+   Darilion, Henning Westerholt (@henningw), Daniel-Constantin
+   Mierla (@miconda), Edson Gellert Schubert, Juha Heinanen
+   (@juha-h), Elena-Ramona Modroiu.
 
    Documentation Copyrights:
 

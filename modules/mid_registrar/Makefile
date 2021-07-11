@@ -3,10 +3,7 @@
 include ../../Makefile.defs
 auto_gen=
 NAME=mid_registrar.so
-LIBS=
-
-REG_LIB_DIR = ../../lib/reg
-_SRC=ci.c regtime.c rerrno.c sip_msg.c path.c
-extra_sources=$(patsubst %,$(REG_LIB_DIR)/%,$(_SRC))
+# link in common registrar code
+misclibs=../../lib/reg/libreg.a
 
 include ../../Makefile.modules

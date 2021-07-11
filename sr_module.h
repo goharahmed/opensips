@@ -53,20 +53,19 @@
 #include "route.h"
 #include "async.h"
 #include "transformations.h"
+#include "cmds.h"
 
 #include "sr_module_deps.h"
 
 typedef  struct module_exports* (*module_register)();
-typedef  int (*cmd_function)(struct sip_msg*, char*, char*, char*, char*,
-			char*, char*);
-typedef  int (*acmd_function)(struct sip_msg*, async_ctx *ctx,
-			char*, char*, char*, char*, char*, char*);
-typedef  int (*fixup_function)(void** param, int param_no);
-typedef  int (*free_fixup_function)(void** param, int param_no);
+typedef int (*load_function)(void);
+
 typedef  int (*response_function)(struct sip_msg*);
 typedef void (*destroy_function)();
+typedef int (*preinit_function)(void);
 typedef int (*init_function)(void);
 typedef int (*child_init_function)(int rank);
+typedef int (*reload_confirm_function)(void);
 
 
 #define STR_PARAM        (1U<<0)  /* String parameter type */
@@ -87,7 +86,6 @@ typedef int (*mod_proc_wrapper)();
 #define PROC_TIMER    -1  /* Timer attendant process */
 #define PROC_MODULE   -2  /* Extra process requested by modules */
 #define PROC_TCP_MAIN -4  /* TCP main process */
-#define PROC_BIN      -8  /* Any binary interface listener */
 
 #define DEFAULT_DLFLAGS	0 /* value that signals to module loader to
 							use default dlopen flags in opensips */
@@ -103,30 +101,9 @@ typedef int (*mod_proc_wrapper)();
 	OPENSIPS_COMPILE_FLAGS
 
 
-#define PROC_FLAG_INITCHILD  (1<<0)
-#define PROC_FLAG_HAS_IPC    (1<<1)
-
-
-struct cmd_export_ {
-	char* name;             /* null terminated command name */
-	cmd_function function;  /* pointer to the corresponding function */
-	int param_no;           /* number of parameters used by the function */
-	fixup_function fixup;   /* pointer to the function called to "fix" the
-							   parameters */
-	free_fixup_function
-				free_fixup; /* pointer to the function called to free the
-							   "fixed" parameters */
-	int flags;              /* Function flags */
-};
-
-
-struct acmd_export_ {
-	char* name;              /* null terminated command name */
-	acmd_function function;  /* pointer to the corresponding function */
-	int param_no;            /* number of parameters used by the function */
-	fixup_function fixup;    /* pointer to the function called to "fix" the
-							    parameters */
-};
+#define PROC_FLAG_INITCHILD    (1<<0)
+#define PROC_FLAG_HAS_IPC      (1<<1)
+#define PROC_FLAG_NEEDS_SCRIPT (1<<2)
 
 
 struct param_export_ {
@@ -150,19 +127,21 @@ typedef struct dep_export_ {
 	modparam_dependency_t mpd[];
 } dep_export_t;
 
-typedef struct cmd_export_  cmd_export_t;
-typedef struct acmd_export_ acmd_export_t;
 typedef struct proc_export_ proc_export_t;
-
 
 struct sr_module{
 	char* path;
 	void* handle;
 	int init_done;
+	int init_child_done;
+	int destroy_done;
 	struct module_exports* exports;
 
-	/* a list of module dependencies */
-	struct sr_module_dep *sr_deps;
+	/* modules which must be initialized before this module */
+	struct sr_module_dep *sr_deps_init;
+
+	/* modules which must be destroyed before this module */
+	struct sr_module_dep *sr_deps_destroy;
 
 	struct sr_module* next;
 };
@@ -175,7 +154,11 @@ struct module_exports{
 	char *compile_flags;            /*!< compile flags used on the module */
 	unsigned int dlflags;           /*!< flags for dlopen */
 
+	load_function load_f;           /*!< function called immediately after a
+	                                   module was loaded by dlopen */
+
 	dep_export_t *deps;             /*!< module and modparam dependencies */
+
 
 	cmd_export_t* cmds;             /*!< null terminated array of the exported
 	                                   commands */
@@ -199,6 +182,7 @@ struct module_exports{
 	proc_export_t* procs;           /*!< null terminated array of the additional
 	                                   processes reqired by the module */
 
+	preinit_function preinit_f;     /*!< Pre-Initialization function */
 	init_function init_f;           /*!< Initialization function */
 	response_function response_f;   /*!< function used for responses,
 	                                   returns yes or no; can be null */
@@ -206,22 +190,24 @@ struct module_exports{
 	                                   be "destroyed", e.g: on opensips exit */
 	child_init_function init_child_f;/*!< function called by all processes
 	                                    after the fork */
+	reload_confirm_function reload_ack_f;/*!< function called during a script
+	                                    reload in order to confirm if the 
+	                                    module agrees with the new script */
 };
 
 void set_mpath(const char *new_mpath);
 
-struct sr_module* modules; /*!< global module list*/
+extern struct sr_module* modules; /*!< global module list*/
 
 int register_builtin_modules();
 int register_module(struct module_exports*, char*,  void*);
 int load_module(char* name);
-cmd_export_t* find_cmd_export_t(char* name, int param_no, int flags);
-acmd_export_t* find_acmd_export_t(char* name, int param_no);
-cmd_function find_export(char* name, int param_no, int flags);
-cmd_function find_mod_export(char* mod, char* name, int param_no, int flags);
+cmd_function find_export(char* name, int flags);
+cmd_function find_mod_export(char* mod, char* name, int flags);
 void destroy_modules();
 int init_child(int rank);
 int init_modules(void);
+int init_modules_deps(void);
 
 /*! \brief
  * Find a parameter with given type and return it's
@@ -242,6 +228,10 @@ void* find_param_export(char* mod, char* name, modparam_t type);
  * \return Returns 1 if the module with name 'name' is loaded, and zero otherwise. */
 int module_loaded(char *name);
 
+/*! \brief Fetch the handle of a module shared object, obtained via dlopen()
+ * \return Pointer to the handle, NULL otherwise. */
+void *get_mod_handle(const char *name);
+
 /*! \brief Gets a specific module
  * \return Returns the module if the module with name 'name' is loaded, and
  * NULL otherwise */
@@ -252,5 +242,12 @@ int count_module_procs(int flags);
 /*! \brief Forks and starts the additional processes required by modules */
 int start_module_procs(void);
 
+/*! \brief Runs the reload validation function from all modules */
+int modules_validate_reload(void);
+
+#ifndef DLSYM_PREFIX
+/* define it to null */
+#define DLSYM_PREFIX
+#endif
 
 #endif

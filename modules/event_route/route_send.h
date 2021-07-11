@@ -15,12 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,USA
  *
- *
- * history:
- * ---------
- *  2014-06-27  created (osas)
  */
 
 
@@ -31,17 +27,16 @@
 #define ROUTE_SEND_RETRY 3
 
 typedef struct _route_send {
-	struct action *a;
+	int ev_route_id;
 	str event;
 	evi_params_t params;
 } route_send_t;
 
-int create_pipe(void);
-void destroy_pipe(void);
-int init_writer(void);
-
 int route_build_buffer(str *event_name, evi_reply_sock *sock,
 		evi_params_t *params, route_send_t **msg);
+
 int route_send(route_send_t *route_s);
+void route_run(struct script_route route, struct sip_msg* msg,
+		evi_params_t *params, str *event);
 
 #endif

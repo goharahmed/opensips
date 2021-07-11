@@ -32,6 +32,7 @@
 #define TM_INJECT_SRC_MSG     (1<<0)
 #define TM_INJECT_SRC_EVENT   (1<<1)
 #define TM_INJECT_FLAG_CANCEL (1<<2)
+#define TM_INJECT_FLAG_LAST   (1<<3)
 
 typedef int (*taddblind_f)( /*struct cell *t */ );
 
@@ -42,9 +43,9 @@ int t_replicate(struct sip_msg *p_msg, str *dst, int flags);
 int t_forward_nonack( struct cell *t, struct sip_msg* p_msg,
 		struct proxy_l * p, int reset_bcounter, int locked);
 
-int add_phony_uac( struct cell *t);
+int add_phony_uac( struct cell *t, int br_flags);
 
-int t_add_reason(struct sip_msg *msg, char *val);
+int t_add_reason(struct sip_msg *msg, str *reason);
 
 int t_set_reason(struct sip_msg *msg, str *reason);
 
@@ -57,7 +58,15 @@ unsigned int get_on_branch();
 typedef int (*tgetbranch_f)(void);
 int get_branch_index(void);
 
+extern int w_t_wait_for_new_branches(struct sip_msg* msg);
+
+extern int w_t_inject_branches(struct sip_msg* msg, void *source,
+                               void *extra_flags);
+int t_inject_ul_event_branch(void);
+
 int t_inject_branch( struct cell *t, struct sip_msg *msg, int flags);
+
+int t_wait_no_more_branches( struct cell *t);
 
 void get_cancel_reason(struct sip_msg *msg, int flags, str *reason);
 

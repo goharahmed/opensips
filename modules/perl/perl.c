@@ -54,10 +54,6 @@ char *filename = NULL;
  * installed */
 char *modpath = NULL;
 
-/* Allow unsafe module functions - functions with fixups. This will create
- * memory leaks, the variable thus is not documented! */
-int unsafemodfnc = 0;
-
 /* Reference to the running Perl interpreter instance */
 PerlInterpreter *my_perl = NULL;
 
@@ -92,21 +88,16 @@ mi_response_t *perl_mi_reload(const mi_params_t *params,
  * Exported functions
  */
 static cmd_export_t cmds[] = {
-	{ "perl_exec_simple", (cmd_function)perl_exec_simple1, 1,  perl_fixup, 0,
-							     REQUEST_ROUTE | FAILURE_ROUTE
-							   | ONREPLY_ROUTE | BRANCH_ROUTE },
-	{ "perl_exec_simple", (cmd_function)perl_exec_simple2, 2,  perl_fixup, 0,
-							     REQUEST_ROUTE | FAILURE_ROUTE
-							   | ONREPLY_ROUTE | BRANCH_ROUTE },
-	{ "perl_exec", (cmd_function)perl_exec1, 1,  perl_fixup, 0,
-							     REQUEST_ROUTE | FAILURE_ROUTE
-							   | ONREPLY_ROUTE | BRANCH_ROUTE },
-	{ "perl_exec", (cmd_function)perl_exec2, 2, perl_fixup, 0,
-							     REQUEST_ROUTE | FAILURE_ROUTE
-							   | ONREPLY_ROUTE | BRANCH_ROUTE },
-	{ 0, 0, 0, 0, 0, 0 }
+	{"perl_exec_simple", (cmd_function)perl_exec_simple, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE},
+	{"perl_exec", (cmd_function)perl_exec, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE|FAILURE_ROUTE|ONREPLY_ROUTE|BRANCH_ROUTE},
+	{0,0,{{0,0,0}},0}
 };
-
 
 /*
  * Exported parameters
@@ -114,7 +105,6 @@ static cmd_export_t cmds[] = {
 static param_export_t params[] = {
 	{"filename", STR_PARAM, &filename},
 	{"modpath", STR_PARAM, &modpath},
-	{"unsafemodfnc", INT_PARAM, &unsafemodfnc},
 	{ 0, 0, 0 }
 };
 
@@ -164,6 +154,7 @@ struct module_exports exports = {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	RTLD_NOW | RTLD_GLOBAL,
+	0,          /* load function */
 	&deps,      /* OpenSIPS module dependencies */
 	cmds,       /* Exported functions */
 	0,          /* Exported async functions */
@@ -173,10 +164,12 @@ struct module_exports exports = {
 	0,          /* exported pseudo-variables */
 	0,			/* exported transformations */
 	0,          /* extra processes */
+	0,          /* module pre-initialization function */
 	mod_init,   /* module initialization function */
 	0,          /* response function */
 	destroy,    /* destroy function */
-	child_init  /* child initialization function */
+	child_init, /* child initialization function */
+	0           /* reload confirm function */
 };
 
 

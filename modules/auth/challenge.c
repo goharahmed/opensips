@@ -30,136 +30,158 @@
 #include "../../data_lump.h"
 #include "../../mem/mem.h"
 #include "../../parser/digest/digest.h"
+#include "../../parser/digest/digest_parser.h"
 #include "../../pvar.h"
 #include "../../str.h"
 #include "../../ut.h"
+#include "../../lib/csv.h"
 #include "../../mod_fix.h"
 #include "auth_mod.h"
 #include "common.h"
 #include "challenge.h"
-#include "nonce.h"
+#include "../../lib/digest_auth/dauth_nonce.h"
 #include "index.h"
 #include "api.h"
-
-static str auth_400_err = str_init(MESSAGE_400);
-static str auth_500_err = str_init(MESSAGE_500);
+#include "../../lib/dassert.h"
+#include "../../lib/digest_auth/digest_auth.h"
+#include "../../lib/digest_auth/dauth_calc.h"
 
 
 /*
  * proxy_challenge function sends this reply
  */
 #define MESSAGE_407          "Proxy Authentication Required"
-#define PROXY_AUTH_CHALLENGE "Proxy-Authenticate"
 
 
 /*
  * www_challenge function send this reply
  */
 #define MESSAGE_401        "Unauthorized"
-#define WWW_AUTH_CHALLENGE "WWW-Authenticate"
 
-
-#define QOP_PARAM	  ", qop=\"auth\""
-#define QOP_PARAM_LEN	  (sizeof(QOP_PARAM)-1)
+#define QOP_AUTH	  ", qop=\"" QOP_AUTH_STR "\""
+#define QOP_AUTH_INT	  ", qop=\"" QOP_AUTHINT_STR "\""
+#define QOP_AUTH_BOTH	  ", qop=\"" QOP_AUTH_STR "," QOP_AUTHINT_STR "\""
 #define STALE_PARAM	  ", stale=true"
-#define STALE_PARAM_LEN	  (sizeof(STALE_PARAM)-1)
 #define DIGEST_REALM	  ": Digest realm=\""
-#define DIGEST_REALM_LEN  (sizeof(DIGEST_REALM)-1)
 #define DIGEST_NONCE	  "\", nonce=\""
-#define DIGEST_NONCE_LEN  (sizeof(DIGEST_NONCE)-1)
-#define DIGEST_MD5	  ", algorithm=MD5"
-#define DIGEST_MD5_LEN	  (sizeof(DIGEST_MD5)-1)
+#define DIGEST_ALGORITHM  ", algorithm="
 
 
 /*
  * Create {WWW,Proxy}-Authenticate header field
  */
-static inline char *build_auth_hf(int _retries, int _stale, str* _realm,
-				  int* _len, int _qop, char* _hf_name)
+static inline char *build_auth_hf(int _retries, int _stale,
+    const str_const *_realm, int* _len, int _qop, alg_t alg,
+    const str_const *alg_val, const str_const* _hf_name,
+    int index)
 {
-	int hf_name_len;
 	char *hf, *p;
-	int index = 0;
+	str_const alg_param;
+	str_const qop_param = STR_NULL_const;
+	str_const stale_param = STR_NULL_const;
+	const str_const digest_realm = str_const_init(DIGEST_REALM);
+	const str_const nonce_param = str_const_init(DIGEST_NONCE);
+	struct nonce_params calc_np;
 
-	if(!disable_nonce_check) {
-		/* get the nonce index and mark it as used */
-		index= reserve_nonce_index();
-		if(index == -1)
-		{
-			LM_ERR("no more nonces can be generated\n");
-			return 0;
+	if (_qop) {
+		if (_qop == QOP_TYPE_AUTH) {
+			qop_param = str_const_init(QOP_AUTH);
+		} else if (_qop == QOP_TYPE_AUTH_INT) {
+			qop_param = str_const_init(QOP_AUTH_INT);
+		} else {
+			qop_param = str_const_init(QOP_AUTH_BOTH);
 		}
-		LM_DBG("nonce index= %d\n", index);
 	}
+	if (_stale)
+		stale_param = str_const_init(STALE_PARAM);
 
 	/* length calculation */
-	*_len=hf_name_len=strlen(_hf_name);
-	*_len+=DIGEST_REALM_LEN
+	*_len=_hf_name->len;
+	*_len+=digest_realm.len
 		+_realm->len
-		+DIGEST_NONCE_LEN
-		+((!disable_nonce_check)?NONCE_LEN:NONCE_LEN-8)
+		+nonce_param.len
+		+ncp->nonce_len
 		+1 /* '"' */
-		+((_qop)? QOP_PARAM_LEN:0)
-		+((_stale)? STALE_PARAM_LEN : 0)
-#ifdef _PRINT_MD5
-		+DIGEST_MD5_LEN
-#endif
+		+stale_param.len
+		+qop_param.len
 		+CRLF_LEN ;
+
+	if (alg_val != NULL) {
+		alg_param = str_const_init(DIGEST_ALGORITHM);
+		*_len += alg_param.len + alg_val->len;
+	}
 
 	p=hf=pkg_malloc(*_len+1);
 	if (!hf) {
 		LM_ERR("no pkg memory left\n");
-		*_len=0;
-		return 0;
+		goto e1;
 	}
 
-	memcpy(p, _hf_name, hf_name_len); p+=hf_name_len;
-	memcpy(p, DIGEST_REALM, DIGEST_REALM_LEN);p+=DIGEST_REALM_LEN;
+	memcpy(p, _hf_name->s, _hf_name->len); p+=_hf_name->len;
+	memcpy(p, digest_realm.s, digest_realm.len);p+=digest_realm.len;
 	memcpy(p, _realm->s, _realm->len);p+=_realm->len;
-	memcpy(p, DIGEST_NONCE, DIGEST_NONCE_LEN);p+=DIGEST_NONCE_LEN;
-	calc_nonce(p, time(0) + nonce_expire, index, &secret);
-	p+=((!disable_nonce_check)?NONCE_LEN:NONCE_LEN-8);
+	memcpy(p, nonce_param.s, nonce_param.len);p+=nonce_param.len;
+	if (clock_gettime(CLOCK_REALTIME, &calc_np.expires) != 0) {
+		LM_ERR("clock_gettime failed\n");
+		goto e2;
+	}
+	calc_np.expires.tv_sec += nonce_expire;
+	calc_np.index = index;
+	calc_np.qop = _qop;
+	calc_np.alg = (alg == ALG_UNSPEC) ? ALG_MD5 : alg;
+	if (calc_nonce(ncp, p, &calc_np) != 0) {
+		LM_ERR("calc_nonce failed\n");
+		goto e2;
+	}
+	p+=ncp->nonce_len;
 	*p='"';p++;
 	if (_qop) {
-		memcpy(p, QOP_PARAM, QOP_PARAM_LEN);
-		p+=QOP_PARAM_LEN;
+		memcpy(p, qop_param.s, qop_param.len);
+		p+=qop_param.len;
 	}
 	if (_stale) {
-		memcpy(p, STALE_PARAM, STALE_PARAM_LEN);
-		p+=STALE_PARAM_LEN;
+		memcpy(p, stale_param.s, stale_param.len);
+		p+=stale_param.len;
 	}
-#ifdef _PRINT_MD5
-	memcpy(p, DIGEST_MD5, DIGEST_MD5_LEN ); p+=DIGEST_MD5_LEN;
-#endif
+	if (alg_val != NULL) {
+		memcpy(p, alg_param.s, alg_param.len);
+		p += alg_param.len;
+		memcpy(p, alg_val->s, alg_val->len);
+		p += alg_val->len;
+	}
 	memcpy(p, CRLF, CRLF_LEN ); p+=CRLF_LEN;
 	*p=0; /* zero terminator, just in case */
 
 	LM_DBG("'%s'\n", hf);
 	return hf;
+e2:
+	pkg_free(hf);
+e1:
+	*_len=0;
+	return NULL;
 }
 
 /*
  * Create and send a challenge
  */
-static inline int challenge(struct sip_msg* _msg, gparam_p _realm, int _qop,
-						int _code, char* _message, char* _challenge_msg)
+static inline int challenge(struct sip_msg* _msg, str *realm, int _qop,
+    int _code, const str *reason, const str_const *_challenge_msg, int algmask)
 {
-	int auth_hf_len;
 	struct hdr_field* h = NULL;
 	auth_body_t* cred = 0;
-	char *auth_hf;
-	int ret;
+	int i, ret, nalgs, index = 0;
 	hdr_types_t hftype = 0; /* Makes gcc happy */
 	struct sip_uri *uri;
-	str realm;
-	str reason;
+	str auth_hfs[LAST_ALG_SPTD - FIRST_ALG_SPTD + 1];
+	const str_const *alg_val;
+	const struct digest_auth_calc *digest_calc;
 
 	switch(_code) {
-	case 401:
+	case WWW_AUTH_CODE:
 		get_authorized_cred(_msg->authorization, &h);
 		hftype = HDR_AUTHORIZATION_T;
 		break;
-	case 407:
+	case PROXY_AUTH_CODE:
 		get_authorized_cred(_msg->proxy_auth, &h);
 		hftype = HDR_PROXYAUTH_T;
 		break;
@@ -167,39 +189,59 @@ static inline int challenge(struct sip_msg* _msg, gparam_p _realm, int _qop,
 
 	if (h) cred = (auth_body_t*)(h->parsed);
 
-	if(fixup_get_svalue(_msg, _realm, &realm)!=0)
-	{
-		LM_ERR("invalid realm parameter\n");
-		if (send_resp(_msg, 500, &auth_500_err, 0, 0)==-1)
-			return -1;
-		else
-			return 0;
-	}
-	if (realm.len == 0) {
+	if (realm->len == 0) {
 		if (get_realm(_msg, hftype, &uri) < 0) {
 			LM_ERR("failed to extract URI\n");
-			if (send_resp(_msg, 400, &auth_400_err, 0, 0) == -1) {
+			if (send_resp(_msg, 400, &str_init(MESSAGE_400), NULL, 0) == -1) {
 				LM_ERR("failed to send the response\n");
 				return -1;
 			}
 			return 0;
 		}
 
-		realm = uri->host;
-		strip_realm(&realm);
+		realm = &uri->host;
+		strip_realm(realm);
 	}
 
-	auth_hf = build_auth_hf(0, (cred ? cred->stale : 0), &realm,
-			&auth_hf_len, _qop, _challenge_msg);
-	if (!auth_hf) {
-		LM_ERR("failed to generate nonce\n");
-		return -1;
+	nalgs = 0;
+	if (algmask >= ALGFLG_SHA256 && _qop == 0) {
+		/* RFC8760 mandates QOP */
+		_qop = QOP_TYPE_AUTH;
 	}
+	if(!disable_nonce_check) {
+		/* get the nonce index and mark it as used */
+		index= reserve_nonce_index();
+		if(index == -1)
+		{
+			LM_ERR("no more nonces can be generated\n");
+			return -1;
+		}
+		LM_DBG("nonce index= %d\n", index);
+	}
+	for (i = LAST_ALG_SPTD; i >= FIRST_ALG_SPTD; i--) {
+		if ((algmask & ALG2ALGFLG(i)) == 0)
+			continue;
+		digest_calc = get_digest_calc(i);
+		if (digest_calc == NULL)
+			continue;
+		alg_val = (i == ALG_UNSPEC) ? NULL : &digest_calc->algorithm_val;
+		auth_hfs[nalgs].s = build_auth_hf(0, (cred ? cred->stale : 0),
+		    str2const(realm), &auth_hfs[nalgs].len, _qop, i, alg_val,
+		    _challenge_msg, index);
+		if (!auth_hfs[nalgs].s) {
+			LM_ERR("failed to generate nonce\n");
+			ret = -1;
+			goto failure;
+		}
+		nalgs += 1;
+	}
+	DASSERT(nalgs > 0);
 
-	reason.s = _message;
-	reason.len = strlen(_message);
-	ret = send_resp(_msg, _code, &reason, auth_hf, auth_hf_len);
-	if (auth_hf) pkg_free(auth_hf);
+	ret = send_resp(_msg, _code, reason, auth_hfs, nalgs);
+failure:
+	for (i = 0; i < nalgs; i++) {
+		if (auth_hfs[i].s) pkg_free(auth_hfs[i].s);
+	}
 	if (ret == -1) {
 		LM_ERR("failed to send the response\n");
 		return -1;
@@ -208,26 +250,63 @@ static inline int challenge(struct sip_msg* _msg, gparam_p _realm, int _qop,
 	return 0;
 }
 
+int fixup_qop(void** param)
+{
+	str *s = (str*)*param;
+	int qop_type = 0;
+	csv_record *q_csv, *q;
+
+	q_csv = parse_csv_record(s);
+	if (!q_csv) {
+		LM_ERR("Failed to parse qop types\n");
+		return -1;
+	}
+	for (q = q_csv; q; q = q->next) {
+		if (!str_strcmp(&q->s, const_str(QOP_AUTH_STR)))  {
+			if (qop_type == QOP_TYPE_AUTH_INT)
+				qop_type = QOP_TYPE_BOTH;
+			else
+				qop_type = QOP_TYPE_AUTH;
+		} else if (!str_strcmp(&q->s, const_str(QOP_AUTHINT_STR))) {
+			if (qop_type == QOP_TYPE_AUTH)
+				qop_type = QOP_TYPE_BOTH;
+			else
+				qop_type = QOP_TYPE_AUTH_INT;
+		} else {
+			LM_ERR("Bad qop type\n");
+			free_csv_record(q_csv);
+			return -1;
+		}
+	}
+	free_csv_record(q_csv);
+
+	*param=(void*)(long)qop_type;
+	return 0;
+}
 
 /*
  * Challenge a user to send credentials using WWW-Authorize header field
  */
-int www_challenge(struct sip_msg* _msg, char* _realm, char* _qop)
+int www_challenge(struct sip_msg* _msg, str* _realm, void* _qop,
+    intptr_t algmask)
 {
-	return challenge(_msg, (gparam_p)_realm,
-			!_qop ? 0 : (int)*(unsigned int *)_qop, 401,
-			MESSAGE_401, WWW_AUTH_CHALLENGE);
+
+	return challenge(_msg, _realm, (int)(long)_qop, WWW_AUTH_CODE,
+	    &str_init(MESSAGE_401), &str_const_init(WWW_AUTH_HDR),
+	    algmask ? algmask : ALGFLG_UNSPEC);
 }
 
 
 /*
  * Challenge a user to send credentials using Proxy-Authorize header field
  */
-int proxy_challenge(struct sip_msg* _msg, char* _realm, char* _qop)
+int proxy_challenge(struct sip_msg* _msg, str* _realm, void* _qop,
+    intptr_t algmask)
 {
-	return challenge(_msg, (gparam_p)_realm,
-			!_qop ? 0 : (int)*(unsigned int *)_qop, 407,
-			MESSAGE_407, PROXY_AUTH_CHALLENGE);
+
+	return challenge(_msg, _realm, (int)(long)_qop, PROXY_AUTH_CODE,
+	    &str_init(MESSAGE_407), &str_const_init(PROXY_AUTH_HDR),
+	    algmask ? algmask : ALGFLG_UNSPEC);
 }
 
 

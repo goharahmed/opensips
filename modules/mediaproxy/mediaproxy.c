@@ -199,10 +199,10 @@ static AVP_Param media_relay_avp = {str_init(MEDIA_RELAY_AVP_SPEC), -1, 0};
 static AVP_Param ice_candidate_avp = {str_init(ICE_CANDIDATE_AVP_SPEC), -1, 0};
 
 static cmd_export_t commands[] = {
-    {"engage_media_proxy", (cmd_function)EngageMediaProxy, 0, 0, 0, REQUEST_ROUTE},
-    {"use_media_proxy",    (cmd_function)UseMediaProxy,    0, 0, 0, REQUEST_ROUTE | ONREPLY_ROUTE | FAILURE_ROUTE | BRANCH_ROUTE | LOCAL_ROUTE},
-    {"end_media_session",  (cmd_function)EndMediaSession,  0, 0, 0, REQUEST_ROUTE | ONREPLY_ROUTE | FAILURE_ROUTE | BRANCH_ROUTE | LOCAL_ROUTE},
-    {0, 0, 0, 0, 0, 0}
+    {"engage_media_proxy", (cmd_function)EngageMediaProxy, {{0, 0, 0}}, REQUEST_ROUTE},
+    {"use_media_proxy",    (cmd_function)UseMediaProxy,    {{0, 0, 0}}, REQUEST_ROUTE | ONREPLY_ROUTE | FAILURE_ROUTE | BRANCH_ROUTE | LOCAL_ROUTE},
+    {"end_media_session",  (cmd_function)EndMediaSession,  {{0, 0, 0}}, REQUEST_ROUTE | ONREPLY_ROUTE | FAILURE_ROUTE | BRANCH_ROUTE | LOCAL_ROUTE},
+    {0, 0, {{0, 0, 0}}, 0}
 };
 
 static param_export_t parameters[] = {
@@ -217,34 +217,39 @@ static param_export_t parameters[] = {
 };
 
 static dep_export_t deps = {
-	{ /* OpenSIPS module dependencies */
-		{ MOD_TYPE_DEFAULT, "tm",     DEP_SILENT },
-		{ MOD_TYPE_DEFAULT, "dialog", DEP_SILENT },
-		{ MOD_TYPE_NULL, NULL, 0 },
-	},
-	{ /* modparam dependencies */
-		{ NULL, NULL },
-	},
+    // OpenSIPS module dependencies
+    {
+        {MOD_TYPE_DEFAULT, "tm",     DEP_SILENT},
+        {MOD_TYPE_DEFAULT, "dialog", DEP_SILENT},
+        {MOD_TYPE_NULL, NULL, 0}
+    },
+    // modparam dependencies
+    {
+        {NULL, NULL}
+    }
 };
 
 struct module_exports exports = {
-    "mediaproxy",    // module name
-    MOD_TYPE_DEFAULT,// class of this module
-    MODULE_VERSION,  // module name
-    DEFAULT_DLFLAGS, // dlopen flags
-    &deps,           // OpenSIPS module dependencies
-    commands,        // exported functions
-    NULL,            // exported async functions
-    parameters,      // exported parameters
-    NULL,            // exported statistics
-    NULL,            // exported MI functions
-    NULL,            // exported pseudo-variables
-    NULL,            // exported transformations
-    NULL,            // extra processes
-    mod_init,        // module init function (before fork. kids will inherit)
-    NULL,            // reply processing function
-    NULL,            // destroy function
-    child_init       // child init function
+    "mediaproxy",     // module name
+    MOD_TYPE_DEFAULT, // class of this module
+    MODULE_VERSION,   // module name
+    DEFAULT_DLFLAGS,  // dlopen flags
+    NULL,             // load function
+    &deps,            // module dependencies
+    commands,         // exported functions
+    NULL,             // exported async functions
+    parameters,       // exported parameters
+    NULL,             // exported statistics
+    NULL,             // exported MI functions
+    NULL,             // exported pseudo-variables
+    NULL,             // exported transformations
+    NULL,             // extra processes
+    NULL,             // pre-init function
+    mod_init,         // module init function (before fork. kids will inherit)
+    NULL,             // reply processing function
+    NULL,             // destroy function
+    child_init,       // child init function
+    NULL              // reload confirm function
 };
 
 
@@ -1514,7 +1519,7 @@ use_media_proxy(struct sip_msg *msg, char *dialog_id, ice_candidate_data *ice_da
             if (stream.transport != TSupported)
                 continue; // skip streams with unsupported transports
             if (stream.type.len + stream.ip.len + stream.port.len + stream.direction.len + 4 > str_buf.len) {
-                LM_ERR("media stream description is longer than %lu bytes\n", (unsigned long)sizeof(media_str));
+                LM_ERR("media stream description is longer than %zu bytes\n", sizeof(media_str));
                 return -1;
             }
             len = sprintf(str_buf.s, "%.*s:%.*s:%.*s:%.*s:%s,",
@@ -1563,7 +1568,7 @@ use_media_proxy(struct sip_msg *msg, char *dialog_id, ice_candidate_data *ice_da
                    media_relay.len, media_relay.s, media_str);
 
     if (len >= sizeof(request)) {
-        LM_ERR("mediaproxy request is longer than %lu bytes\n", (unsigned long)sizeof(request));
+        LM_ERR("mediaproxy request is longer than %zu bytes\n", sizeof(request));
         return -1;
     }
 
@@ -1750,7 +1755,7 @@ end_media_session(str callid, str from_tag, str to_tag)
                    to_tag.len, to_tag.s);
 
     if (len >= sizeof(request)) {
-        LM_ERR("mediaproxy request is longer than %lu bytes\n", (unsigned long)sizeof(request));
+        LM_ERR("mediaproxy request is longer than %zu bytes\n", sizeof(request));
         return -1;
     }
 
@@ -1774,7 +1779,7 @@ get_dialog_id(struct dlg_cell *dlg)
 {
     static char buffer[64];
 
-    snprintf(buffer, sizeof(buffer), "%d:%d", dlg->h_entry, dlg->h_id);
+    snprintf(buffer, sizeof(buffer), "%llu", (unsigned long long) dlg->h_entry << 32 | dlg->h_id);
 
     return buffer;
 }

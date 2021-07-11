@@ -96,11 +96,11 @@ static inline mi_response_t *mi_check_msg(struct sip_msg* msg, str* method,
 }
 
 
-static inline struct str_list *new_str(char *s, int len,
-											struct str_list **last, int *total)
+static inline str_list *new_str(char *s, int len, str_list **last, int *total)
 {
-	struct str_list *new;
-	new=pkg_malloc(sizeof(struct str_list));
+	str_list *new;
+
+	new = pkg_malloc(sizeof *new);
 	if (!new) {
 		LM_ERR("no more pkg mem\n");
 		return 0;
@@ -120,7 +120,7 @@ static inline struct str_list *new_str(char *s, int len,
 static inline char *get_hfblock( str *uri, struct hdr_field *hf, int *l,
 											struct socket_info** send_sock)
 {
-	struct str_list sl, *last, *new, *i, *foo;
+	str_list sl, *last, *new, *i, *foo;
 	int hf_avail, frag_len, total_len;
 	char *begin, *needle, *dst, *ret, *d;
 	str *sock_name, *portname;
@@ -241,7 +241,7 @@ static inline int mi_print_routes(mi_item_t *resp_obj, dlg_t* dlg)
 
 	if (dlg->hooks.last_route)
 		if (add_mi_string_fmt(routes_arr, 0, 0, "<%.*s>",
-			dlg->hooks.last_route->s, dlg->hooks.last_route->len) < 0)
+			dlg->hooks.last_route->len, dlg->hooks.last_route->s) < 0)
 			return -1;
 
 	return 0;
@@ -279,7 +279,7 @@ static inline int mi_print_uris(mi_item_t *resp_obj, struct sip_msg* reply)
 			return -1;
 
 	if (dlg->hooks.next_hop->s)
-		if (add_mi_string(resp_obj, MI_SSTR("next hop"),
+		if (add_mi_string(resp_obj, MI_SSTR("Next-hop"),
 			dlg->hooks.next_hop->s, dlg->hooks.next_hop->len) < 0)
 			return -1;
 
@@ -315,13 +315,13 @@ static void mi_uac_dlg_hdl( struct cell *t, int type, struct tmcb_params *ps )
 			LM_ERR("get_reply_status failed\n");
 			goto error;
 		}
-		if (add_mi_string(resp_obj, MI_SSTR("reply status"),
+		if (add_mi_string(resp_obj, MI_SSTR("Status"),
 			text.s, text.len) < 0) {
 			goto error;
 		}
 		pkg_free(text.s);
 	} else {
-		if (add_mi_string_fmt(resp_obj, MI_SSTR("reply status"), "%d %.*s",
+		if (add_mi_string_fmt(resp_obj, MI_SSTR("Status"), "%d %.*s",
 			ps->rpl->first_line.u.reply.statuscode,
 			ps->rpl->first_line.u.reply.reason.len,
 			ps->rpl->first_line.u.reply.reason.s) < 0) {
@@ -331,7 +331,7 @@ static void mi_uac_dlg_hdl( struct cell *t, int type, struct tmcb_params *ps )
 		if (mi_print_uris(resp_obj, ps->rpl) < 0)
 			goto error;
 
-		if (add_mi_string(resp_obj, MI_SSTR("headers"),
+		if (add_mi_string(resp_obj, MI_SSTR("Message"),
 			ps->rpl->headers->name.s,
 			ps->rpl->len-(ps->rpl->headers->name.s - ps->rpl->buf)) < 0)
 			goto error;
@@ -367,7 +367,7 @@ done:
     [Body]
 */
 static mi_response_t *mi_tm_uac_dlg(const mi_params_t *params, str *nexthop,
-							str *socket, str *body, struct mi_handler *async_hdl)
+						str *socket, str *body, struct mi_handler *async_hdl)
 {
 	static char err_buf[MAX_REASON_LEN];
 	static struct sip_msg tmp_msg;
@@ -381,8 +381,8 @@ static mi_response_t *mi_tm_uac_dlg(const mi_params_t *params, str *nexthop,
 	str s;
 	str callid = {0,0};
 	int sip_error;
-	int proto;
-	int port;
+	int proto = PROTO_NONE;
+	int port = 0;
 	int cseq = 0;
 	int n;
 	mi_response_t *resp;
@@ -396,19 +396,25 @@ static mi_response_t *mi_tm_uac_dlg(const mi_params_t *params, str *nexthop,
 	if (parse_uri( ruri.s, ruri.len, &pruri) < 0 )
 		return init_mi_error(400, MI_SSTR("Invalid ruri"));
 
-	if (parse_uri( nexthop->s, nexthop->len, &pnexthop) < 0 )
+	if (nexthop && parse_uri( nexthop->s, nexthop->len, &pnexthop) < 0 )
 		return init_mi_error( 400, MI_SSTR("Invalid next_hop"));
 
-	if (parse_phostport( socket->s, socket->len, &s.s, &s.len,
-	&port,&proto)!=0)
-		return init_mi_error( 404, MI_SSTR("Invalid local socket"));
-	set_sip_defaults( port, proto);
-	sock = grep_internal_sock_info( &s, (unsigned short)port, proto);
-	if (sock==0)
-		return init_mi_error( 404, MI_SSTR("Local socket not found"));
+	if (socket && socket->len) {
+		if (parse_phostport( socket->s, socket->len, &s.s, &s.len,
+		&port,&proto)!=0)
+			return init_mi_error( 404, MI_SSTR("Invalid local socket"));
+		set_sip_defaults( port, proto);
+		sock = grep_internal_sock_info( &s, (unsigned short)port, proto);
+		if (sock==0)
+			return init_mi_error( 404, MI_SSTR("Local socket not found"));
+	} else {
+		sock = NULL;
+	}
 
 	if (get_mi_string_param(params, "headers", &hdrs.s, &hdrs.len) < 0)
 		return init_mi_param_error();
+
+	unescape_crlf(&hdrs);
 
 	/* use SIP parser to look at what is in the FIFO request */
 	memset( &tmp_msg, 0, sizeof(struct sip_msg));

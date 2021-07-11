@@ -57,30 +57,11 @@
  * Some functions are based on or copied from the source of the Textops module.
  */
 
-
-/**
- * make strptime available
- * use 600 for 'Single UNIX Specification, Version 3'
- */
-
-
-
 #include <fnmatch.h>
 
-#define _XOPEN_SOURCE 600          /* glibc2 on linux, bsd */
-#define _XOPEN_SOURCE_EXTENDED 1   /* solaris */
-
-/**
- * _XOPEN_SOURCE creates conflict in swab definition in Solaris
- */
-#ifdef __OS_solaris
-	#undef _XOPEN_SOURCE
-#endif
-
+/* make strptime available */
+#define _GNU_SOURCE
 #include <time.h>
-
-#undef _XOPEN_SOURCE
-#undef _XOPEN_SOURCE_EXTENDED
 
 #include <stdlib.h>
 #include <locale.h>
@@ -144,14 +125,12 @@ static X509_STORE * store = NULL;
 /* needed for certificate verification */
 static X509_STORE_CTX * verify_ctx = NULL;
 
-
-/** module functions */
 static cmd_export_t cmds[]={
-	{"authservice",  (cmd_function)authservice_,  0, 0, 0,
+	{"authservice",(cmd_function)authservice_, {{0,0,0}},
 		REQUEST_ROUTE | BRANCH_ROUTE | LOCAL_ROUTE},
-	{"verifier",     (cmd_function)verifier_,     0, 0, 0,
+	{"verifier",(cmd_function)verifier_, {{0,0,0}},
 		REQUEST_ROUTE},
-	{0,0,0,0,0,0}
+	{0,0,{{0,0,0}},0}
 };
 
 static param_export_t params[]={
@@ -171,6 +150,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	NULL,            /* OpenSIPS module dependencies */
 	cmds, /* exported functions */
 	0,    /* exported async functions */
@@ -180,10 +160,12 @@ struct module_exports exports= {
 	0,          /* exported pseudo-variables */
 	0,			/* exported transformations */
 	0,          /* local processes */
+	0,          /* module pre-initialization function */
 	mod_init,   /* module initialization function */
 	(response_function) 0, /* response function */
 	mod_destroy, /* destroy function */
-	0            /* per-child init function */
+	0,           /* per-child init function */
+	0            /* reload confirm function */
 };
 
 
@@ -523,6 +505,7 @@ static int addDate(char * dateHF, time_t * dateHFValue, struct sip_msg * msg)
 	char* buf;
 	size_t len = 0;
 	struct tm * bd_time = NULL;
+	struct tm bd_time_buff;
 
 	if(!dateHF || !dateHFValue || !msg)
 	{
@@ -532,7 +515,7 @@ static int addDate(char * dateHF, time_t * dateHFValue, struct sip_msg * msg)
 
 	*dateHFValue = time(0);
 
-	bd_time = gmtime(dateHFValue);
+	bd_time = gmtime_r(dateHFValue, &bd_time_buff);
 	if(!bd_time)
 	{
 		LM_ERR("gmtime failed\n");

@@ -71,20 +71,20 @@ unsigned long hp_rpm_get_frags(struct hp_block *hpb);
 #define update_stats_pkg_frag_split(blk, ...) \
 	do { \
 		(blk)->used -= FRAG_OVERHEAD; \
-		(blk)->real_used += FRAG_OVERHEAD; \
 		(blk)->total_fragments++; \
 	} while (0)
 
 #define update_stats_pkg_frag_merge(blk, ...) \
 	do { \
-		(blk)->real_used -= FRAG_OVERHEAD; \
+		(blk)->used += FRAG_OVERHEAD; \
 		(blk)->total_fragments--; \
 	} while (0)
 
 #if defined HP_MALLOC_FAST_STATS
 	#define update_stats_shm_frag_attach(frag)
-	#define update_stats_shm_frag_detach(frag)
+	#define update_stats_shm_frag_detach(size)
 	#define update_stats_shm_frag_split()
+	#define update_stats_shm_frag_merge()
 	#define update_stats_rpm_frag_attach(frag)
 	#define update_stats_rpm_frag_detach(frag)
 	#define update_stats_rpm_frag_split()
@@ -92,27 +92,32 @@ unsigned long hp_rpm_get_frags(struct hp_block *hpb);
 #else /* HP_MALLOC_FAST_STATS */
 	#define update_stats_shm_frag_attach(frag) \
 		do { \
-			update_stat(shm_used, -(frag)->size); \
-			update_stat(shm_rused, -((frag)->size + FRAG_OVERHEAD)); \
+			update_stat(shm_used, -(long)(frag)->size); \
+			update_stat(shm_rused, -(long)((frag)->size + FRAG_OVERHEAD)); \
 		} while (0)
 
-	#define update_stats_shm_frag_detach(frag) \
+	#define update_stats_shm_frag_detach(size) \
 		do { \
-			update_stat(shm_used, (frag)->size); \
-			update_stat(shm_rused, (frag)->size + FRAG_OVERHEAD); \
+			update_stat(shm_used, size); \
+			update_stat(shm_rused, size + FRAG_OVERHEAD); \
 		} while (0)
 
 	#define update_stats_shm_frag_split(...) \
 		do { \
 			update_stat(shm_used, -FRAG_OVERHEAD); \
-			update_stat(shm_rused, FRAG_OVERHEAD); \
 			update_stat(shm_frags, 1); \
+		} while (0)
+
+	#define update_stats_shm_frag_merge(...) \
+		do { \
+			update_stat(shm_used,  FRAG_OVERHEAD); \
+			update_stat(shm_frags, -1); \
 		} while (0)
 
 	#define update_stats_rpm_frag_attach(frag) \
 		do { \
-			update_stat(rpm_used, -(frag)->size); \
-			update_stat(rpm_rused, -((frag)->size + FRAG_OVERHEAD)); \
+			update_stat(rpm_used, -(long)(frag)->size); \
+			update_stat(rpm_rused, -(long)((frag)->size + FRAG_OVERHEAD)); \
 		} while (0)
 
 	#define update_stats_rpm_frag_detach(frag) \
@@ -140,8 +145,9 @@ unsigned long hp_rpm_get_frags(struct hp_block *hpb);
 	#define update_stats_pkg_frag_split(blk, ...)
 	#define update_stats_pkg_frag_merge(blk, ...)
 	#define update_stats_shm_frag_attach(frag)
-	#define update_stats_shm_frag_detach(frag)
+	#define update_stats_shm_frag_detach(size)
 	#define update_stats_shm_frag_split(...)
+	#define update_stats_shm_frag_merge(...)
 	#define update_stats_rpm_frag_attach(frag)
 	#define update_stats_rpm_frag_detach(frag)
 	#define update_stats_rpm_frag_split(...)

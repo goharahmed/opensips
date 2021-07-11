@@ -66,14 +66,20 @@ db_con_t* db_handle=0;   /* Database connection handle */
 
 
 /* Exported functions */
-static cmd_export_t cmds[] = {
-	{"sd_lookup", (cmd_function)sd_lookup, 1, fixup_spve_null, 0,
-		REQUEST_ROUTE},
-	{"sd_lookup", (cmd_function)sd_lookup, 2, fixup_spve_spve, 0,
-		REQUEST_ROUTE},
-	{0, 0, 0, 0, 0, 0}
-};
+// static cmd_export_t cmds[] = {
+// 	{"sd_lookup", (cmd_function)sd_lookup, 1, fixup_spve_null, 0,
+// 		REQUEST_ROUTE},
+// 	{"sd_lookup", (cmd_function)sd_lookup, 2, fixup_spve_spve, 0,
+// 		REQUEST_ROUTE},
+// 	{0, 0, 0, 0, 0, 0}
+// };
 
+static cmd_export_t cmds[] = {
+	{"sd_lookup", (cmd_function)sd_lookup, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE},
+};
 
 /* Exported parameters */
 static param_export_t params[] = {
@@ -104,6 +110,7 @@ struct module_exports exports = {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	&deps,           /* OpenSIPS module dependencies */
 	cmds,       /* Exported functions */
 	NULL,       /* Exported async functions */
@@ -113,10 +120,12 @@ struct module_exports exports = {
 	0,          /* exported pseudo-variables */
 	0,			/* exported transformations */
 	0,          /* extra processes */
+	0,          /* module pre-initialization function */
 	mod_init,   /* module initialization function */
 	0,          /* response function */
 	destroy,    /* destroy function */
-	child_init  /* child initialization function */
+	child_init, /* child initialization function */
+	0           /* reload confirm function */
 };
 
 
@@ -178,7 +187,5 @@ static int mod_init(void)
  */
 static void destroy(void)
 {
-	if (db_handle)
-		db_funcs.close(db_handle);
 }
 

@@ -23,9 +23,9 @@
 		<programlisting format="linespecific">
 ...
 #HEPv3 listener
-listen = hep_tcp:127.0.0.1:6061 		# change the listening IP
+socket= hep_tcp:127.0.0.1:6061 		# change the listening IP
 #HEPv1, v2, v3 listener
-listen = hep_udp:127.0.0.1:6061 		# change the listening IP
+socket= hep_udp:127.0.0.1:6061 		# change the listening IP
 ...
 </programlisting>
 	</para>
@@ -111,10 +111,12 @@ modparam("proto_hep", "hep_id", "[hep_dst] 1.2.3.4:5000")
 	<section id="param_homer5_on" xreflabel="homer5_on">
 		<title><varname>homer5_on</varname> (int) </title>
 		<para>
-			Specify how the data should be encapsulated, as plain text
-			(HOMER5 - anything different than 0) or JSON based (HOMER 6 - 0).
-			As concerns capturing, this affects report_capture function behaviour from
-			<ulink url="http://www.opensips.org/html/docs/modules/2.3.x/sipcapture">sipcapture</ulink>
+			Specify how the data should be encapsulated in the HEP packet. If set to
+			<emphasis>0</emphasis>, then the JSON based HOMER 6 format will be used. Otherwise,
+			if set to anything different than <emphasis>0</emphasis>, the plain text HOMER 5
+			format will be used for encapsulation. On the capturing node, this parameter
+			affects the behavior of the <emphasis>report_capture</emphasis> function from the
+			<ulink url="sipcapture#func_report_capture">sipcapture</ulink>
 			module.
 		</para>
 		<para>
@@ -334,7 +336,7 @@ modparam("proto_hep", "tcp_async_local_write_timeout", 100)
 		</title>
 		<para>
 			Send a hep message with an extra correlation id containing the two correlation given
-			as arguments. The two types must differ. All parameters are mandatory. This will help
+			as arguments. The two types must differ. This will help
 			on the capturing side to correlate two calls for example, being given their callid
 			as correlation ids.
 		</para>
@@ -344,7 +346,7 @@ modparam("proto_hep", "tcp_async_local_write_timeout", 100)
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>hep_id (string, pvar)</emphasis>
+			<para><emphasis>hep_id (string)</emphasis>
 				the name of the <emphasis>hep_id</emphasis> defined in modparam section,
 				specifying where to do the tracing.
 			</para>
@@ -355,7 +357,7 @@ modparam("proto_hep", "tcp_async_local_write_timeout", 100)
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>correlation1 (string, pvar)</emphasis>
+			<para><emphasis>correlation1 (string)</emphasis>
 				the first extra correlation id that will be put in the extra correlation chunk.
 			</para>
 		</listitem>
@@ -365,7 +367,7 @@ modparam("proto_hep", "tcp_async_local_write_timeout", 100)
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>correlation2 (string, pvar)</emphasis>
+			<para><emphasis>correlation2 (string)</emphasis>
 				the second extra correlation id that will be put in the extra correlation chunk.
 			</para>
 		</listitem>
@@ -377,7 +379,7 @@ modparam("proto_hep", "tcp_async_local_write_timeout", 100)
 ...
 /* see declaration of hep_dst in trace_id section */
 /* we suppose we have two correlations in two varibles: cor1 and cor2 */
-	correlate("hep_dst", "correlation-no-1","$var(cor1)","correlation-no-2", "$var(cor2)");
+	correlate("hep_dst", "correlation-no-1",$var(cor1),"correlation-no-2", $var(cor2));
 ...
 </programlisting>
 		</example>

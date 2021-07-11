@@ -29,10 +29,12 @@
 #include "../config.h"
 #include "../dprint.h"
 
-#ifdef PKG_MALLOC
-#include "common.h"
+#include "mem_funcs.h"
 
 int set_pkg_mm(const char *mm_name);
+
+#ifdef PKG_MALLOC
+#include "common.h"
 
 extern char *mem_pool;
 extern enum osips_mm mem_allocator_pkg;

@@ -61,10 +61,8 @@ int dbt_bind_api(const str* mod, db_func_t *dbb);
  * Exported functions
  */
 static cmd_export_t cmds[] = {
-	{"db_bind_api",    (cmd_function)dbt_bind_api,   0, 0, 0, 0},
-	{0, 0, 0, 0, 0, 0}
+	{"db_bind_api", (cmd_function)dbt_bind_api, {{0,0,0}}, 0},
 };
-
 
 /*
  * Exported parameters
@@ -95,6 +93,7 @@ struct module_exports exports = {
 	MOD_TYPE_SQLDB,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	NULL,            /* OpenSIPS module dependencies */
 	cmds,     /* Exported functions */
 	NULL,     /* Exported async functions */
@@ -104,10 +103,12 @@ struct module_exports exports = {
 	NULL,     /* exported pseudo-variables */
 	0,		  /* exported transformations */
 	0,        /* extra processes */
+	0,        /* module pre-initialization function */
 	mod_init, /* module initialization function */
 	NULL,     /* response function*/
 	destroy,  /* destroy function */
-	NULL      /* per-child init function */
+	NULL,     /* per-child init function */
+	NULL      /* reload confirm function */
 };
 
 

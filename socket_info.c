@@ -49,6 +49,7 @@
 #include <sys/sockio.h>
 #endif
 
+#include "str.h"
 #include "globals.h"
 #include "socket_info.h"
 #include "dprint.h"
@@ -61,9 +62,11 @@
 
 #ifdef __OS_linux
 #include <features.h>     /* for GLIBC version testing */
-#if defined(__GLIBC_PREREQ) && __GLIBC_PREREQ(2, 4)
+#if defined(__GLIBC_PREREQ)
+#if __GLIBC_PREREQ(2, 4)
 #include <ifaddrs.h>
 #define HAVE_IFADDRS
+#endif
 #endif
 #endif
 
@@ -143,7 +146,7 @@ static struct socket_info* new_sock_info( struct socket_id *sid)
 		si->adv_name_str.s=(char *)pkg_malloc(si->adv_name_str.len+1);
 		if (si->adv_name_str.s==0) goto error;
 		memcpy(si->adv_name_str.s, sid->adv_name, si->adv_name_str.len+1);
-		if (!sid->adv_port) sid->adv_port=protos[sid->proto].default_port ;
+		if (!sid->adv_port) sid->adv_port=si->port_no ;
 		si->adv_port_str.s=pkg_malloc(10);
 		if (si->adv_port_str.s==0) goto error;
 		si->adv_port_str.len=snprintf(si->adv_port_str.s, 10, "%hu",
@@ -159,22 +162,31 @@ static struct socket_info* new_sock_info( struct socket_id *sid)
 		memcpy(si->tag.s, sid->tag, si->tag.len+1);
 	}
 
-	if ( si->proto!=PROTO_UDP ) {
+	if (si->proto!=PROTO_UDP && si->proto!=PROTO_SCTP &&
+	        si->proto!=PROTO_HEP_UDP) {
 		if (sid->workers)
-			LM_WARN("number of workers per non UDP <%.*s> listener not "
+			LM_WARN("number of workers per non UDP-based <%.*s> listener not "
 				"supported -> ignoring...\n", si->name.len, si->name.s);
 		if (sid->auto_scaling_profile)
-			LM_WARN("auto-scaling for non UDP <%.*s> listener not supported "
-				"-> ignoring...\n", si->name.len, si->name.s);
+			LM_WARN("auto-scaling for non UDP-based <%.*s> listener not "
+				"supported -> ignoring...\n", si->name.len, si->name.s);
 	} else {
 		if (sid->workers)
 			si->workers = sid->workers;
 		if (sid->auto_scaling_profile) {
 			si->s_profile = get_scaling_profile(sid->auto_scaling_profile);
 			if (si->s_profile==NULL) {
-				LM_WARN("scalig profile <%s> in listener <%.*s> not defined "
-					"-> ignoring it..\n", sid->auto_scaling_profile,
+				LM_WARN("scaling profile <%s> in listener <%.*s> not defined "
+					"-> ignoring it...\n", sid->auto_scaling_profile,
 					si->name.len, si->name.s);
+			} else {
+				auto_scaling_enabled = 1;
+			}
+		} else if (udp_auto_scaling_profile) {
+			si->s_profile = get_scaling_profile(udp_auto_scaling_profile);
+			if (si->s_profile==NULL) {
+				LM_WARN("scaling profile <%s> in udp_workers not defined "
+					"-> ignoring it...\n", udp_auto_scaling_profile);
 			} else {
 				auto_scaling_enabled = 1;
 			}
@@ -279,10 +291,10 @@ struct socket_info* grep_sock_info_ext(str* host, unsigned short port,
 				goto found;
 			/* if no advertised is specified on the interface, we should check
 			 * if it is the global address */
-			if (!si->adv_name_str.len && default_global_address.s &&
-				h_len == default_global_address.len &&
-				(strncasecmp(hname, default_global_address.s,
-					default_global_address.len)==0) /*slower*/)
+			if (!si->adv_name_str.len && default_global_address->s &&
+				h_len == default_global_address->len &&
+				(strncasecmp(hname, default_global_address->s,
+					default_global_address->len)==0) /*slower*/)
 				/* this might match sockets that are not supposed to
 				 * match, when using multiple listeners for the same
 				 * protocol; but in that case the default_global_address
@@ -418,7 +430,7 @@ int expand_interface(struct socket_info *si, struct socket_info** list)
 			 * make sure we don't add any "scoped" interface
 			 */
 			if (it->ifa_addr->sa_family == AF_INET6 &&
-					(((struct sockaddr_in6 *)it->ifa_addr)->sin6_scope_id != 0))
+					(((struct sockaddr_in6 *)(void *)it->ifa_addr)->sin6_scope_id != 0))
 
 				continue;
 			sockaddr2ip_addr(&addr, it->ifa_addr);
@@ -427,7 +439,7 @@ int expand_interface(struct socket_info *si, struct socket_info** list)
 			sid.flags = si->flags;
 			if (it->ifa_flags & IFF_LOOPBACK)
 				sid.flags |= SI_IS_LO;
-			if (new_sock2list( &sid, list)!=0){
+			if (new_sock2list(&sid, list) != 0) {
 				LM_ERR("clone_sock2list failed\n");
 				goto end;
 			}
@@ -525,7 +537,7 @@ end:
 			if (ifrcopy.ifr_flags & IFF_LOOPBACK)
 				sid.flags|=SI_IS_LO;
 			/* add it to one of the lists */
-			if (new_sock2list( &si, list)!=0){
+			if (new_sock2list(&sid, list) != 0) {
 				LM_ERR("clone_sock2list failed\n");
 				goto error;
 			}
@@ -551,6 +563,8 @@ error:
 }
 
 
+#define STR_IMATCH(str, buf) ((str).len==strlen(buf) && strncasecmp(buf, (str).s, (str).len)==0)
+
 /* fixes a socket list => resolve addresses,
  * interface names, fills missing members, remove duplicates */
 int fix_socket_list(struct socket_info **list)
@@ -568,6 +582,13 @@ int fix_socket_list(struct socket_info **list)
 
 	for (si=*list;si;){
 		next=si->next;
+		// fix the SI_IS_LO flag for sockets specified by IP/hostname as expand_interface
+		// below will only do it for sockets specified using the network interface name
+		if (STR_IMATCH(si->name, "localhost") ||
+			STR_IMATCH(si->name, "127.0.0.1") ||
+			STR_IMATCH(si->name, "0:0:0:0:0:0:0:1") || STR_IMATCH(si->name, "::1")) {
+			si->flags |= SI_IS_LO;
+		}
 		if (expand_interface(si, list)!=-1){
 			/* success => remove current entry (shift the entire array)*/
 			sock_listrm(list, si);
@@ -778,7 +799,8 @@ int fix_socket_list(struct socket_info **list)
 						(l->name.len!=si->name.len)||
 						(strncmp(l->name.s, si->name.s, si->name.len)!=0))
 					)
-					add_alias(l->name.s, l->name.len, l->port_no, l->proto);
+					if (add_alias(l->name.s,l->name.len,l->port_no,l->proto)<0)
+						LM_ERR(" add_alias failed\n");
 
 				/* remove l*/
 				sock_listrm(list, l);
@@ -1275,7 +1297,7 @@ int probe_max_sock_buff(int sock,int buff_choice,int buff_max,int buff_increment
 		LM_ERR("getsockopt: %s\n", strerror(errno));
 		return -1;
 	}
-	LM_INFO("using %s buffer of %d kb\n",info, (foptval/1024));
+	LM_DBG("using %s buffer of %d kb\n",info, (foptval/1024));
 
 	return 0;
 }

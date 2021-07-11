@@ -72,6 +72,7 @@ extern struct proto_info protos[];
  * params according to RFC 7118 - razvanc
  */
 
+/* NOTE: make sure trans_load() is called, or you will get false negatives! */
 #define is_udp_based_proto(_p) \
 	(protos[_p].net.flags&PROTO_NET_USE_UDP)
 
@@ -92,19 +93,19 @@ extern struct proto_info protos[];
 int trans_load(void);
 
 /*
- * adds a new listener
+ * adds a new listening socket
  */
-int add_listener(struct socket_id *sock);
+int add_listening_socket(struct socket_id *sock);
 
 /*
- * adds a temporary listener
+ * adds a temporary listening socket
  */
-int add_cmd_listener(char *name, int port, int proto);
+int add_cmd_listening_socket(char *name, int port, int proto);
 
 /*
- * fixes temporary listeners
+ * fixes temporary listening sockets
  */
-int fix_cmd_listeners(void);
+int fix_cmd_listening_sockets(void);
 
 /*
  * fixes all socket lists
@@ -112,7 +113,7 @@ int fix_cmd_listeners(void);
 int fix_all_socket_lists(void);
 
 /*
- * init all registered listeners
+ * init all registered listening sockets
  */
 int trans_init_all_listeners(void);
 

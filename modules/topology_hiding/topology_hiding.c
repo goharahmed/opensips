@@ -40,27 +40,25 @@ str topo_hiding_prefix = str_init("DLGCH_");
 str topo_hiding_seed = str_init("OpenSIPS");
 str topo_hiding_ct_encode_pw = str_init("ToPoCtPaSS");
 str th_contact_encode_param = str_init("thinfo");
+str th_contact_encode_scheme = str_init("base64");
+
+int th_ct_enc_scheme;
 
 static int mod_init(void);
 static void mod_destroy(void);
-static int fixup_mmode(void **param, int param_no);
-static int fixup_topo_hiding(void **param, int param_no);
-int w_topology_hiding1(struct sip_msg *req,char *param);
-int w_topology_hiding(struct sip_msg *req);
-int w_topology_hiding_match(struct sip_msg *req, char *seq_match_mode);
+static int fixup_mmode(void **param);
+int w_topology_hiding(struct sip_msg *req, str *flags_s);
+int w_topology_hiding_match(struct sip_msg *req, void *seq_match_mode_val);
 static int pv_topo_callee_callid(struct sip_msg *msg, pv_param_t *param, pv_value_t *res);
 
-/* Exported functions */
 static cmd_export_t cmds[]={
-	{"topology_hiding",(cmd_function)w_topology_hiding,0,NULL,
-			0, REQUEST_ROUTE},
-	{"topology_hiding",(cmd_function)w_topology_hiding1,1,fixup_topo_hiding,
-			0, REQUEST_ROUTE},
-	{"topology_hiding_match",(cmd_function)w_topology_hiding_match,0,NULL,
-			0, REQUEST_ROUTE},
-	{"topology_hiding_match",(cmd_function)w_topology_hiding_match,1,fixup_mmode,
-			0, REQUEST_ROUTE},
-	{0,0,0,0,0,0}
+	{"topology_hiding",(cmd_function)w_topology_hiding, {
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		REQUEST_ROUTE},
+	{"topology_hiding_match",(cmd_function)w_topology_hiding_match, {
+		{CMD_PARAM_STR|CMD_PARAM_OPT, fixup_mmode, 0}, {0,0,0}},
+		REQUEST_ROUTE},
+	{0,0,{{0,0,0}},0}
 };
 
 /* Exported parameters */
@@ -72,6 +70,7 @@ static param_export_t params[] = {
 	{ "th_callid_prefix",            STR_PARAM, &topo_hiding_prefix.s        },
 	{ "th_contact_encode_passwd",    STR_PARAM, &topo_hiding_ct_encode_pw.s  },
 	{ "th_contact_encode_param",     STR_PARAM, &th_contact_encode_param.s   },
+	{ "th_contact_encode_scheme",    STR_PARAM, &th_contact_encode_scheme.s   },
 	{0, 0, 0}
 };
 
@@ -108,6 +107,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT, /* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,  /* dlopen flags */
+	0,				  /* load function */
 	&deps,            /* OpenSIPS module dependencies */
 	cmds,             /* exported functions */
 	0,                /* exported async functions */
@@ -117,10 +117,12 @@ struct module_exports exports= {
 	pvars,            /* exported pseudo-variables */
 	0,				  /* exported transformations */
 	0,                /* extra processes */
+	0,                /* module pre-initialization function */
 	mod_init,         /* module initialization function */
 	(response_function) 0,
 	mod_destroy,
-	0  /* per-child init function */
+	0,                /* per-child init function */
+	0                 /* reload confirm function */
 };
 
 static int mod_init(void)
@@ -140,6 +142,17 @@ static int mod_init(void)
 		topo_hiding_ct_hdr_params.len = strlen(topo_hiding_ct_hdr_params.s);
 		topo_parse_passed_hdr_ct_params(&topo_hiding_ct_hdr_params);
 	}
+	th_contact_encode_scheme.len = strlen(th_contact_encode_scheme.s);
+	if (!str_strcmp(&th_contact_encode_scheme, const_str("base64")))
+		th_ct_enc_scheme = ENC_BASE64;
+	else if (!str_strcmp(&th_contact_encode_scheme, const_str("base32")))
+		th_ct_enc_scheme = ENC_BASE32;
+	else {
+		LM_ERR("Unsupported value for 'th_contact_encode_scheme' modparam!"
+			"Use 'base64' or 'base32'\n");
+		goto error;
+	}
+
 
 	/* loading dependencies */
 	if (load_tm_api(&tm_api)!=0) {
@@ -184,92 +197,52 @@ static void mod_destroy(void)
 	return;
 }
 
-static int fixup_mmode(void **param, int param_no)
+static int fixup_mmode(void **param)
 {
-	int rc;
-	gparam_p gp;
-
-	rc = fixup_sgp(param);
-	if (rc != 0)
-		return rc;
-
-	gp = (gparam_p)*param;
-	if (gp->type != GPARAM_TYPE_STR)
-		return 0;
-
-	gp->v.sval.len = dlg_match_mode_str_to_int(&gp->v.sval);
+	*param = (void*)(unsigned long)dlg_match_mode_str_to_int((str*)*param);
 
 	return 0;
 }
 
-static int fixup_topo_hiding(void **param, int param_no)
+int w_topology_hiding(struct sip_msg *req, str *flags_s)
 {
-	return fixup_sgp(param);
-}
-
-int w_topology_hiding(struct sip_msg *req)
-{
-	return topology_hiding(req,0);
-}
-
-int w_topology_hiding1(struct sip_msg *req,char *param)
-{
-	str res = {0,0};
 	int flags=0;
 	char *p;
 
-	if (fixup_get_svalue(req, (gparam_p)param, &res) !=0)
-	{
-		LM_ERR("no create dialog flags\n");
-		return -1;
-	}
-
-	for (p=res.s;p<res.s+res.len;p++)
-	{
-		switch (*p)
+	if (flags_s)
+		for (p=flags_s->s;p<flags_s->s+flags_s->len;p++)
 		{
-			case 'U':
-				flags |= TOPOH_KEEP_USER;
-				LM_DBG("Will preserve usernames while doing topo hiding\n");
-				break;
-			case 'C':
-				flags |= TOPOH_HIDE_CALLID;
-				LM_DBG("Will change callid while doing topo hiding\n");
-				break;
-			case 'D':
-				flags |= TOPOH_DID_IN_USER;
-				LM_DBG("Will push DID into contact username\n");
-				break;
-			default:
-				LM_DBG("unknown topology_hiding flag : [%c] . Skipping\n",*p);
+			switch (*p)
+			{
+				case 'U':
+					flags |= TOPOH_KEEP_USER;
+					LM_DBG("Will preserve usernames while doing topo hiding\n");
+					break;
+				case 'C':
+					flags |= TOPOH_HIDE_CALLID;
+					LM_DBG("Will change callid while doing topo hiding\n");
+					break;
+				case 'D':
+					flags |= TOPOH_DID_IN_USER;
+					LM_DBG("Will push DID into contact username\n");
+					break;
+				default:
+					LM_DBG("unknown topology_hiding flag : [%c] . Skipping\n",*p);
+			}
 		}
-	}
 
 	return topology_hiding(req,flags);
 }
 
-int w_topology_hiding_match(struct sip_msg *req, char *seq_match_mode_gp)
+int w_topology_hiding_match(struct sip_msg *req, void *seq_match_mode_val)
 {
-	str res = STR_NULL;
-	gparam_p mm_gp = (gparam_p)seq_match_mode_gp;
 	int mm;
 
 	/* copy-paste from w_match_dialog() */
-	if (!seq_match_mode_gp) {
+	if (!seq_match_mode_val)
 		mm = SEQ_MATCH_DEFAULT;
-	} else {
-		if (mm_gp->type == GPARAM_TYPE_STR) {
-			mm = mm_gp->v.sval.len;
-		} else {
-			if (fixup_get_svalue(req, mm_gp, &res) != 0) {
-				LM_ERR("failed to extract matching mode pv! "
-				       "using 'DID_FALLBACK'\n");
-				mm = SEQ_MATCH_FALLBACK;
-			} else {
-				mm = dlg_match_mode_str_to_int(&res);
-			}
-		}
-	}
+	else
+		mm = (int)(long)seq_match_mode_val;
 
 	if (!dlg_api.match_dialog || dlg_api.match_dialog(req, mm) < 0)
 		return topology_hiding_match(req);
@@ -284,7 +257,6 @@ static int pv_topo_callee_callid(struct sip_msg *msg, pv_param_t *param, pv_valu
 {
 	struct dlg_cell *dlg;
 	int req_len = 0,i;
-	char *p;
 
 	if(res==NULL)
 		return -1;
@@ -295,7 +267,7 @@ static int pv_topo_callee_callid(struct sip_msg *msg, pv_param_t *param, pv_valu
 	}
 
 
-	req_len = calc_base64_encode_len(dlg->callid.len) + topo_hiding_prefix.len;
+	req_len = calc_word64_encode_len(dlg->callid.len) + topo_hiding_prefix.len;
 
 	if (req_len*2 > callid_buf_len) {
 		callid_buf = pkg_realloc(callid_buf,req_len*2);
@@ -311,14 +283,8 @@ static int pv_topo_callee_callid(struct sip_msg *msg, pv_param_t *param, pv_valu
 	for (i=0;i<dlg->callid.len;i++)
 		callid_buf[i] = dlg->callid.s[i] ^ topo_hiding_seed.s[i%topo_hiding_seed.len];
 
-	base64encode((unsigned char *)(callid_buf+topo_hiding_prefix.len+req_len),
+	word64encode((unsigned char *)(callid_buf+topo_hiding_prefix.len+req_len),
 		     (unsigned char *)(callid_buf),dlg->callid.len);
-
-	p = callid_buf+ 2*req_len - 1;
-	while (*p == '=') {
-		*p = '-';
-		p--;
-	}
 
 	res->rs.s = callid_buf+req_len;
 	res->rs.len = req_len;

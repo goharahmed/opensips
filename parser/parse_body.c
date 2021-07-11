@@ -154,6 +154,28 @@ static int parse_single_part(struct body_part *part, char * start, char * end)
 
 	part->mime = -1;
 
+	if (*start=='\r') {
+		start++;
+		if (*start=='\n') start++;
+	} else if (*start=='\n') {
+		start++;
+	} else {
+		LM_ERR("invalid separator between boundry and body [%x/%x]\n",
+			*start,*(start+1));
+		return -1;
+	}
+
+	if (*(end-1)=='\n') {
+		end--;
+		if (*(end-1)=='\r') end--;
+	} else if (*(end-1)=='\r') {
+		end--;
+	} else {
+		LM_ERR("invalid separator between body and boundry [%x/%x]\n",
+			*(end-2),*(end-1));
+		return -1;
+	}
+
 	LM_DBG("parsing part [%.*s...]\n",
 		(int)((end-start)<25?end-start:25), start);
 
@@ -268,9 +290,8 @@ int parse_sip_body(struct sip_msg * msg)
 					return 0;
 			}
 
-			/* add 4 to delimiter 2 for "--" and 2 for "\n\r" */
-			/* subtract 2 from end for last "\n\r" */
-			if (parse_single_part(part, start + delimiter.len + 4, end-2)!=0) {
+			/* add 4 to delimiter 2 for "--"*/
+			if (parse_single_part(part, start + delimiter.len + 2, end)!=0) {
 				LM_ERR("Unable to parse part:[%.*s]\n",(int)(end-start),start);
 				return -1;
 			}
@@ -406,34 +427,13 @@ int delete_body_part(struct sip_msg *msg, struct body_part *part)
 }
 
 
-static void *pb_pkg_malloc(unsigned long size)
-{
-	return pkg_malloc(size);
-}
-
-static void pb_pkg_free(void *p)
-{
-	pkg_free(p);
-}
-
-static void *pb_shm_malloc(unsigned long size)
-{
-	return shm_malloc(size);
-}
-
-static void pb_shm_free(void *p)
-{
-	shm_free(p);
-}
-
-
 void free_sip_body(struct sip_msg_body *body)
 {
 	struct body_part * p, *tmp;
-	pb_free my_free;
+	osips_free_f my_free;
 
 	if (body) {
-		my_free = (body->flags&SIP_BODY_FLAG_SHM) ? pb_shm_free : pb_pkg_free;
+		my_free = (body->flags&SIP_BODY_FLAG_SHM) ? shm_free_func : pkg_free_func;
 		/* the first part does not need to be freed */
 		p = &body->first;
 		if (p->parsed && p->free_parsed_f)
@@ -446,9 +446,9 @@ void free_sip_body(struct sip_msg_body *body)
 			/* any need to free some parsed format of the part ? */
 			if (tmp->parsed && tmp->free_parsed_f)
 				tmp->free_parsed_f( tmp->parsed, my_free );
-			my_free(tmp);
+			func_free(my_free, tmp);
 		}
-		my_free(body);
+		func_free(my_free, body);
 	}
 }
 
@@ -470,7 +470,7 @@ int clone_sip_msg_body(struct sip_msg *src_msg, struct sip_msg *dst_msg,
 {
 	struct sip_msg_body *dst, *src;
 	struct body_part *p, *np;
-	pb_malloc my_malloc;
+	osips_malloc_f my_malloc;
 	int extra_len;
 
 	if (src_msg==NULL || src_msg->body==NULL) {
@@ -478,13 +478,13 @@ int clone_sip_msg_body(struct sip_msg *src_msg, struct sip_msg *dst_msg,
 		return 0;
 	}
 
-	my_malloc = shared ? pb_shm_malloc : pb_pkg_malloc;
+	my_malloc = shared ? shm_malloc_func : pkg_malloc_func;
 	src = src_msg->body;
 
 	/* clone the SIP MSG BODY */
 	extra_len = (src->flags&SIP_BODY_FLAG_NEW) ?
 		src->first.mime_s.len+src->first.body.len : 0 ;
-	if ( (dst=my_malloc(sizeof(struct sip_msg_body)+extra_len))==NULL ) {
+	if ( (dst=func_malloc(my_malloc, sizeof(struct sip_msg_body)+extra_len))==NULL ) {
 		LM_ERR("failed to allocate new sip_msg_body clone (shared=%d)\n",
 			shared);
 		goto err;
@@ -510,7 +510,7 @@ int clone_sip_msg_body(struct sip_msg *src_msg, struct sip_msg *dst_msg,
 		} else {
 			extra_len = (p->flags&SIP_BODY_PART_FLAG_NEW) ?
 				p->mime_s.len+p->body.len : 0 ;
-			if((np->next=my_malloc(sizeof(struct body_part)+extra_len))==NULL){
+			if((np->next=func_malloc(my_malloc, sizeof(struct body_part)+extra_len))==NULL){
 				LM_ERR("failed to allocate new body_part clone (shared=%d)\n",
 					shared);
 				goto err;
@@ -585,4 +585,40 @@ int should_update_sip_body(struct sip_msg *msg)
 	}
 	/* no changes on the body - should not be updated */
 	return 0;
+}
+
+str *get_body_part(struct sip_msg *msg, unsigned int type, unsigned int subtype)
+{
+	str body;
+	struct body_part *p;
+
+	if(parse_headers(msg, HDR_CONTENTLENGTH_F,0) < 0) {
+		LM_ERR("cannot parse cseq header\n");
+		return NULL;
+	}
+
+	body.len = get_content_length(msg);
+	if (!body.len)
+		return NULL;
+
+	if (parse_sip_body(msg)<0 || msg->body==NULL) {
+		LM_DBG("cannot parse body\n");
+		return NULL;
+	}
+	if (type == 0 && subtype == 0)
+		return &msg->body->first.body; /* not interested in a particular type */
+
+	for (p = &msg->body->first; p; p = p->next) {
+		if (is_body_part_received(p) &&
+				(p->mime & (type << 16) &&
+				(subtype == 0 || p->mime == (type << 16) + subtype)))
+			return &p->body;
+	}
+
+	return NULL;
+}
+
+int has_body_part(struct sip_msg *msg, unsigned int type, unsigned int subtype)
+{
+	return (get_body_part(msg, type, subtype) == NULL?0:1);
 }

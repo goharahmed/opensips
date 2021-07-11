@@ -50,6 +50,11 @@ map_t client_dom_matching;
 
 rw_lock_t *dom_lock;
 
+extern struct openssl_binds openssl_api;
+extern struct wolfssl_binds wolfssl_api;
+
+void destroy_tls_dom(struct tls_domain *d);
+
 struct tls_domain *tls_find_domain_by_name(str *name, struct tls_domain **dom_list)
 {
 	struct tls_domain *d;
@@ -107,12 +112,12 @@ void map_remove_tls_dom(struct tls_domain *dom)
 
 void tls_free_domain(struct tls_domain *dom)
 {
-	struct str_list *m_it, *m_tmp;
+	str_list *m_it, *m_tmp;
 
 	dom->refs--;
 	if (dom->refs == 0) {
-		if (dom->ctx)
-			SSL_CTX_free(dom->ctx);
+		destroy_tls_dom(dom);
+
 		lock_destroy(dom->lock);
 		lock_dealloc(dom->lock);
 
@@ -143,6 +148,7 @@ void tls_free_db_domains(struct tls_domain *dom)
 	while (dom && dom->flags & DOM_FLAG_DB) {
 		tmp = dom;
 		dom = dom->next;
+		map_remove_tls_dom(tmp);
 		tls_free_domain(tmp);
 	}
 }
@@ -167,14 +173,22 @@ int set_all_domain_attr(struct tls_domain **dom, char **str_vals, int *int_vals,
 	size_t len;
 	char *p;
 	struct tls_domain *d = *dom;
-	size_t cadir_len = strlen(str_vals[STR_VALS_CADIR_COL]);
-	size_t cplist_len = strlen(str_vals[STR_VALS_CPLIST_COL]);
-	size_t crl_dir_len = strlen(str_vals[STR_VALS_CRL_DIR_COL]);
-	size_t eccurve_len = strlen(str_vals[STR_VALS_ECCURVE_COL]);
+	size_t method_len = str_vals[STR_VALS_METHOD_COL] ?
+		strlen(str_vals[STR_VALS_METHOD_COL]) : 0;
+	size_t cadir_len = str_vals[STR_VALS_CADIR_COL] ?
+		strlen(str_vals[STR_VALS_CADIR_COL]) : 0;
+	size_t cplist_len = str_vals[STR_VALS_CPLIST_COL] ?
+		strlen(str_vals[STR_VALS_CPLIST_COL]) : 0;
+	size_t crl_dir_len = str_vals[STR_VALS_CRL_DIR_COL] ?
+		strlen(str_vals[STR_VALS_CRL_DIR_COL]) : 0;
+	size_t eccurve_len = str_vals[STR_VALS_ECCURVE_COL] ?
+		strlen(str_vals[STR_VALS_ECCURVE_COL]) : 0;
 	char name_buf[255];
 	int name_len;
 
 	len = sizeof(struct tls_domain) + d->name.len;
+
+	len += method_len;
 
 	if (cadir_len)
 		len += cadir_len + 1;
@@ -213,12 +227,6 @@ int set_all_domain_attr(struct tls_domain **dom, char **str_vals, int *int_vals,
 	}
 
 	*dom = d;
-	if (strcasecmp(str_vals[STR_VALS_METHOD_COL], "SSLV23") == 0 || strcasecmp(str_vals[STR_VALS_METHOD_COL], "TLSany") == 0)
-		d->method = TLS_USE_SSLv23;
-	else if (strcasecmp(str_vals[STR_VALS_METHOD_COL], "TLSV1") == 0)
-		d->method = TLS_USE_TLSv1;
-	else if (strcasecmp(str_vals[STR_VALS_METHOD_COL], "TLSV1_2") == 0)
-		d->method = TLS_USE_TLSv1_2;
 
 	if (int_vals[INT_VALS_VERIFY_CERT_COL] != -1) {
 		d->verify_cert = int_vals[INT_VALS_VERIFY_CERT_COL];
@@ -241,6 +249,13 @@ int set_all_domain_attr(struct tls_domain **dom, char **str_vals, int *int_vals,
 	p = p + d->name.len;
 
 	memset(p, 0, len - (sizeof(struct tls_domain) + d->name.len));
+
+	if (method_len) {
+		d->method_str.s = p;
+		d->method_str.len = method_len;
+		memcpy(p, str_vals[STR_VALS_METHOD_COL], method_len);
+		p = p + d->method_str.len;
+	}
 
 	if (cadir_len) {
 		d->ca_directory = p;
@@ -518,16 +533,16 @@ int tls_new_domain(str *name, int type, struct tls_domain **dom)
 	return 0;
 }
 
-static int add_match_filt_to_dom(str *filter_s, struct str_list **filter_list)
+static int add_match_filt_to_dom(str *filter_s, str_list **filter_list)
 {
-	struct str_list *match_filt;
+	str_list *match_filt;
 
 	match_filt = shm_malloc(sizeof *match_filt);
 	if (!match_filt) {
 		LM_ERR("No more shm mem\n");
 		return -1;
 	}
-	if (shm_str_dup(&match_filt->s, filter_s) < 0) {
+	if (shm_nt_str_dup(&match_filt->s, filter_s) < 0) {
 		shm_free(match_filt);
 		return -1;
 	}
@@ -544,7 +559,7 @@ int parse_match_domains(struct tls_domain *tls_dom, str *domains_s)
 	str match_any_s = str_init("*");
 
 	if (domains_s->s) {
-		list = _parse_csv_record(domains_s, CSV_SIMPLE);
+		list = parse_csv_record(domains_s);
 		if (!list) {
 			LM_ERR("Failed to parse CSV record\n");
 			return -1;
@@ -605,6 +620,8 @@ int parse_match_addresses(struct tls_domain *tls_dom, str *addresses_s)
 	csv_record *list, *it;
 	str match_any_s = str_init("*");
 	struct ip_addr *addr;
+	char addr_buf[64];
+	str addr_s;
 	unsigned int port;
 
 	if (addresses_s->s) {
@@ -615,7 +632,7 @@ int parse_match_addresses(struct tls_domain *tls_dom, str *addresses_s)
 			return 0;
 		}
 
-		list = _parse_csv_record(addresses_s, CSV_SIMPLE);
+		list = parse_csv_record(addresses_s);
 		if (!list) {
 			LM_ERR("Failed to parse CSV record\n");
 			return -1;
@@ -628,7 +645,10 @@ int parse_match_addresses(struct tls_domain *tls_dom, str *addresses_s)
 				return -1;
 			}
 
-			if (add_match_filt_to_dom(&it->s, &tls_dom->match_addresses) < 0) {
+			sprintf(addr_buf, "%s:%d", ip_addr2a(addr), port);
+			addr_s.s = addr_buf;
+			addr_s.len = strlen(addr_buf);
+			if (add_match_filt_to_dom(&addr_s, &tls_dom->match_addresses) < 0) {
 				free_csv_record(list);
 				return -1;
 			}
@@ -729,7 +749,7 @@ int db_add_domain(char **str_vals, int *int_vals, str* blob_vals,
 
 int update_matching_map(struct tls_domain *tls_dom)
 {
-	struct str_list *addrf_s, *domf_s;
+	str_list *addrf_s, *domf_s;
 	struct dom_filt_array *doms_array;
 	void **val;
 	int pos;

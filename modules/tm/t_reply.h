@@ -54,7 +54,7 @@ extern char *tm_tag_suffix;
 
 extern int disable_6xx_block;
 
-/* flag for marching minor branches */
+/* flag for marking minor branches */
 extern int minor_branch_flag;
 extern char *minor_branch_flag_str;
 
@@ -65,9 +65,10 @@ int unmatched_totag(struct cell *t, struct sip_msg *ack);
 typedef unsigned int branch_bm_t;
 
 /* reply export types */
-typedef int (*treply_f)(struct sip_msg * , unsigned int , str * );
+typedef int (*treply_f)(struct sip_msg * , unsigned int , const str * );
 typedef int (*treply_wb_f)( struct cell* trans, unsigned int code, str *text,
 	str *body, str *new_header, str *to_tag);
+typedef int (*tgen_totag_f)(struct sip_msg * , str * );
 
 #define LOCK_REPLIES(_t) lock(&(_t)->reply_mutex )
 #define UNLOCK_REPLIES(_t) unlock(&(_t)->reply_mutex )
@@ -98,13 +99,16 @@ int t_reply_with_body( struct cell *trans, unsigned int code,
 /* send a UAS reply
  * returns 1 if everything was OK or -1 for error
  */
-int t_reply( struct cell *t, struct sip_msg * , unsigned int , str * );
+int t_reply( struct cell *t, struct sip_msg * , unsigned int , const str * );
 /* the same as t_reply, except it does not claim
    REPLY_LOCK -- useful to be called within reply
    processing
 */
 
-int w_t_reply_body(struct sip_msg* msg,str* code,str *text, str *body);
+int w_t_reply_body(struct sip_msg* msg, unsigned int* code, str *text,
+				str *body);
+
+int t_gen_totag(struct sip_msg *msg, str *totag);
 
 int t_reply_unsafe( struct cell *t, struct sip_msg * , unsigned int , str * );
 

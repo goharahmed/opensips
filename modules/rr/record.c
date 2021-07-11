@@ -242,12 +242,11 @@ lump_err:
 int record_route(struct sip_msg* _m, str *params)
 {
 	struct lump* l, *l2, *lp, *lp2, *ap;
-	str user;
+	str user = STR_NULL;
 	struct to_body* from;
 	str* tag;
 
 	from = 0; /* Makes gcc happy */
-	user.len = 0;
 	lp = lp2 = NULL;
 
 	if (add_username) {
@@ -280,16 +279,16 @@ int record_route(struct sip_msg* _m, str *params)
 		if (ap->type==HDR_RECORDROUTE_T && ap->op==LUMP_NOP
 		&& ap->before && ap->before->op==LUMP_ADD_OPT
 		&& ap->before->u.cond==COND_FALSE) {
-			/* found our phony anchor lump */
+			/* found our phony anchor lump -> hide it from future searches */
+			ap->type = HDR_ERROR_T;
+
 			/* jump over the anchor and conditional lumps */
-			lp = ap->before->before;
-			/* unlink it */
-			ap->before->before = NULL;
-			ap->type = 0;
+			lp = dup_lump_list(ap->before->before);
+
 			/* if double routing, make a copy of the buffered lumps for the
 			   second route hdr. */
 			if (enable_double_rr)
-				lp2 = dup_lump_list(lp);
+				lp2 = dup_lump_list(ap->before->before);
 			break;
 		}
 	}
@@ -428,12 +427,12 @@ int record_route_preset(struct sip_msg* _m, str* _data)
 		if (ap->type==HDR_RECORDROUTE_T && ap->op==LUMP_NOP
 		&& ap->before && ap->before->op==LUMP_ADD_OPT
 		&& ap->before->u.cond==COND_FALSE) {
-			/* found our phony anchor lump */
+			/* found our phony anchor lump -> hide it from future searches */
+			ap->type = HDR_ERROR_T;
+
 			/* jump over the anchor and conditional lumps */
-			lp = ap->before->before;
-			/* unlink it */
-			ap->before->before = NULL;
-			ap->type = 0;
+			lp = dup_lump_list(ap->before->before);
+
 			/* link the pending buffered params and go at the end of the list*/
 			for ( l2->before = lp ; l2 && l2->before ; l2=l2->before);
 			break;

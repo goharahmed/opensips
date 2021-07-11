@@ -55,9 +55,6 @@ static rl_algo_t get_rl_algo(str);
 /* big hash table */
 rl_big_htable rl_htable;
 
-/* feedback algorithm */
-static int *rl_feedback_limit;
-
 static cachedb_funcs cdbf;
 static cachedb_con *cdbc = 0;
 
@@ -85,7 +82,12 @@ static str pipe_repl_cap = str_init("ratelimit-pipe-repl");
 
 /* returns true if the pipe should use cachedb interface */
 #define RL_USE_CDB(_p) \
-	(cdbc && (_p)->algo!=PIPE_ALGO_NETWORK && (_p)->algo!=PIPE_ALGO_FEEDBACK)
+	(cdbc && (_p)->algo!=PIPE_ALGO_NETWORK && \
+	 (_p)->algo!=PIPE_ALGO_FEEDBACK && \
+	 (_p)->flags&RL_PIPE_REPLICATE_CACHE)
+
+#define RL_USE_BIN(_p) \
+	 ((_p)->flags&RL_PIPE_REPLICATE_BIN)
 
 
 
@@ -309,12 +311,7 @@ static str * get_rl_algo_name(rl_algo_t algo)
 	return NULL;
 }
 
-int w_rl_check_2(struct sip_msg *_m, char *_n, char *_l)
-{
-	return w_rl_check_3(_m, _n, _l, NULL);
-}
-
-rl_pipe_t *rl_create_pipe(int limit, rl_algo_t algo)
+rl_pipe_t *rl_create_pipe(int limit, rl_algo_t algo, str *name, unsigned flags)
 {
 	rl_pipe_t *pipe;
 	int size = sizeof(rl_pipe_t);
@@ -325,6 +322,28 @@ rl_pipe_t *rl_create_pipe(int limit, rl_algo_t algo)
 	if (algo == PIPE_ALGO_HISTORY)
 		size += (rl_window_size * 1000) / rl_slot_period * sizeof(long int);
 
+#ifdef RL_DEBUG_PIPES
+	size += name->len;
+#endif
+	if (flags & RL_PIPE_REPLICATE_CACHE) {
+		if (!cdbc) {
+			LM_WARN("cachedb replication not configured! ignoring...\n");
+			flags &= ~RL_PIPE_REPLICATE_CACHE;
+		}
+		if (algo == PIPE_ALGO_NETWORK ||
+				algo == PIPE_ALGO_FEEDBACK) {
+			LM_WARN("cachedb replication not possible for "
+					"NETWORK and FEEDBACK algorithms!\n");
+			flags &= ~RL_PIPE_REPLICATE_CACHE;
+		}
+	}
+	if (flags & RL_PIPE_REPLICATE_BIN) {
+		if (!rl_repl_cluster) {
+			LM_WARN("clusterer replication not configured! ignoring...\n");
+			flags &= ~RL_PIPE_REPLICATE_BIN;
+		}
+	}
+
 	pipe = shm_malloc(size);
 	if (!pipe) {
 		LM_ERR("no more shm memory!\n");
@@ -334,41 +353,63 @@ rl_pipe_t *rl_create_pipe(int limit, rl_algo_t algo)
 
 	pipe->algo = algo;
 	pipe->limit = limit;
+	pipe->flags = flags;
 
 	if (algo == PIPE_ALGO_HISTORY) {
 		pipe->rwin.window = (long int *)(pipe + 1);
 		pipe->rwin.window_size = (rl_window_size * 1000) / rl_slot_period;
 		/* everything else is already cleared */
 	}
+
+#ifdef RL_DEBUG_PIPES
+	pipe->name.s = ((char *)pipe) + size - name->len;
+	memcpy(pipe->name.s, name->s, name->len);
+	pipe->name.len = name->len;
+#endif
 	return pipe;
 }
 
-int w_rl_check_3(struct sip_msg *_m, char *_n, char *_l, char *_a)
+static inline void parse_pipe_name(str *name, str *pipe_name, unsigned *flags)
 {
-	str name;
-	int limit = 0, ret = 1, should_update = 0;
-	str algorithm;
+	char *c;
+	*flags = 0;
+	*pipe_name = *name;
+	if (name->len < 2)
+		return;
+	for (c = &name->s[name->len - 1]; c > name->s; c--) {
+		switch (*c) {
+			case 'r':
+				*flags |= RL_PIPE_REPLICATE_CACHE;
+				break;
+			case 'b':
+				*flags |= RL_PIPE_REPLICATE_BIN;
+				break;
+			case '/':
+				if (*flags) {
+					pipe_name->len = c - pipe_name->s;
+					trim(pipe_name);
+				}
+				/* fall back */
+			default:
+				/* not flags - something else at the end */
+				return;
+		}
+	}
+}
+
+int w_rl_check(struct sip_msg *_m, str *name, int *limit, str *algorithm)
+{
+	int ret = 1, should_update = 0;
 	unsigned int hash_idx;
 	rl_pipe_t **pipe;
+	str pipe_name;
+	unsigned flags;
 
 	rl_algo_t algo = -1;
 
-	/* retrieve and check parameters */
-	if (!_n || !_l) {
-		LM_ERR("invalid parameters\n");
-		goto end;
-	}
-	if (fixup_get_svalue(_m, (gparam_p) _n, &name) < 0) {
-		LM_ERR("cannot retrieve identifier\n");
-		goto end;
-	}
-	if (fixup_get_ivalue(_m, (gparam_p) _l, &limit) < 0) {
-		LM_ERR("cannot retrieve limit\n");
-		goto end;
-	}
-	algorithm.s = 0;
-	if (!_a || fixup_get_svalue(_m, (gparam_p) _a, &algorithm) < 0 ||
-		(algo = get_rl_algo(algorithm)) == PIPE_ALGO_NOP) {
+	parse_pipe_name(name, &pipe_name, &flags);
+
+	if (!algorithm || (algo = get_rl_algo(*algorithm)) == PIPE_ALGO_NOP) {
 		algo = PIPE_ALGO_NOP;
 	}
 
@@ -376,30 +417,30 @@ int w_rl_check_3(struct sip_msg *_m, char *_n, char *_l, char *_a)
 	if (algo == PIPE_ALGO_FEEDBACK) {
 		lock_get(rl_lock);
 		if (*rl_feedback_limit) {
-			if (*rl_feedback_limit != limit) {
+			if (*rl_feedback_limit != *limit) {
 				LM_WARN("FEEDBACK limit should be the same for all pipes, but"
 					" new limit %d differs - setting to %d\n",
-					limit, *rl_feedback_limit);
-				limit = *rl_feedback_limit;
+					*limit, *rl_feedback_limit);
+				*limit = *rl_feedback_limit;
 			}
 		} else {
-			if (limit <= 0 || limit >= 100) {
+			if (*limit <= 0 || *limit >= 100) {
 				LM_ERR("invalid limit for FEEDBACK algorithm "
 					"(must be between 0 and 100)\n");
 				lock_release(rl_lock);
 				goto end;
 			}
-			*rl_feedback_limit = limit;
-			pid_setpoint_limit(limit);
+			*rl_feedback_limit = *limit;
+			pid_setpoint_limit(*limit);
 		}
 		lock_release(rl_lock);
 	}
 
-	hash_idx = RL_GET_INDEX(name);
+	hash_idx = RL_GET_INDEX(pipe_name);
 	RL_GET_LOCK(hash_idx);
 
 	/* try to get the value */
-	pipe = RL_GET_PIPE(hash_idx, name);
+	pipe = RL_GET_PIPE(hash_idx, pipe_name);
 	if (!pipe) {
 		LM_ERR("cannot get the index\n");
 		goto release;
@@ -407,29 +448,35 @@ int w_rl_check_3(struct sip_msg *_m, char *_n, char *_l, char *_a)
 
 	if (!*pipe) {
 		/* allocate new pipe */
-		if (!(*pipe = rl_create_pipe(limit, algo)))
+		if (!(*pipe = rl_create_pipe(*limit, algo, &pipe_name, flags)))
 			goto release;
 
 		LM_DBG("Pipe %.*s doesn't exist, but was created %p\n",
-				name.len, name.s, *pipe);
+				pipe_name.len, pipe_name.s, *pipe);
 		if ((*pipe)->algo == PIPE_ALGO_NETWORK)
 			should_update = 1;
 	} else {
 		LM_DBG("Pipe %.*s found: %p - last used %lu\n",
-			name.len, name.s, *pipe, (*pipe)->last_used);
+			pipe_name.len, pipe_name.s, *pipe, (*pipe)->last_used);
 		if (algo != PIPE_ALGO_NOP && (*pipe)->algo != algo) {
 			LM_WARN("algorithm %d different from the initial one %d for pipe "
-				"%.*s", algo, (*pipe)->algo, name.len, name.s);
+				"%.*s\n", algo, (*pipe)->algo, pipe_name.len, pipe_name.s);
 		}
 		/* update the limit */
-		(*pipe)->limit = limit;
+		(*pipe)->limit = *limit;
+		if ((*pipe)->flags != flags) {
+			LM_DBG("updating %.*s pipe flags from %x to %x\n",
+					pipe_name.len, pipe_name.s, (*pipe)->flags,
+					((*pipe)->flags | flags));
+			(*pipe)->flags |= flags; /* also update the flags */
+		}
 	}
 
 	/* set the last used time */
 	(*pipe)->last_used = time(0);
 	if (RL_USE_CDB(*pipe)) {
 		/* release the counter for a while */
-		if (rl_change_counter(&name, *pipe, 1) < 0) {
+		if (rl_change_counter(&pipe_name, *pipe, 1) < 0) {
 			LM_ERR("cannot increase counter\n");
 			goto release;
 		}
@@ -439,7 +486,7 @@ int w_rl_check_3(struct sip_msg *_m, char *_n, char *_l, char *_a)
 
 	ret = rl_pipe_check(*pipe);
 	LM_DBG("Pipe %.*s counter:%d load:%d limit:%d should %sbe blocked (%p)\n",
-		name.len, name.s, (*pipe)->counter, (*pipe)->load,
+		pipe_name.len, pipe_name.s, (*pipe)->counter, (*pipe)->load,
 		(*pipe)->limit, ret == 1 ? "NOT " : "", *pipe);
 
 
@@ -604,6 +651,14 @@ static int rl_map_print(void *param, str key, void *value)
 	return 0;
 }
 
+static int rl_map_print_array(void *param, str key, void *value)
+{
+	mi_item_t *pipe_item = add_mi_object((mi_item_t *)param, NULL, 0);
+	if (!pipe_item)
+		return -1;
+	return rl_map_print(pipe_item, key, value);
+}
+
 int rl_stats(mi_item_t *resp_obj, str * value)
 {
 	mi_item_t *pipe_item, *pipe_arr;
@@ -616,7 +671,8 @@ int rl_stats(mi_item_t *resp_obj, str * value)
 		pipe = RL_FIND_PIPE(i, *value);
 		if (!pipe || !*pipe) {
 			LM_DBG("pipe %.*s not found\n", value->len, value->s);
-			goto error;
+			RL_RELEASE_LOCK(i);
+			return 1;
 		}
 		pipe_item = add_mi_object(resp_obj, MI_SSTR("Pipe"));
 		if (!pipe_item)
@@ -633,11 +689,10 @@ int rl_stats(mi_item_t *resp_obj, str * value)
 		if (!pipe_arr)
 			return -1;
 		for (i = 0; i < rl_htable.size; i++) {
-			pipe_item = add_mi_object(pipe_arr, NULL, 0);
-			if (!pipe_item)
-				return -1;
+			if (map_size(rl_htable.maps[i]) == 0)
+				continue;
 			RL_GET_LOCK(i);
-			if (map_for_each(rl_htable.maps[i], rl_map_print, pipe_item)) {
+			if (map_for_each(rl_htable.maps[i], rl_map_print_array, pipe_arr)) {
 				LM_ERR("cannot print values\n");
 				goto error;
 			}
@@ -691,27 +746,21 @@ release:
 	return ret;
 }
 
-static inline int w_rl_change_counter(struct sip_msg *_m, char *_n, int dec)
+static inline int w_rl_change_counter(struct sip_msg *_m, str *name, int dec)
 {
-	str name;
-
-	if (!_n || fixup_get_svalue(_m, (gparam_p) _n, &name) < 0) {
-		LM_ERR("cannot retrieve identifier\n");
-		return -1;
-	}
-	if (w_rl_set_count(name, dec)) {
-		LM_ERR("cannot find any pipe named %.*s\n", name.len, name.s);
+	if (w_rl_set_count(*name, dec)) {
+		LM_ERR("cannot find any pipe named %.*s\n", name->len, name->s);
 		return -1;
 	}
 	return 1;
 }
 
-int w_rl_dec(struct sip_msg *_m, char *_n)
+int w_rl_dec(struct sip_msg *_m, str *_n)
 {
 	return w_rl_change_counter(_m, _n, -1);
 }
 
-int w_rl_reset(struct sip_msg *_m, char *_n)
+int w_rl_reset(struct sip_msg *_m, str *_n)
 {
 	return w_rl_change_counter(_m, _n, 0);
 }
@@ -754,7 +803,7 @@ void rl_rcv_bin(bin_packet_t *packet)
 	int counter;
 	str name;
 	rl_pipe_t **pipe;
-	unsigned int hash_idx;
+	unsigned int hash_idx, flags;
 	time_t now;
 	rl_repl_counter_t *destination;
 
@@ -769,6 +818,11 @@ void rl_rcv_bin(bin_packet_t *packet)
 	for (;;) {
 		if (bin_pop_str(packet, &name) == 1)
 			break; /* pop'ed all pipes */
+
+		if (bin_pop_int(packet, &flags) < 0) {
+			LM_ERR("cannot pop pipe's flags\n");
+			return;
+		}
 
 		if (bin_pop_int(packet, &algo) < 0) {
 			LM_ERR("cannot pop pipe's algorithm\n");
@@ -797,11 +851,10 @@ void rl_rcv_bin(bin_packet_t *packet)
 
 		if (!*pipe) {
 			/* if the pipe does not exist, allocate it in case we need it later */
-			if (!(*pipe = rl_create_pipe(limit, algo)))
+			if (!(*pipe = rl_create_pipe(limit, algo, &name, flags)))
 				goto release;
 			LM_DBG("Pipe %.*s doesn't exist, but was created %p\n",
 				name.len, name.s, *pipe);
-
 		} else {
 			LM_DBG("Pipe %.*s found: %p - last used %lu\n",
 				name.len, name.s, *pipe, (*pipe)->last_used);
@@ -824,6 +877,7 @@ void rl_rcv_bin(bin_packet_t *packet)
 			goto release;
 		destination->counter = counter;
 		destination->update = now;
+		RL_DBG(*pipe, "counter=%d id=%d", counter, packet->src_id);
 		RL_RELEASE_LOCK(hash_idx);
 	}
 	return;
@@ -885,12 +939,6 @@ static inline int ALLOW_UNUSED hist_count(rl_pipe_t *pipe)
 
 int rl_repl_init(void)
 {
-	if (rl_buffer_th > (BUF_SIZE * 0.9)) {
-		LM_WARN("Buffer size too big %d - pipe information might get lost",
-			rl_buffer_th);
-		return -1;
-	}
-
 	if (rl_repl_cluster && clusterer_api.register_capability(&pipe_repl_cap,
 		rl_rcv_bin, NULL, rl_repl_cluster, 0, NODE_CMP_ANY) < 0) {
 		LM_ERR("Cannot register clusterer callback!\n");
@@ -931,7 +979,7 @@ void rl_timer_repl(utime_t ticks, void *param)
 	rl_pipe_t **pipe;
 	str *key;
 	int nr = 0;
-	int ret;
+	int ret = 0;
 	bin_packet_t packet;
 
 	if (bin_init(&packet, &pipe_repl_cap, RL_PIPE_COUNTER, BIN_VERSION, 0) < 0) {
@@ -954,7 +1002,7 @@ void rl_timer_repl(utime_t ticks, void *param)
 				goto next_pipe;
 			}
 			/* ignore cachedb replicated stuff */
-			if (RL_USE_CDB(*pipe))
+			if (!RL_USE_BIN(*pipe))
 				goto next_pipe;
 
 			key = iterator_key(&it);
@@ -964,6 +1012,9 @@ void rl_timer_repl(utime_t ticks, void *param)
 			}
 
 			if (bin_push_str(&packet, key) < 0)
+				goto error;
+
+			if (bin_push_int(&packet, (*pipe)->flags) < 0)
 				goto error;
 
 			if (bin_push_int(&packet, (*pipe)->algo) < 0)
@@ -976,19 +1027,13 @@ void rl_timer_repl(utime_t ticks, void *param)
 			 * for the SBT algorithm it is safe to replicate the current
 			 * counter, since it is always updating according to the window
 			 */
+			RL_DBG(*pipe, "replicate=%d", ((*pipe)->algo == PIPE_ALGO_HISTORY ?
+						 (*pipe)->counter : (*pipe)->my_last_counter));
 			if ((ret = bin_push_int(&packet,
 						((*pipe)->algo == PIPE_ALGO_HISTORY ?
 						 (*pipe)->counter : (*pipe)->my_last_counter))) < 0)
 				goto error;
 			nr++;
-
-			if (ret > rl_buffer_th) {
-				/* send the buffer */
-				if (nr)
-					rl_replicate(&packet);
-				bin_reset_back_pointer(&packet);
-				nr = 0;
-			}
 
 next_pipe:
 			if (iterator_next(&it) < 0)
@@ -996,6 +1041,13 @@ next_pipe:
 		}
 next_map:
 		RL_RELEASE_LOCK(i);
+		if (ret > rl_buffer_th) {
+			/* send the buffer */
+			if (nr)
+				rl_replicate(&packet);
+			bin_reset_back_pointer(&packet);
+			nr = 0;
+		}
 	}
 	/* if there is anything else to send, do it now */
 	if (nr)

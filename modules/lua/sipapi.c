@@ -43,13 +43,18 @@
 #include "../../pvar.h"
 #include "../../script_var.h"
 #include "../../data_lump_rpl.h"
+#include "../../mod_fix.h"
+#include "../../ut.h"
 
 #include "siplua.h"
 #include "sipluafunc.h"
 #include "sipapi.h"
+#include "compat.h"
 
+#if 0
 static void siplua_moduleFunc_free(const char *func, cmd_export_t *exp_func_struct,
 				   action_elem_t *elems, int nargs);
+#endif
 
 /*
  * Warning, should pcall this to prevent exit(1) if being out-of-memory.
@@ -277,7 +282,7 @@ static int l_siplua_getContact(lua_State *L)
 	{
 	  lua_remove(L, -1);
 	  lua_pushnil(L);
-	  siplua_log(L_DBG, "l_siplua_getContact Found Contact HF with both star and no star.");
+	  siplua_log(L_DBG, "l_siplua_getContact Found Contact HF with both star and no star.\n");
 	}
       else
 	{
@@ -288,7 +293,7 @@ static int l_siplua_getContact(lua_State *L)
 	    {
 	      lua_remove(L, -1);
 	      lua_pushnil(L);
-	      siplua_log(L_DBG, "l_siplua_getContact Found Contact HF star with unvalid expires.");
+	      siplua_log(L_DBG, "l_siplua_getContact Found Contact HF star with unvalid expires.\n");
 	    }
 	}
     }
@@ -441,7 +446,7 @@ static int l_siplua_getSrcIp(lua_State *L)
   if (getnameinfo(&sa, sizeof(sa), hbuf, sizeof(hbuf), sbuf,
 		  sizeof(sbuf), NI_NUMERICHOST | NI_NUMERICSERV))
     {
-      siplua_log(L_DBG, "could not get numeric hostname");
+      siplua_log(L_DBG, "could not get numeric hostname\n");
       lua_pushnil(L);
     }
   else
@@ -468,7 +473,7 @@ static int l_siplua_getDstIp(lua_State *L)
   if (getnameinfo(&sa, sizeof(sa), hbuf, sizeof(hbuf), sbuf,
 		  sizeof(sbuf), NI_NUMERICHOST | NI_NUMERICSERV))
     {
-      siplua_log(L_DBG, "could not get numeric hostname");
+      siplua_log(L_DBG, "could not get numeric hostname\n");
       lua_pushnil(L);
     }
   else
@@ -743,11 +748,49 @@ static int l_siplua_add_lump_rpl(lua_State *L)
   return 1;
 }
 
-/*
- * It could be useful to keep all fixup'ed parameters into a hash table, so that it would
- * permit to call function modules missing free_fixup, as long as parameters don't change.
- */
-static int siplua_unsafemodfnc = 1;
+static int lua_do_action(lua_State *L, struct sip_msg* msg,
+  struct action *act, cmd_export_t *cmd, int *retval)
+{
+  void* cmdp[MAX_CMD_PARAMS];
+  pv_value_t tmp_vals[MAX_CMD_PARAMS];
+  int i;
+  struct cmd_param *param;
+  gparam_p gp;
+
+  if (fix_cmd(cmd->params, act->elem) < 0) {
+    LM_ERR("Failed to fix command <%s>\n", cmd->name);
+    return luaL_error(L, "failed to fix command");
+  }
+
+  if (get_cmd_fixups(msg, cmd->params, act->elem, cmdp, tmp_vals) < 0) {
+    LM_ERR("Failed to get fixups for command <%s>\n", cmd->name);
+    return luaL_error(L, "failed to get fixups for command");
+  }
+
+  *retval = cmd->function(msg,
+    cmdp[0],cmdp[1],cmdp[2],
+    cmdp[3],cmdp[4],cmdp[5],
+    cmdp[6],cmdp[7]);
+
+  for (param=cmd->params, i=1; param->flags; param++, i++) {
+    gp = (gparam_p)act->elem[i].u.data;
+    if (!gp)
+      continue;
+
+    if (param->free_fixup && param->free_fixup(&cmdp[i-1]) < 0) {
+      LM_ERR("Failed to free fixup for param [%d]\n", i);
+      return luaL_error(L, "failed to free fixups");
+    }
+
+    if (param->flags & CMD_PARAM_REGEX && gp->type != GPARAM_TYPE_PVS) {
+      regfree((regex_t*)cmdp[i-1]);
+      pkg_free(cmdp[i-1]);
+    }
+  }
+
+  return 1;
+}
+
 static int l_siplua_moduleFunc(lua_State *L)
 {
   struct sipapi_object *o;
@@ -755,11 +798,14 @@ static int l_siplua_moduleFunc(lua_State *L)
   int n, nargs;
   cmd_export_t *exp_func_struct;
   action_elem_t elems[MAX_ACTION_ELEMS];
-  const char *s, *msg;
-  char *str;
+  const char *msg;
   int i;
   struct action *act;
-  int retval;
+  int retval, rc;
+  pv_spec_t *specs[MAX_CMD_PARAMS];
+  struct cmd_param *param;
+  char *largs[MAX_CMD_PARAMS];
+  str s;
 
   o = luaL_checkudata(L, 1, "siplua.api");
   func = luaL_checkstring(L, 2);
@@ -768,107 +814,86 @@ static int l_siplua_moduleFunc(lua_State *L)
   if (n - 1 > MAX_ACTION_ELEMS)
     return luaL_error(L, "function '%s' called with too many arguments [%d > %d]",
 	       func, nargs, MAX_ACTION_ELEMS - 1);
-  exp_func_struct = find_cmd_export_t((char *)func, nargs, 0);
+
+  exp_func_struct = find_cmd_export_t((char *)func, 0);
   if (!exp_func_struct)
-    {
-      return luaL_error(L, "function '%s' called, but not available.");
-    }
+    return luaL_error(L, "function '%s' called, but not available", func);
+
   elems[0].type = CMD_ST;
   elems[0].u.data = exp_func_struct;
-  memset(&elems[1], '\0', nargs * sizeof(action_elem_t));
-  for (i = 0; i < nargs; ++i)
-    {
-      s = lua_tostring(L, 3 + i);
-      if (!s)
-	{
-	  siplua_moduleFunc_free(func, exp_func_struct, elems, nargs);
-	  msg = lua_pushfstring(L, "%s expected, got %s",
+
+  for (i = 0; i < nargs; ++i) {
+    if (lua_isnil(L, 3 + i)) {
+      elems[i+1].type = NULLV_ST;
+      largs[i] = NULL;
+    } else {
+      largs[i] = (char*)lua_tostring(L, 3 + i);
+      if (!largs[i]) {
+	      msg = lua_pushfstring(L, "%s expected, got %s",
 				lua_typename(L, LUA_TSTRING), luaL_typename(L, 3 + i));
-	  return luaL_argerror(L, 3 + i, msg);
-	}
-      str = pkg_malloc(strlen(s) + 1);
-      if (!str)
-	{
-	  siplua_moduleFunc_free(func, exp_func_struct, elems, nargs);
-	  return luaL_error(L, "Not enough memory");
-	}
-      strcpy(str, s);
-      /* We should maybe try STR_ST and elems[].u.str.{s,len} */
-      elems[i + 1].type = STRING_ST;
-      elems[i + 1].u.data = str; /* elems[].u.string */
+	      return luaL_argerror(L, 3 + i, msg);
+	    }
+      elems[i+1].type = NOSUBTYPE;
     }
-  act = mk_action(MODULE_T, n - 2 + 1, elems, 0, "lua");
+    specs[i] = NULL;
+  }
+
+  retval = check_cmd_call_params(exp_func_struct, elems, nargs);
+  if (retval == -1 || retval == -2)
+      return luaL_error(L, "to few or too many parameters for function '%s'", func);
+  else if (retval == -3)
+      return luaL_error(L, "mandatory parameter ommited for function '%s'", func);
+
+  for (param=exp_func_struct->params, i=1; param->flags; param++, i++) {
+    if (!largs[i-1])
+      continue;
+
+    if (param->flags & CMD_PARAM_INT) {
+      elems[i].type = NUMBER_ST;
+      s.s = largs[i-1];
+      s.len =  strlen(s.s);
+      if (str2sint(&s, (int*)&elems[i].u.number) < 0)
+        return luaL_error(L, "parameter [%d] should be an integer", i);
+    } else if (param->flags & (CMD_PARAM_STR | CMD_PARAM_REGEX)) {
+        elems[i].type = STR_ST;
+        elems[i].u.data = largs[i-1];
+    } else if (param->flags & CMD_PARAM_VAR) {
+        elems[i].type = SCRIPTVAR_ST;
+        specs[i-1] = pkg_malloc(sizeof *specs[i]);
+        if (!specs[i-1]) {
+          LM_ERR("oom\n");
+          return luaL_error(L, "out of pkg memory");
+        }
+        s.s = largs[i-1];
+        s.len = strlen(s.s);
+        if (pv_parse_spec(&s, specs[i-1]) == NULL)
+          return luaL_error(L, "unknown script variable '%s'", largs[i-1]);
+        elems[i].u.data = specs[i-1];
+    }
+  }
+
+  act = mk_action(CMD_T, nargs + 1, elems, 0, "lua");
   if (!act)
-    {
-      siplua_moduleFunc_free(func, exp_func_struct, elems, nargs);
-      return luaL_error(L, "action structure could not be created. Error.");
-    }
-/*   siplua_log(L_DBG, "fixup/%p free_fixup/%p", */
-/* 	     exp_func_struct->fixup, */
-/* 	     exp_func_struct->free_fixup); */
-  if (exp_func_struct->fixup)
-    {
-      if (!siplua_unsafemodfnc && !exp_func_struct->free_fixup)
-	{
-	  siplua_moduleFunc_free(func, exp_func_struct, act->elem, nargs);
-	  return luaL_error(L, "Module function '%s' is unsafe. Call is refused.\n", func);
-	}
-      if (nargs == 0)
-	{
-	  retval = exp_func_struct->fixup(0, 0);
-	  if (retval < 0)
-	    {
-	      siplua_moduleFunc_free(func, exp_func_struct, act->elem, nargs);
-	      return luaL_error(L, "Error in fixup (0)\n");
-	    }
-	}
-      for (i = 0; i < nargs; ++i)
-	{
-	  retval = exp_func_struct->fixup(&act->elem[i + 1].u.data, i + 1);
-	  if (retval < 0)
-	    {
-	      siplua_moduleFunc_free(func, exp_func_struct, act->elem, nargs);
-	      return luaL_error(L, "Error in fixup (%d)\n", i + 1);
-	    }
-	  act->elem[i + 1].type = MODFIXUP_ST;
-	}
-    }
-  retval = do_action(act, o->msg);
-  siplua_moduleFunc_free(func, exp_func_struct, act->elem, nargs);
+    return luaL_error(L, "action structure could not be created. Error.");
+
+  if ((rc = lua_do_action(L, o->msg, act, exp_func_struct, &retval)) != 1)
+    return rc;
+
+  for (i = 0; i < nargs; ++i)
+    pv_spec_free(specs[i]);
+
+  /* free the gparam_t structs allocated by fix_cmd() */
+  for (i=1; i < MAX_ACTION_ELEMS; i++)
+    if (act->elem[i].u.data)
+      pkg_free(act->elem[i].u.data);
+
   pkg_free(act);
+
   lua_pushinteger(L, retval);
   return 1;
 }
 
-static void siplua_moduleFunc_free(const char *func, cmd_export_t *exp_func_struct,
-				   action_elem_t *elems, int nargs)
-{
-  int i;
-
-  for (i = 0; i < nargs; ++i)
-    {
-      if (!elems[i + 1].u.data)
-	continue;
-      switch (elems[i + 1].type)
-	{
-	case STRING_ST:
-	  pkg_free(elems[i + 1].u.data);
-	  break;
-	case MODFIXUP_ST:
-	  if (!exp_func_struct->free_fixup)
-	    {
-	      if (warn_missing_free_fixup)
-		siplua_log(L_DBG, "moduleFunction (%s): A fixup function was called without corresponding free_fixup. "
-			   "This currently *COULD* creates a memory leak.\n", func);
-	    }
-	  else
-	    exp_func_struct->free_fixup(&elems[i + 1].u.data, i + 1);
-	  break;
-	}
-    }
-}
-
-static const struct luaL_reg siplua_api_mylib [] =
+static const struct luaL_Reg siplua_api_mylib [] =
   {
     {"getType", l_siplua_getType},
     {"getURI_User", l_siplua_getURI_User},
@@ -896,7 +921,7 @@ static const struct luaL_reg siplua_api_mylib [] =
 
 void siplua_register_api_cclosures(lua_State *L)
 {
-  lua_pushvalue(L, LUA_GLOBALSINDEX);
+  lua_pushglobaltable(L);
   luaL_openlib(L, NULL, siplua_api_mylib, 0);
   lua_remove(L, -1);
 }

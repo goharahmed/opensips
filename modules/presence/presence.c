@@ -35,7 +35,6 @@
 #include <time.h>
 #include <fnmatch.h>
 
-#include "../../mod_fix.h"
 #include "../../sr_module.h"
 #include "../../db/db.h"
 #include "../../dprint.h"
@@ -68,19 +67,20 @@
 #define ACTWATCH_TABLE_VERSION 12
 
 char *log_buf = NULL;
-static int clean_period=100;
-static int watchers_clean_period=3600;
-static int db_update_period=100;
+static int clean_period = 100;
+static int watchers_clean_period = 3600;
+static int db_update_period = 100;
 
 /* database connection */
 db_con_t *pa_db = NULL;
 db_func_t pa_dbf;
-str presentity_table= str_init("presentity");
+str presentity_table = str_init("presentity");
 str active_watchers_table = str_init("active_watchers");
-str watchers_table= str_init("watchers");
+str watchers_table = str_init("watchers");
 
-int library_mode= 0;
-str server_address= {0, 0};
+int library_mode = 0;
+str contact_user = str_init("presence");
+
 evlist_t* EvList= NULL;
 
 /* TM bind */
@@ -94,9 +94,9 @@ static int mod_init(void);
 static int child_init(int);
 static void destroy(void);
 int stored_pres_info(struct sip_msg* msg, char* pres_uri, char* s);
-static int fixup_presence(void** param, int param_no);
-static int fixup_subscribe(void** param, int param_no);
-static mi_response_t *mi_refreshWatchers(const mi_params_t *params,
+static int fixup_presence(void** param);
+static int fixup_subscribe(void** param);
+static mi_response_t *mi_refresh_watchers(const mi_params_t *params,
 								struct mi_handler *async_hdl);
 static mi_response_t *mi_cleanup(const mi_params_t *params,
 								struct mi_handler *async_hdl);
@@ -134,6 +134,8 @@ int end_sub_on_timeout= 1;
 pres_ev_t** pres_event_p= NULL;
 pres_ev_t** dialog_event_p= NULL;
 
+char *federation_mode_str;
+
 int phtable_size= 9;
 phtable_t* pres_htable = NULL;
 unsigned int waiting_subs_daysno = 0;
@@ -148,21 +150,17 @@ static str presence_exposed_event = str_init("E_PRESENCE_EXPOSED");
 event_id_t presence_event_id = EVI_ERROR;
 event_id_t exposed_event_id = EVI_ERROR;
 
-static cmd_export_t cmds[]=
-{
-	{"handle_publish",  (cmd_function)handle_publish,   0,
-		fixup_presence,0, REQUEST_ROUTE},
-	{"handle_publish",  (cmd_function)handle_publish,   1,
-		fixup_presence, 0, REQUEST_ROUTE},
-	{"handle_subscribe",(cmd_function)handle_subscribe, 0,
-		fixup_subscribe,0, REQUEST_ROUTE},
-	{"handle_subscribe",(cmd_function)handle_subscribe, 1,
-		fixup_subscribe,0, REQUEST_ROUTE},
-	{"handle_subscribe",(cmd_function)handle_subscribe, 2,
-		fixup_subscribe,0, REQUEST_ROUTE},
-	{"bind_presence",   (cmd_function)bind_presence,    1,
-		0, 0,  0},
-	{ 0, 0, 0, 0, 0,  0}
+static cmd_export_t cmds[]={
+	{"handle_publish",  (cmd_function)handle_publish, {
+		{CMD_PARAM_STR|CMD_PARAM_OPT,fixup_presence,0}, {0,0,0}},
+		REQUEST_ROUTE},
+	{"handle_subscribe",(cmd_function)handle_subscribe, {
+		{CMD_PARAM_INT|CMD_PARAM_OPT,fixup_subscribe,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,fixup_subscribe,0},
+		{0,0,0}},
+		REQUEST_ROUTE},
+	{"bind_presence",(cmd_function)bind_presence,{{0,0,0}},0},
+	{0,0,{{0,0,0}},0}
 };
 
 static param_export_t params[]={
@@ -175,26 +173,31 @@ static param_export_t params[]={
 	{ "expires_offset",         INT_PARAM, &expires_offset },
 	{ "max_expires_subscribe",  INT_PARAM, &max_expires_subscribe },
 	{ "max_expires_publish",    INT_PARAM, &max_expires_publish },
-	{ "server_address",         STR_PARAM, &server_address.s},
+	{ "contact_user",           STR_PARAM, &contact_user.s},
 	{ "subs_htable_size",       INT_PARAM, &shtable_size},
 	{ "pres_htable_size",       INT_PARAM, &phtable_size},
 	{ "fallback2db",            INT_PARAM, &fallback2db},
 	{ "enable_sphere_check",    INT_PARAM, &sphere_enable},
 	{ "waiting_subs_daysno",    INT_PARAM, &waiting_subs_daysno},
 	{ "mix_dialog_presence",    INT_PARAM, &mix_dialog_presence},
-	{ "bla_presentity_spec",    STR_PARAM, &bla_presentity_spec_param},
+	{ "bla_presentity_spec",    STR_PARAM, &bla_presentity_spec_param.s},
 	{ "bla_fix_remote_target",  INT_PARAM, &fix_remote_target},
 	{ "notify_offline_body",    INT_PARAM, &notify_offline_body},
 	{ "end_sub_on_timeout",     INT_PARAM, &end_sub_on_timeout},
 	{ "cluster_id",             INT_PARAM, &pres_cluster_id},
-	{ "cluster_federation_mode",INT_PARAM, &cluster_federation},
+	{ "cluster_federation_mode",STR_PARAM, &federation_mode_str},
 	{ "cluster_pres_events",    STR_PARAM, &clustering_events.s},
 	{0,0,0}
 };
 
 static mi_export_t mi_cmds[] = {
+	// refreshWatchers is a deprecated alias for refresh_watchers. To be removed later.
 	{ "refreshWatchers", 0,0,0, {
-		{mi_refreshWatchers, {"presentity_uri", "event", "refresh_type", 0}},
+		{mi_refresh_watchers, {"presentity_uri", "event", "refresh_type", 0}},
+		{EMPTY_MI_RECIPE}}
+	},
+	{ "refresh_watchers", 0,0,0, {
+		{mi_refresh_watchers, {"presentity_uri", "event", "refresh_type", 0}},
 		{EMPTY_MI_RECIPE}}
 	},
 	{ "cleanup", 0,0,0, {
@@ -238,6 +241,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,           /* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,			/* dlopen flags */
+	0,							/* load function */
 	&deps,                      /* OpenSIPS module dependencies */
 	cmds,						/* exported functions */
 	0,							/* exported async functions */
@@ -247,10 +251,12 @@ struct module_exports exports= {
 	0,							/* exported pseudo-variables */
 	0,			 				/* exported transformations */
 	0,							/* extra processes */
+	0,							/* module pre-initialization function */
 	mod_init,					/* module initialization function */
 	(response_function) 0,      /* response handling function */
 	(destroy_function) destroy, /* destroy function */
-	child_init                  /* per-child init function */
+	child_init,                 /* per-child init function */
+	0                           /* reload confirm function */
 };
 
 /**
@@ -306,13 +312,7 @@ static int mod_init(void)
 	if(max_expires_publish<= 0)
 		max_expires_publish = 3600;
 
-	if(server_address.s== NULL)
-		LM_DBG("server_address parameter not set in configuration file\n");
-
-	if(server_address.s)
-		server_address.len= strlen(server_address.s);
-	else
-		server_address.len= 0;
+	contact_user.len = strlen(contact_user.s);
 
 	/* load SIGNALING API */
 	if(load_sig_api(&sigb)< 0)
@@ -325,6 +325,17 @@ static int mod_init(void)
 	if(load_tm_api(&tmb)==-1)
 	{
 		LM_ERR("can't load tm functions\n");
+		return -1;
+	}
+
+	if (!federation_mode_str || !strcasecmp(federation_mode_str, "disabled")) {
+		cluster_federation = FEDERATION_DISABLED;
+	} else if (!strcasecmp(federation_mode_str, "on-demand-sharing")) {
+		cluster_federation = FEDERATION_ON_DEMAND;
+	} else if (!strcasecmp(federation_mode_str, "full-sharing")) {
+		cluster_federation = FEDERATION_FULL_SHARING;
+	} else {
+		LM_ERR("invalid cluster_federation_mode: '%s'\n", federation_mode_str);
 		return -1;
 	}
 
@@ -496,7 +507,7 @@ static void destroy(void)
 {
 	LM_NOTICE("destroy module ...\n");
 
-	if(subs_htable && pa_db)
+	if(subs_htable && !library_mode && child_init(process_no)==0)
 		timer_db_update(0, 0);
 
 	if(subs_htable)
@@ -516,61 +527,39 @@ static void destroy(void)
 	destroy_evlist();
 }
 
-static int fixup_presence(void** param, int param_no)
+static int fixup_presence(void** param)
 {
- 	pv_elem_t *model;
-	str s;
-
 	if(library_mode)
 	{
 		LM_ERR("Bad config - you can not call 'handle_publish' function"
 				" (db_url not set)\n");
 		return -1;
 	}
-	if(param_no== 0)
-		return 0;
-
-	if(*param)
- 	{
-		s.s = (char*)(*param); s.len = strlen(s.s);
- 		if(pv_parse_format(&s, &model)<0)
- 		{
- 			LM_ERR( "wrong format[%s]\n",(char*)(*param));
- 			return E_UNSPEC;
- 		}
-
- 		*param = (void*)model;
- 		return 0;
- 	}
- 	LM_ERR( "null format\n");
- 	return E_UNSPEC;
+	
+	return 0;
 }
 
-static int fixup_subscribe(void** param, int param_no)
+static int fixup_subscribe(void** param)
 {
 	if(library_mode)
 	{
 		LM_ERR("Bad config - you can not call 'handle_subscribe' function"
 				" (db_url not set)\n");
 		return -1;
-	} else {
-		if (param_no==2)
-			/* second parameter is the sharing tag, which can be string
-			 * or variable  */
-			return fixup_sgp(param);
 	}
+
 	return 0;
 }
 
 /*
- *  mi cmd: refreshWatchers
+ *  mi cmd: refresh_watchers
  *			<presentity_uri>
  *			<event>
  *          <refresh_type> // can be:  = 0 -> watchers autentification type or
  *									  != 0 -> publish type //
  *		* */
 
-static mi_response_t *mi_refreshWatchers(const mi_params_t *params,
+static mi_response_t *mi_refresh_watchers(const mi_params_t *params,
 								struct mi_handler *async_hdl)
 {
 	str pres_uri, event;
@@ -751,6 +740,7 @@ static inline int mi_print_shtable_record(mi_item_t *p_item, subs_t* s)
 	int date_buf_len;
 	rr_t *rr_head = NULL;
 	mi_item_t *item;
+	struct tm t;
 
 	item = add_mi_object(p_item, NULL, 0);
 	if (!item)
@@ -769,8 +759,9 @@ static inline int mi_print_shtable_record(mi_item_t *p_item, subs_t* s)
 	if (attr==NULL) goto error;
 	*/
 	_ts = (time_t)s->expires;
+	localtime_r(&_ts, &t);
 	date_buf_len = strftime(date_buf, MI_DATE_BUF_LEN - 1,
-						"%Y-%m-%d %H:%M:%S", localtime(&_ts));
+						"%Y-%m-%d %H:%M:%S", &t);
 	if (date_buf_len != 0) {
 		if (add_mi_string(item, MI_SSTR("expires"),
 			date_buf, date_buf_len) < 0)
@@ -784,6 +775,10 @@ static inline int mi_print_shtable_record(mi_item_t *p_item, subs_t* s)
 		goto error;
 
 	if (add_mi_number(item, MI_SSTR("version"), s->version) < 0)
+		goto error;
+
+	if (s->sh_tag.len && add_mi_string(item, MI_SSTR("sharing_tag"),
+	s->sh_tag.s, s->sh_tag.len) < 0)
 		goto error;
 
 	if (add_mi_string(item, MI_SSTR("to_user"),
@@ -879,7 +874,7 @@ static mi_response_t *mi_list_shtable(const mi_params_t *params, str *from, str 
 	/* to wildcard */
 	if (to) {
 		memcpy(to_w, to->s, to->len);
-		from_w[to->len] = 0;
+		to_w[to->len] = 0;
 	}
 
 	for (i = 0, j = 0; i < shtable_size; i++) {
@@ -939,7 +934,7 @@ static mi_response_t *mi_list_shtable_2(const mi_params_t *params,
 	return mi_list_shtable(params, &from, &to);
 }
 
-int pres_update_status(subs_t subs, str reason, db_key_t* query_cols,
+int pres_update_status(subs_t *subs, str reason, db_key_t* query_cols,
         db_val_t* query_vals, int n_query_cols, subs_t** subs_array)
 {
 	static db_ps_t my_del_ps = NULL;
@@ -969,29 +964,29 @@ int pres_update_status(subs_t subs, str reason, db_key_t* query_cols,
 	update_vals[u_reason_col].type= DB_STR;
 	n_update_cols++;
 
-	status= subs.status;
-	if(subs.event->get_auth_status(&subs)< 0)
+	status= subs->status;
+	if(subs->event->get_auth_status(subs)< 0)
 	{
 		LM_ERR( "getting status from rules document\n");
 		return -1;
 	}
-	LM_DBG("subs.status= %d\n", subs.status);
-	if(get_status_str(subs.status)== NULL)
+	LM_DBG("subs.status= %d\n", subs->status);
+	if(get_status_str(subs->status)== NULL)
 	{
-		LM_ERR("wrong status: %d\n", subs.status);
+		LM_ERR("wrong status: %d\n", subs->status);
 		return -1;
 	}
 
-	if(subs.status!= status || reason.len!= subs.reason.len ||
-		(reason.s && subs.reason.s && strncmp(reason.s, subs.reason.s,
+	if(subs->status!= status || reason.len!= subs->reason.len ||
+		(reason.s && subs->reason.s && strncmp(reason.s, subs->reason.s,
 											reason.len)))
 	{
 		/* update in watchers_table */
-		query_vals[q_wuser_col].val.str_val= subs.from_user;
-		query_vals[q_wdomain_col].val.str_val= subs.from_domain;
+		query_vals[q_wuser_col].val.str_val= subs->from_user;
+		query_vals[q_wdomain_col].val.str_val= subs->from_domain;
 
-		update_vals[u_status_col].val.int_val= subs.status;
-		update_vals[u_reason_col].val.str_val= subs.reason;
+		update_vals[u_status_col].val.int_val= subs->status;
+		update_vals[u_reason_col].val.str_val= subs->reason;
 
 		if (pa_dbf.use_table(pa_db, &watchers_table) < 0)
 		{
@@ -1001,10 +996,10 @@ int pres_update_status(subs_t subs, str reason, db_key_t* query_cols,
 
 		/* if status is terminated and reason="deactivated",
 		 * delete the record from table */
-		if(subs.status == TERMINATED_STATUS && subs.reason.len==11 &&
-				strncmp(subs.reason.s, "deactivated", 11)==0)
+		if(subs->status == TERMINATED_STATUS && subs->reason.len==11 &&
+				strncmp(subs->reason.s, "deactivated", 11)==0)
 		{
-			CON_PS_REFERENCE(pa_db) = &my_del_ps;
+			CON_SET_CURR_PS(pa_db, &my_del_ps);
 			if(pa_dbf.delete(pa_db, query_cols, 0, query_vals, n_query_cols)<0)
 			{
 				LM_ERR( "in sql delete\n");
@@ -1013,7 +1008,7 @@ int pres_update_status(subs_t subs, str reason, db_key_t* query_cols,
 		}
 		else
 		{
-			CON_PS_REFERENCE(pa_db) = &my_upd_ps;
+			CON_SET_CURR_PS(pa_db, &my_upd_ps);
 			if(pa_dbf.update(pa_db, query_cols, 0, query_vals, update_cols,
 						update_vals, n_query_cols, n_update_cols)< 0)
 			{
@@ -1024,12 +1019,12 @@ int pres_update_status(subs_t subs, str reason, db_key_t* query_cols,
 
 		/* save in the list all affected dialogs */
 		/* if status switches to terminated -> delete dialog */
-		if(update_pw_dialogs(&subs, subs.db_flag, subs_array)< 0)
+		if(update_pw_dialogs(subs, subs->db_flag, subs_array)< 0)
 		{
 			LM_ERR( "extracting dialogs from [watcher]=%.*s@%.*s to"
-				" [presentity]=%.*s\n",	subs.from_user.len, subs.from_user.s,
-				subs.from_domain.len, subs.from_domain.s, subs.pres_uri.len,
-				subs.pres_uri.s);
+				" [presentity]=%.*s\n",	subs->from_user.len, subs->from_user.s,
+				subs->from_domain.len, subs->from_domain.s, subs->pres_uri.len,
+				subs->pres_uri.s);
 			return -1;
 		}
 	}
@@ -1073,8 +1068,7 @@ int pres_db_delete_status(subs_t* s)
 	query_vals[n_query_cols].val.str_val= s->from_domain;
 	n_query_cols++;
 
-	CON_PS_REFERENCE(pa_db) = &my_ps;
-
+	CON_SET_CURR_PS(pa_db, &my_ps);
 	if(pa_dbf.delete(pa_db, query_cols, 0, query_vals, n_query_cols)< 0)
 	{
 		LM_ERR("sql delete failed\n");
@@ -1181,7 +1175,7 @@ int update_watchers_status(str pres_uri, pres_ev_t* ev, str* rules_doc)
 		goto done;
 	}
 
-//	CON_PS_REFERENCE(pa_db) = &my_ps;
+//	CON_SET_CURR_PS(pa_db, &my_ps);
 	if(pa_dbf.query(pa_db, query_cols, 0, query_vals, result_cols,n_query_cols,
 				n_result_cols, 0, &result)< 0)
 	{
@@ -1275,7 +1269,7 @@ int update_watchers_status(str pres_uri, pres_ev_t* ev, str* rules_doc)
 			subs.status = ws_list[i].status;
 			memset(&subs.reason, 0, sizeof(str));
 
-			if( pres_update_status(subs, reason, query_cols, query_vals,
+			if( pres_update_status(&subs, reason, query_cols, query_vals,
 					n_query_cols, &subs_array)< 0)
 			{
 				LM_ERR("failed to update watcher status\n");
@@ -1318,7 +1312,7 @@ int update_watchers_status(str pres_uri, pres_ev_t* ev, str* rules_doc)
 		subs.status= status;
 		memset(&subs.reason, 0, sizeof(str));
 
- 		if( pres_update_status(subs,reason, query_cols, query_vals,
+		if( pres_update_status(&subs,reason, query_cols, query_vals,
 					n_query_cols, &subs_array)< 0)
 		{
 			LM_ERR("failed to update watcher status\n");

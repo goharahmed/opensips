@@ -46,10 +46,9 @@ static int mod_init(void);
 /*
  * PostgreSQL database module interface
  */
-
-static cmd_export_t cmds[]={
-	{"db_bind_api",     (cmd_function)db_postgres_bind_api,     0, 0, 0, 0},
-	{0,0,0,0,0,0}
+static cmd_export_t cmds[] = {
+	{"db_bind_api",     (cmd_function)db_postgres_bind_api, {{0,0,0}},0},
+	{0,0,{{0,0,0}},0}
 };
 
 /*
@@ -77,6 +76,7 @@ struct module_exports exports = {
 	MOD_TYPE_SQLDB,  /* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	&deps,           /* OpenSIPS module dependencies */
 	cmds,            /*  module functions */
 	0,               /*  module async functions */
@@ -86,10 +86,12 @@ struct module_exports exports = {
 	0,               /* exported pseudo-variables */
 	0,				 /* exported transformations */
 	0,               /* extra processes */
+	0,               /* module pre-initialization function */
 	mod_init,        /* module initialization function */
 	0,               /* response function*/
 	0,               /* destroy function */
-	0                /* per-child init function */
+	0,               /* per-child init function */
+	0                /* reload confirm function */
 };
 
 

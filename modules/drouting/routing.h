@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2005-2008 Voice Sistem SRL
+ * Copyright (C) 2020 OpenSIPS Solutions
  *
  * This file is part of Open SIP Server (OpenSIPS).
  *
@@ -16,27 +17,17 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
- *
- * For any questions about this software and its license, please contact
- * Voice Sistem at following e-mail address:
- *         office@voice-system.ro
- *
- * History:
- * ---------
- *  2005-02-20  first version (cristian)
- *  2005-02-27  ported to 0.9.0 (bogdan)
  */
-
 
 #ifndef routing_h
 #define routing_h
 
 #include "../../str.h"
 #include "../../usr_avp.h"
-#include "../../time_rec.h"
 #include "../../mem/mem.h"
-#include "prefix_tree.h"
 #include "../../map.h"
+
+#include "prefix_tree.h"
 
 #define RG_HASH_SIZE
 #define RG_INIT_LEN 4
@@ -66,6 +57,14 @@ typedef struct rt_data_ {
 	ptree_t *pt;
 }rt_data_t;
 
+typedef struct _dr_group {
+	/* 0 - use grp ; 1 - use AVP */
+	int type;
+	union {
+		unsigned int grp_id;
+		int avp_name;
+	}u;
+} dr_group_t;
 
 struct head_cache_socket {
 	str host;
@@ -93,6 +92,7 @@ int
 add_carrier(
 	char *id,
 	int flags,
+	char *sort_alg,
 	char *gwlist,
 	char *attrs,
 	int state,
@@ -132,11 +132,13 @@ rt_info_t*
 build_rt_info(
 	int id,
 	int priority,
-	tmrec_t* time,
-	/* ser routing table id */
-	int route_id,
+	tmrec_expr *time,
+	/* name of the script route */
+	char* route_idx,
 	/* list of destinations indexes */
 	char* dstlst,
+	char* sort_alg,
+	int sort_profile,
 	char* attr,
 	rt_data_t* rd,
 	osips_malloc_f mf,

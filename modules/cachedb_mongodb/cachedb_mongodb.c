@@ -18,6 +18,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  */
 
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -32,6 +34,7 @@
 #include "../../error.h"
 #include "../../pt.h"
 #include "../../cachedb/cachedb.h"
+#include "../../ssl_init_tweaks.h"
 
 #include "cachedb_mongodb_dbase.h"
 #include "cachedb_mongodb_json.h"
@@ -41,7 +44,7 @@ static int child_init(int);
 static void destroy(void);
 
 static str cache_mod_name = str_init("mongodb");
-struct cachedb_url *mongodb_script_urls = NULL;
+struct cachedb_url *mongodb_script_urls;
 
 int mongo_exec_threshold=0;
 
@@ -65,7 +68,7 @@ static dep_export_t deps = {
 	{ /* OpenSIPS module dependencies */
 
 		/* tls_mgm must init TLS first, since it also sets custom alloc func */
-		{ MOD_TYPE_DEFAULT, "tls_mgm", DEP_SILENT },
+		{ MOD_TYPE_DEFAULT, "tls_openssl", DEP_SILENT },
 		{ MOD_TYPE_NULL, NULL, 0 },
 	},
 	{ /* modparam dependencies */
@@ -79,6 +82,7 @@ struct module_exports exports= {
 	MOD_TYPE_CACHEDB,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,			/* dlopen flags */
+	0,							/* load function */
 	&deps,            /* OpenSIPS module dependencies */
 	0,						/* exported functions */
 	0,						/* exported async functions */
@@ -88,10 +92,12 @@ struct module_exports exports= {
 	0,							/* exported pseudo-variables */
 	0,							/* exported transformations */
 	0,							/* extra processes */
+	0,							/* module pre-initialization function */
 	mod_init,					/* module initialization function */
 	(response_function) 0,      /* response handling function */
 	(destroy_function)destroy,	/* destroy function */
-	child_init			        /* per-child init function */
+	child_init,			        /* per-child init function */
+	0							/* reload confirm function */
 };
 
 
@@ -115,6 +121,7 @@ static int mod_init(void)
 	cde.cdb_func.get_counter = mongo_con_get_counter;
 	cde.cdb_func.set = mongo_con_set;
 	cde.cdb_func.remove = mongo_con_remove;
+	cde.cdb_func._remove = _mongo_con_remove;
 	cde.cdb_func.add = mongo_con_add;
 	cde.cdb_func.sub = mongo_con_sub;
 	cde.cdb_func.query = mongo_con_query;
@@ -140,12 +147,8 @@ static int child_init(int rank)
 	struct cachedb_url *it;
 	cachedb_con *con;
 
-	if(rank == PROC_MAIN || rank == PROC_TCP_MAIN) {
-		return 0;
-	}
-
 	for (it = mongodb_script_urls;it;it=it->next) {
-		LM_DBG("iterating through conns - [%.*s]\n",it->url.len,it->url.s);
+		LM_DBG("iterating through conns - [%s]\n", db_url_escape(&it->url));
 		con = mongo_con_init(&it->url);
 		if (con == NULL) {
 			LM_ERR("failed to open connection\n");

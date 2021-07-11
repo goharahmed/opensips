@@ -296,7 +296,8 @@ static int db_mysql_submit_query(const db_con_t* _h, const str* _s)
 	for (i=0; i<max_db_queries; i++) {
 		start_expire_timer(start,db_mysql_exec_query_threshold);
 		code = wrapper_single_mysql_real_query(_h, _s);
-		stop_expire_timer(start,db_mysql_exec_query_threshold,"mysql query",_s->s,_s->len,0);
+		_stop_expire_timer(start, db_mysql_exec_query_threshold, "mysql query",
+		            _s->s, _s->len, 0, sql_slow_queries, sql_total_queries);
 		if (code < 0) {
 			/* got disconnected during call */
 			switch_state_to_disconnected(_h);
@@ -602,7 +603,8 @@ static int db_mysql_do_prepared_query(const db_con_t* conn, const str *query,
 		/* get a new context */
 		ctx = get_new_stmt_ctx(conn, query);
 		if (ctx==NULL) {
-			LM_ERR("failed to create new context\n");
+			LM_ERR("failed to create new context for query=|%.*s|\n",
+					query->len, query->s);
 			pkg_free(pq_ptr);
 			return -1;
 		}
@@ -627,7 +629,8 @@ static int db_mysql_do_prepared_query(const db_con_t* conn, const str *query,
 			/* get a new context */
 			ctx = get_new_stmt_ctx(conn, query);
 			if (ctx==NULL) {
-				LM_ERR("failed to create new context\n");
+				LM_ERR("failed to create new context for query=|%.*s|\n",
+						query->len, query->s);
 				return -1;
 			}
 			/* link it */
@@ -718,7 +721,8 @@ static int db_mysql_do_prepared_query(const db_con_t* conn, const str *query,
 
 		start_expire_timer(start,db_mysql_exec_query_threshold);
 		code = wrapper_single_mysql_stmt_execute(conn, ctx->stmt);
-		stop_expire_timer(start,db_mysql_exec_query_threshold,"mysql prep stmt",query->s,query->len,0);
+		_stop_expire_timer(start, db_mysql_exec_query_threshold, "mysql prep stmt",
+		        query->s, query->len, 0, sql_slow_queries, sql_total_queries);
 		if (code < 0) {
 			/* got disconnected during call */
 			switch_state_to_disconnected(conn);
@@ -756,9 +760,12 @@ static int db_mysql_do_prepared_query(const db_con_t* conn, const str *query,
 		LM_DBG("prepared statement has %d columns in result\n",cols);
 		/* set the out bind array ? */
 		if (pq_ptr->cols_out==-1) {
+			char *col_bufs;
+
 			pq_ptr->cols_out = cols;
 			pq_ptr->bind_out = (MYSQL_BIND*)pkg_malloc
-				( cols*(sizeof(struct bind_ocontent) + sizeof(MYSQL_BIND)) );
+				( cols*(sizeof(struct bind_ocontent) + sizeof(MYSQL_BIND)
+			            + ps_max_col_size) );
 			if (pq_ptr->bind_out==NULL) {
 				db_mysql_free_pq(pq_ptr);
 				CON_CURR_PS(conn) = NULL;
@@ -766,15 +773,19 @@ static int db_mysql_do_prepared_query(const db_con_t* conn, const str *query,
 				return -1;
 			}
 			memset(pq_ptr->bind_out, 0 ,
-				cols*(sizeof(struct bind_ocontent) + sizeof(MYSQL_BIND)));
+				cols*(sizeof(struct bind_ocontent) + sizeof(MYSQL_BIND)
+			          + ps_max_col_size));
 
 			pq_ptr->out_bufs = (struct bind_ocontent*)(pq_ptr->bind_out+cols);
+			col_bufs = (char*)(pq_ptr->out_bufs+cols);
+
 			mysql_bind = pq_ptr->bind_out;
 			/* prepare the pointers */
-			for( i=0 ; i<pq_ptr->cols_out ; i++ ) {
-				mysql_bind[i].buffer =  pq_ptr->out_bufs[i].buf;
+			for( i=0 ; i<cols ; i++ ) {
+				mysql_bind[i].buffer = pq_ptr->out_bufs[i].buf
+				                     = col_bufs + i*ps_max_col_size;
 				mysql_bind[i].buffer_type = MYSQL_TYPE_STRING;
-				mysql_bind[i].buffer_length = PREP_STMT_VAL_LEN;
+				mysql_bind[i].buffer_length = ps_max_col_size;
 				mysql_bind[i].length = &pq_ptr->out_bufs[i].len;
 				mysql_bind[i].is_null = &pq_ptr->out_bufs[i].null;
 #if (MYSQL_VERSION_ID >= 50030)
@@ -866,15 +877,17 @@ static int db_mysql_store_result(const db_con_t* _h, db_res_t** _r)
 	if (!CON_HAS_PS(_h))
 		CON_RESULT(_h) = mysql_store_result(CON_CONNECTION(_h));
 	if (!CON_RESULT(_h)) {
-		if (mysql_field_count(CON_CONNECTION(_h)) == 0) {
-			(*_r)->col.n = 0;
-			(*_r)->n = 0;
-			goto done;
-		} else {
+		if (mysql_errno(CON_CONNECTION(_h)) > 0) {
 			LM_ERR("driver error: %s\n", mysql_error(CON_CONNECTION(_h)));
 			db_free_result(*_r);
 			*_r = 0;
 			return -3;
+		}
+
+		if (mysql_field_count(CON_CONNECTION(_h)) == 0) {
+			(*_r)->col.n = 0;
+			(*_r)->n = 0;
+			goto done;
 		}
 	}
 
@@ -963,15 +976,14 @@ int db_mysql_query(const db_con_t* _h, const db_key_t* _k, const db_op_t* _op,
 		}
 
 		ret = db_mysql_do_prepared_query(_h, &query_holder, _v, _n, NULL, 0);
+		CON_RESET_CURR_PS(_h);
 		if (ret != 0) {
-			CON_RESET_CURR_PS(_h);
 			if (_r)
 				*_r = NULL;
 			return ret;
 		}
 
 		ret = db_mysql_store_result(_h, _r);
-		CON_RESET_CURR_PS(_h);
 		return ret;
 	}
 	return db_do_query(_h, _k, _op, _v, _c, _n, _nc, _o, _r,
@@ -1012,17 +1024,20 @@ int db_mysql_fetch_result(const db_con_t* _h, db_res_t** _r, const int nrows)
 		if (!CON_HAS_PS(_h))
 			CON_RESULT(_h) = mysql_store_result(CON_CONNECTION(_h));
 		if (!CON_RESULT(_h)) {
-			if (mysql_field_count(CON_CONNECTION(_h)) == 0) {
-				(*_r)->col.n = 0;
-				(*_r)->n = 0;
-				return 0;
-			} else {
+			if (mysql_errno(CON_CONNECTION(_h)) > 0) {
 				LM_ERR("driver error: %s\n", mysql_error(CON_CONNECTION(_h)));
 				db_free_result(*_r);
 				*_r = 0;
 				return -3;
 			}
+
+			if (mysql_field_count(CON_CONNECTION(_h)) == 0) {
+				(*_r)->col.n = 0;
+				(*_r)->n = 0;
+				return 0;
+			}
 		}
+
 		if (db_mysql_get_columns(_h, *_r) < 0) {
 			LM_ERR("error while getting column names\n");
 			return -4;
@@ -1161,8 +1176,10 @@ int db_mysql_async_raw_query(db_con_t *_h, const str *_s, void **_priv)
 		} else {
 			code = wrapper_single_mysql_real_query(_h, _s);
 		}
-		stop_expire_timer(start, db_mysql_exec_query_threshold,
-						  "mysql async query", _s->s, _s->len, 0);
+		_stop_expire_timer(start, db_mysql_exec_query_threshold,
+				"mysql async query", _s->s, _s->len, 0,
+				sql_slow_queries, sql_total_queries);
+
 		if (code < 0) {
 			/* got disconnected during call */
 			switch_state_to_disconnected(_h);
@@ -1315,7 +1332,10 @@ int db_mysql_delete(const db_con_t* _h, const db_key_t* _k, const db_op_t* _o,
 		if (CON_HAS_UNINIT_PS(_h)||!has_stmt_ctx(_h,&(CON_MYSQL_PS(_h)->ctx))){
 			ret = db_do_delete(_h, _k, _o, _v, _n, db_mysql_val2str,
 				db_mysql_submit_dummy_query);
-			if (ret!=0) {CON_RESET_CURR_PS(_h);return ret;}
+			if (ret != 0) {
+				CON_RESET_CURR_PS(_h);
+				return ret;
+			}
 		}
 		ret = db_mysql_do_prepared_query(_h, &query_holder, _v, _n, NULL, 0);
 		CON_RESET_CURR_PS(_h);
@@ -1348,7 +1368,10 @@ int db_mysql_update(const db_con_t* _h, const db_key_t* _k, const db_op_t* _o,
 		if (CON_HAS_UNINIT_PS(_h)||!has_stmt_ctx(_h,&(CON_MYSQL_PS(_h)->ctx))){
 			ret = db_do_update(_h, _k, _o, _v, _uk, _uv, _n, _un,
 				db_mysql_val2str, db_mysql_submit_dummy_query);
-			if (ret!=0) {CON_RESET_CURR_PS(_h);return ret;}
+			if (ret != 0) {
+				CON_RESET_CURR_PS(_h);
+				return ret;
+			}
 		}
 		ret = db_mysql_do_prepared_query(_h, &query_holder, _uv, _un, _v, _n);
 		CON_RESET_CURR_PS(_h);
@@ -1375,7 +1398,10 @@ int db_mysql_replace(const db_con_t* _h, const db_key_t* _k, const db_val_t* _v,
 		if (CON_HAS_UNINIT_PS(_h)||!has_stmt_ctx(_h,&(CON_MYSQL_PS(_h)->ctx))){
 			ret = db_do_replace(_h, _k, _v, _n, db_mysql_val2str,
 				db_mysql_submit_dummy_query);
-			if (ret!=0) {CON_RESET_CURR_PS(_h);return ret;}
+			if (ret != 0) {
+				CON_RESET_CURR_PS(_h);
+				return ret;
+			}
 		}
 		ret = db_mysql_do_prepared_query(_h, &query_holder, _v, _n, NULL, 0);
 		CON_RESET_CURR_PS(_h);

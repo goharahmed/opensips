@@ -46,8 +46,8 @@ struct url *parse_url(const str *in, enum url_parse_flags opts, int pkg_dup)
 	str st, port;
 	struct url_host_list *last, *hostlist;
 	struct url_param_list *lastp, *paramlist;
-	struct str_list *hosts_db = NULL, *hosts_chunk = NULL, *hosts = NULL;
-	struct str_list *params, *rec;
+	str_list *hosts_db = NULL, *hosts_chunk = NULL, *hosts = NULL;
+	str_list *params, *rec;
 
 #define ENSURE_N_LEFT(n) \
 	do { \
@@ -145,8 +145,8 @@ struct url *parse_url(const str *in, enum url_parse_flags opts, int pkg_dup)
 	ENSURE_N_LEFT(1);
 
 	/* hosts[/database][?params] */
-	hosts_db = __parse_csv_record(&st, CSV_SIMPLE, '?');
-	hosts_chunk = __parse_csv_record(&hosts_db->s, CSV_SIMPLE, '/');
+	hosts_db = __parse_csv_record(&st, 0, '?');
+	hosts_chunk = __parse_csv_record(&hosts_db->s, 0, '/');
 
 	if (!hosts_chunk->s.s || hosts_chunk->s.len <= 0) {
 		LM_ERR("empty/missing \"host\" part in URL %.*s\n", in->len, in->s);
@@ -154,7 +154,7 @@ struct url *parse_url(const str *in, enum url_parse_flags opts, int pkg_dup)
 	}
 
 	/* host1[:port1][,host2[:port2]...]] */
-	hosts = _parse_csv_record(&hosts_chunk->s, CSV_SIMPLE);
+	hosts = parse_csv_record(&hosts_chunk->s);
 	if (hosts->next && !(opts & URL_ALLOW_EXTRA_HOSTS)) {
 		LM_ERR("multiple hosts not allowed in URL %.*s\n", in->len, in->s);
 		goto out_err;
@@ -216,7 +216,7 @@ struct url *parse_url(const str *in, enum url_parse_flags opts, int pkg_dup)
 	if (hosts_db->next &&
 	    hosts_db->next->s.s && hosts_db->next->s.len > 0) {
 
-		params = _parse_csv_record(&hosts_db->next->s, CSV_SIMPLE);
+		params = parse_csv_record(&hosts_db->next->s);
 		lastp = NULL;
 		for (rec = params; rec; rec = rec->next) {
 			paramlist = pkg_malloc(sizeof *paramlist);

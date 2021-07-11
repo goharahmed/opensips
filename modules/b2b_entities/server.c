@@ -48,7 +48,8 @@
  *	*/
 
 str* server_new(struct sip_msg* msg, str* local_contact,
-		b2b_notify_t b2b_cback, str* param)
+		b2b_notify_t b2b_cback, str *mod_name, str* param,
+		struct b2b_tracer *tracer)
 {
 	b2b_dlg_t* dlg;
 	unsigned int hash_index;
@@ -62,7 +63,7 @@ str* server_new(struct sip_msg* msg, str* local_contact,
 	}
 
 	/* create new entry in hash table */
-	dlg = b2b_new_dlg(msg, local_contact, 0, param);
+	dlg = b2b_new_dlg(msg, local_contact, 0, param, mod_name);
 	if( dlg == NULL )
 	{
 		LM_ERR("failed to create new dialog structure entry\n");
@@ -74,6 +75,7 @@ str* server_new(struct sip_msg* msg, str* local_contact,
 
 	dlg->state = B2B_NEW;
 	dlg->b2b_cback = b2b_cback;
+	dlg->tracer = tracer;
 
 	/* get the pointer to the tm transaction to store it the tuple record */
 	dlg->uas_tran = tmb.t_gett();
@@ -92,6 +94,10 @@ str* server_new(struct sip_msg* msg, str* local_contact,
 		}
 		dlg->uas_tran = tmb.t_gett();
 	}
+
+	/* start tracing for this transaction */
+	b2b_run_tracer( dlg, msg, dlg->uas_tran);
+
 	tmb.ref_cell(dlg->uas_tran);
 	tmb.t_setkr(REQ_FWDED);
 
@@ -102,7 +108,7 @@ str* server_new(struct sip_msg* msg, str* local_contact,
 
 	/* add the record in hash table */
 	dlg->db_flag = INSERTDB_FLAG;
-	return b2b_htable_insert(server_htable, dlg, hash_index, B2B_SERVER, 0);
+	return b2b_htable_insert(server_htable, dlg, hash_index, 0, B2B_SERVER, 0, 1);
 error:
 	if(dlg)
 		shm_free(dlg);

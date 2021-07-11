@@ -33,10 +33,10 @@ struct dlg_binds srec_dlg;
 static str srec_dlg_name = str_init("siprecX_ctx");
 
 static struct src_sess *src_create_session(str *rtp, str *m_ip, str *grp,
-		struct socket_info *si, int version, time_t ts, siprec_uuid *uuid)
+		struct socket_info *si, int version, time_t ts, str *hdrs, siprec_uuid *uuid)
 {
 	struct src_sess *ss = shm_malloc(sizeof *ss + (rtp ? rtp->len : 0) +
-			(m_ip ? m_ip->len : 0) + (grp ? grp->len : 0));
+			(m_ip ? m_ip->len : 0) + (grp ? grp->len : 0) + (hdrs ? hdrs->len : 0));
 	if (!ss) {
 		LM_ERR("not enough memory for creating siprec session!\n");
 		return NULL;
@@ -63,6 +63,13 @@ static struct src_sess *src_create_session(str *rtp, str *m_ip, str *grp,
 		memcpy(ss->group.s, grp->s, grp->len);
 		ss->group.len = grp->len;
 	}
+
+	if (hdrs && hdrs->len) {
+		ss->headers.s = (char *)(ss + 1) + ss->rtpproxy.len + ss->media_ip.len +
+			ss->group.len;
+		memcpy(ss->headers.s, hdrs->s, hdrs->len);
+		ss->headers.len = hdrs->len;
+	}
 	memcpy(ss->uuid, uuid, sizeof(*uuid));
 	ss->participants_no = 0;
 	ss->ts = ts;
@@ -71,12 +78,15 @@ static struct src_sess *src_create_session(str *rtp, str *m_ip, str *grp,
 
 	lock_init(&ss->lock);
 	ss->ref = 0;
+#ifdef DBG_SIPREC_HIST
+	ss->hist = sh_push(ss, srec_hist);
+#endif
 
 	return ss;
 }
 
 struct src_sess *src_new_session(str *srs, str *rtp, str *m_ip, str *grp,
-		struct socket_info *si)
+		str *hdrs, struct socket_info *si)
 {
 	struct src_sess *sess;
 	struct srs_node *node;
@@ -86,7 +96,7 @@ struct src_sess *src_new_session(str *srs, str *rtp, str *m_ip, str *grp,
 	siprec_uuid uuid;
 	siprec_build_uuid(uuid);
 
-	sess = src_create_session(rtp, m_ip, grp, si, 0, time(NULL), &uuid);
+	sess = src_create_session(rtp, m_ip, grp, si, 0, time(NULL), hdrs, &uuid);
 	if (!sess)
 		return NULL;
 
@@ -136,11 +146,6 @@ void src_free_participant(struct src_part *part)
 		shm_free(part->xml_val.s);
 }
 
-void src_unref_session(void *p)
-{
-	SIPREC_UNREF((struct src_sess *)p);
-}
-
 void src_free_session(struct src_sess *sess)
 {
 	int p;
@@ -148,6 +153,7 @@ void src_free_session(struct src_sess *sess)
 
 	/* extra check here! */
 	if (sess->ref != 0) {
+		srec_hlog(sess, SREC_DESTROY, "error destroying");
 		LM_BUG("freeing session=%p with ref=%d\n", sess, sess->ref);
 		return;
 	}
@@ -161,12 +167,20 @@ void src_free_session(struct src_sess *sess)
 		shm_free(node);
 	}
 	srec_logic_destroy(sess);
+	if (sess->dlg)
+		srec_dlg.dlg_ctx_put_ptr(sess->dlg, srec_dlg_idx, NULL);
 	lock_destroy(&sess->lock);
+#ifdef DBG_SIPREC_HIST
+	srec_hlog(sess, SREC_DESTROY, "successful destroying");
+	sh_flush(sess->hist);
+	sh_unref(sess->hist);
+	sess->hist = NULL;
+#endif
 	shm_free(sess);
 }
 
 int src_add_participant(struct src_sess *sess, str *aor, str *name,
-					str *xml_val, siprec_uuid *uuid)
+					str *xml_val, siprec_uuid *uuid, time_t *start)
 {
 	struct src_part *part;
 	if (sess->participants_no >= SRC_MAX_PARTICIPANTS) {
@@ -211,6 +225,10 @@ int src_add_participant(struct src_sess *sess, str *aor, str *name,
 			memcpy(part->name.s, name->s, name->len);
 		}
 	}
+	if (start)
+		part->ts = *start;
+	else
+		part->ts = time(NULL);
 
 	sess->participants_no++;
 
@@ -222,7 +240,6 @@ int src_add_participant(struct src_sess *sess, str *aor, str *name,
 		if (bin_pop_##_type(&packet, _value) < 0) { \
 			LM_ERR("cannot pop '" #_value "' from bin packet!\n"); \
 			goto error; \
-			return; \
 		} \
 	} while (0)
 
@@ -236,11 +253,12 @@ void srec_loaded_callback(struct dlg_cell *dlg, int type,
 	int version;
 	time_t ts;
 	str tmp, rtpproxy, media_ip, srs_uri, group, host;
-	str aor, name, *xml_val;
+	str aor, name, xml_val, *xml;
 	siprec_uuid uuid;
 	struct socket_info *si;
 	int p, port, proto, c, label, medianum;
 	int p_type;
+	int flags;
 
 	if (!dlg) {
 		LM_ERR("null dialog - cannot fetch siprec info!\n");
@@ -267,6 +285,7 @@ void srec_loaded_callback(struct dlg_cell *dlg, int type,
 	}
 	memcpy(&ts, tmp.s, tmp.len);
 	SIPREC_BIN_POP(int, &version);
+	SIPREC_BIN_POP(int, &flags);
 	SIPREC_BIN_POP(str, &rtpproxy);
 	SIPREC_BIN_POP(str, &media_ip);
 	SIPREC_BIN_POP(str, &srs_uri);
@@ -297,11 +316,12 @@ void srec_loaded_callback(struct dlg_cell *dlg, int type,
 
 	sess = src_create_session((rtpproxy.len ? &rtpproxy : NULL),
 			(media_ip.len ? &media_ip : NULL), (group.len ? &group : NULL),
-			si, version, ts, &uuid);
+			si, version, ts, NULL /* we do not replicate headers */, &uuid);
 	if (!sess) {
 		LM_ERR("cannot create a new siprec session!\n");
 		return;
 	}
+	sess->flags = flags;
 
 	node = shm_malloc(sizeof(*node) + srs_uri.len);
 	if (!node) {
@@ -345,16 +365,18 @@ void srec_loaded_callback(struct dlg_cell *dlg, int type,
 	}
 	memcpy(sess->b2b_callid.s, tmp.s, tmp.len);
 	sess->b2b_callid.len = tmp.len;
+	SIPREC_BIN_POP(int, &sess->streams_inactive);
 
 	SIPREC_BIN_POP(int, &p);
 	for (; p > 0; p--) {
 		SIPREC_BIN_POP(int, &p_type); /* actual xml val or nameaddr ? */
-		if (p_type == 0)
-			SIPREC_BIN_POP(str, xml_val);
-		else {
+		if (p_type == 0) {
+			SIPREC_BIN_POP(str, &xml_val);
+			xml = &xml_val;
+		} else {
 			SIPREC_BIN_POP(str, &aor);
 			SIPREC_BIN_POP(str, &name);
-			xml_val = NULL;
+			xml = NULL;
 		}
 		SIPREC_BIN_POP(str, &tmp);
 		if (tmp.len != sizeof(siprec_uuid)) {
@@ -363,7 +385,14 @@ void srec_loaded_callback(struct dlg_cell *dlg, int type,
 			goto error;
 		}
 		memcpy(&uuid, tmp.s, tmp.len);
-		if (src_add_participant(sess, &aor, &name, xml_val, &uuid) < 0) {
+		SIPREC_BIN_POP(str, &tmp);
+		if (tmp.len != sizeof(ts)) {
+			LM_ERR("invalid length for timestamp (%d != %d)\n", tmp.len,
+					(int)sizeof(ts));
+			return;
+		}
+		memcpy(&ts, tmp.s, tmp.len);
+		if (src_add_participant(sess, &aor, &name, xml, &uuid, &ts) < 0) {
 			LM_ERR("cannot add new participant!\n");
 			goto error;
 		}
@@ -395,10 +424,13 @@ void srec_loaded_callback(struct dlg_cell *dlg, int type,
 
 	/* all good: continue with dialog support! */
 	SIPREC_REF(sess);
+	srec_hlog(sess, SREC_REF, "registered dlg");
 	sess->dlg = dlg;
+	srec_dlg.dlg_ctx_put_ptr(dlg, srec_dlg_idx, sess);
 
 	if (srec_register_callbacks(sess) < 0) {
 		LM_ERR("cannot register callback for terminating session\n");
+		srec_hlog(sess, SREC_UNREF, "error registering dlg callbacks");
 		SIPREC_UNREF(sess);
 		goto error;
 	}
@@ -454,6 +486,7 @@ void srec_dlg_write_callback(struct dlg_cell *dlg, int type,
 
 	SIPREC_BIN_PUSH(str, SIPREC_SERIALIZE(ss->ts));
 	SIPREC_BIN_PUSH(int, ss->version);
+	SIPREC_BIN_PUSH(int, ss->flags);
 	SIPREC_BIN_PUSH(str, &ss->rtpproxy);
 	SIPREC_BIN_PUSH(str, &ss->media_ip);
 	/* push only the first SRS - this is the one chosen */
@@ -468,7 +501,7 @@ void srec_dlg_write_callback(struct dlg_cell *dlg, int type,
 	SIPREC_BIN_PUSH(str, &ss->b2b_fromtag);
 	SIPREC_BIN_PUSH(str, &ss->b2b_totag);
 	SIPREC_BIN_PUSH(str, &ss->b2b_callid);
-	SIPREC_BIN_PUSH(str, &ss->b2b_callid);
+	SIPREC_BIN_PUSH(int, ss->streams_inactive);
 	SIPREC_BIN_PUSH(int, ss->participants_no);
 
 	for (p = 0; p < ss->participants_no; p++) {
@@ -483,6 +516,7 @@ void srec_dlg_write_callback(struct dlg_cell *dlg, int type,
 			SIPREC_BIN_PUSH(str, &ss->participants[p].name);
 		}
 		SIPREC_BIN_PUSH(str, SIPREC_SERIALIZE(ss->participants[p].uuid));
+		SIPREC_BIN_PUSH(str, SIPREC_SERIALIZE(ss->participants[p].ts));
 		/* count the number of sessions */
 		c = 0;
 		list_for_each(l, &ss->participants[p].streams)

@@ -1,5 +1,7 @@
-#aaa_radius= Radius implementation for the AAA API from the core | Radius client development library, typically radiusclient-ng 0.5.0 or higher
-#b2b_logic= Logic engine of B2BUA, responsible of actually implementing the B2BUA services | xml parsing development library, typically libxml2-dev
+#aaa_diameter= Diameter implementation for the core AAA API | freeDiameter (libfdcore + libfdproto) v1.2.1 or higher
+#aaa_radius= Radius implementation for the core AAA API | Radius client development library, typically radiusclient-ng 0.5.0 or higher
+#auth_jwt= JWT auth support | JWT client development library, libjwt-dev
+#b2b_logic_xml= Logic engine of B2BUA, responsible of actually implementing the B2BUA services | xml parsing development library, typically libxml2-dev
 #cachedb_cassandra= Implementation of a cache system designed to work with Cassandra servers | thrift 0.6.1
 #cachedb_couchbase= Implementation of a cache system designed to work with CouchBase servers | libcouchbase >= 2.0
 #cachedb_memcached= Implementation of a cache system designed to work with a memcached server. | Memcached client library, typically libmemcached
@@ -20,6 +22,7 @@
 #dialplan= Implements generic string translations based on matching and replacement rules | PCRE development library, typically libpcre-dev
 #emergency= Provides emergency call treatment for OpenSIPS | CURL dev library - typically libcurl4-openssl-dev
 #event_rabbitmq= Provides the implementation of a RabbitMQ client for the Event Interface | RabbitMQ development library, librabbitmq-dev
+#event_kafka= Provides the implementation of an Apache Kafka producer for the Event Interface | Kafka development library, librdkafka-dev
 #h350= Enables access to SIP account data stored in an LDAP [RFC4510] directory containing H.350 commObjects | OpenLDAP library & development files, typically libldap and libldap-dev
 #regex= Offers matching operations against regular expressions using the powerful PCRE library. | Development library for PCRE, typically libpcre-dev
 #identity= Adds support for SIP Identity (see RFC 4474). | SSL library, typically libssl
@@ -34,6 +37,7 @@
 #perl= Easily implement your own OpenSIPS extensions in Perl | Perl library development files, typically libperl-dev
 #pi_http= Provides a simple web database provisioning interface | XML parsing & building library, typically libxml-dev
 #rabbitmq= Provides functions to publish messages to a RabbitMQ server | RabbitMQ development library, librabbitmq-dev
+#rabbitmq_consumer= Receive AMQP messages which will be delivered by triggering events | RabbitMQ development library, librabbitmq-dev
 #proto_sctp= Provides support for SCTP listeners in OpenSIPS | SCTP development library, typically libsctp-dev
 #proto_tls= Provides support for TLS listeners in OpenSIPS | SSL development library, typically libssl-dev
 #proto_wss= Provides support for Secure WebSocket listeners in OpenSIPS | SSL development library, typically libssl-dev
@@ -41,6 +45,7 @@
 #presence_dialoginfo= Enables the handling of "Event: dialog" (as defined in RFC 4235) |  XML parsing & building library, typically libxml-dev
 #presence_mwi= Does specific handling for notify-subscribe message-summary (message waiting indication) events as specified in RFC 3842 | XML parsing & building library, typically libxml-dev
 #presence_xml= Does specific handling for notify-subscribe events using xml bodies. | XML parsing & building library, typically libxml-dev
+#presence_dfks = Does specific handling for DFKS (as-feature-event) events. | XML parsing & building library, typically libxml-dev
 #pua= Offers the functionality of a presence user agent client, sending Subscribe and Publish messages. | XML parsing & building library, typically libxml-dev
 #pua_bla= Enables Bridged Line Appearances support according | XML parsing & building library, typically libxml-dev
 #pua_dialoginfo= Retrieves dialog state information from the dialog module and PUBLISHes the dialog-information using the pua module. | XML parsing & building library,typically libxml-dev
@@ -58,41 +63,42 @@
 #xcap_client= XCAP client for OpenSIPS.It fetches XCAP elements, either documents or part of them, by sending HTTP GET requests | libxml-dev and libcurl-dev
 #xml= Introduces a new type of variable that provides both serialization and de-serialization from XML format. | XML library, libxml2-dev
 #xmpp= Gateway between OpenSIPS and a jabber server. It enables the exchange of IMs between SIP clients and XMPP(jabber) clients. | parsing/building XML files, typically libexpat1-devel
+#uuid= UUID generator | uuid-dev
 
-exclude_modules?= aaa_radius b2b_logic cachedb_cassandra cachedb_couchbase cachedb_memcached cachedb_mongodb cachedb_redis carrierroute cgrates compression cpl_c db_berkeley db_http db_mysql db_oracle db_perlvdb db_postgres db_sqlite db_unixodbc dialplan emergency event_rabbitmq h350 httpd identity jabber json ldap lua mi_xmlrpc_ng mmgeoip osp perl pi_http presence presence_dialoginfo presence_mwi presence_xml proto_sctp proto_tls proto_wss pua pua_bla pua_dialoginfo pua_mi pua_usrloc pua_xmpp python regex rabbitmq rest_client rls siprec sngtc snmpstats tls_mgm xcap xcap_client xml xmpp
+exclude_modules?= aaa_diameter aaa_radius auth_jwt b2b_logic_xml cachedb_cassandra cachedb_couchbase cachedb_memcached cachedb_mongodb cachedb_redis carrierroute cgrates compression cpl_c db_berkeley db_http db_mysql db_oracle db_perlvdb db_postgres db_sqlite db_unixodbc dialplan emergency event_rabbitmq event_kafka h350 httpd identity jabber json ldap lua mi_xmlrpc_ng mmgeoip osp perl pi_http presence presence_dialoginfo presence_mwi presence_xml presence_dfks proto_sctp proto_tls proto_wss pua pua_bla pua_dialoginfo pua_mi pua_usrloc pua_xmpp python regex rabbitmq rabbitmq_consumer rest_client rls siprec sngtc snmpstats stir_shaken tls_mgm tls_openssl tls_wolfssl uuid xcap xcap_client xml xmpp
 
 include_modules?=
 
-DEFS+= -DPKG_MALLOC #Uses a faster malloc
+DEFS+= -DPKG_MALLOC #Use a faster malloc
 DEFS+= -DSHM_MMAP #Use mmap instead of SYSV shared memory
 DEFS+= -DUSE_MCAST #Compile in support for IP Multicast
-DEFS+= -DDISABLE_NAGLE #Disabled the TCP NAgle Algorithm ( lower delay )
-DEFS+= -DSTATISTICS #Enables the statistics manager
+DEFS+= -DDISABLE_NAGLE #Disable the TCP NAgle Algorithm ( lower delay )
+DEFS+= -DSTATISTICS #Enable the statistics manager
 DEFS+= -DHAVE_RESOLV_RES #Support for changing some of the resolver parameters
 # Specifying exactly 1 allocator will cause it to be inlined (fastest)
 DEFS+= -DF_MALLOC #Fast memory allocator with minimal runtime overhead
 DEFS+= -DQ_MALLOC #Quality assurance memory allocator with runtime safety checks
 DEFS+= -DHP_MALLOC #High performance allocator with fine-grained locking
 DEFS+= -DDBG_MALLOC #Include additional, debug-enabled allocator flavors
-#DEFS+= -DNO_DEBUG #Turns off all debug messages
-#DEFS+= -DNO_LOG #Completely turns off all the logging
+#DEFS+= -DNO_DEBUG #Compile out all debug messages
+#DEFS+= -DNO_LOG #Compile out all logging
 #DEFS_GROUP_START
-#DEFS+= -DFAST_LOCK #Uses fast architecture specific locking
-#DEFS+= -DUSE_SYSV_SEM #Uses SYSV sems for locking ( slower & limited number of locks
-#DEFS+= -DUSE_PTHREAD_MUTEX #Uses pthread mutexes for locking
-#DEFS+= -DUSE_UMUTEX #Uses FreeBSD-specific low-level mutexes for locking
-#DEFS+= -DUSE_POSIX_SEM #Uses POSIX sems for locking
+#DEFS+= -DFAST_LOCK #Use fast architecture specific locking
+#DEFS+= -DUSE_SYSV_SEM #Use SYSV sems for locking ( slower & limited number of locks
+#DEFS+= -DUSE_PTHREAD_MUTEX #Use pthread mutexes for locking
+#DEFS+= -DUSE_UMUTEX #Use FreeBSD-specific low-level mutexes for locking
+#DEFS+= -DUSE_POSIX_SEM #Use POSIX sems for locking
 #DEFS_GROUP_END
-#DEFS+= -DUSE_FUTEX #Uses linux futexes with fast architecture specific locking
-#DEFS+= -DBUSY_WAIT #Uses busy waiting on the lock
+#DEFS+= -DUSE_FUTEX #Use linux futexes with fast architecture specific locking
+#DEFS+= -DBUSY_WAIT #Use busy waiting on the lock
 #DEFS+= -DDBG_LOCK #Attach debug info to all lock structures
 #DEFS+= -DDBG_STRUCT_HIST #Include support for struct history logging
 #DEFS+= -DDBG_TCPCON #Attach struct history info to all TCP connections
 #DEFS+= -DNOSMP #Do not use SMP compliant locking. Faster but won't work on SMP machines
-#DEFS+= -DEXTRA_DEBUG #Compiles in some extra debugging code
+#DEFS+= -DEXTRA_DEBUG #Compile in some extra debugging code
 DEFS+= -DCC_O0 #Zero compiler optimizations (FAST compile, SLOW code. For devs)
-#DEFS+= -DORACLE_USRLOC #Uses Oracle compatible queries for USRLOC
-#DEFS+= -DSHM_EXTRA_STATS #Provides tools to get extra statistics for the shared memory used
+#DEFS+= -DORACLE_USRLOC #Use Oracle compatible queries for USRLOC
+#DEFS+= -DSHM_EXTRA_STATS #Provide tools to get extra statistics for the shared memory used
 #DEFS+= -DUNIT_TESTS #Include unit testing code into opensips and modules
 
 PREFIX ?= /usr/local/

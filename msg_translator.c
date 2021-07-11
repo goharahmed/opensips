@@ -394,6 +394,16 @@ static inline int lump_check_opt(	struct lump *l,
 			}
 			l->flags |= LUMPFLAG_COND_TRUE;
 			return 1;
+		case COND_IF_SAME_REALMS:
+			get_ip_port_proto;
+			/* faster tests first */
+			if ((port!=snd_s->port_no)||(proto!=snd_s->proto)||
+				(!ip_addr_cmp(ip, &snd_s->address))) {
+				l->flags &= ~LUMPFLAG_COND_TRUE;
+				return 0;
+			}
+			l->flags |= LUMPFLAG_COND_TRUE;
+			return 1;
 		case COND_IF_DIFF_AF:
 			get_ip_port_proto;
 			if (ip->af==snd_s->address.af) {
@@ -597,8 +607,8 @@ int lumps_len(struct sip_msg* msg, struct lump* lumps,
 		send_address_str=&(send_sock->adv_name_str);
 	else if (msg->set_global_address.s)
 		send_address_str=&(msg->set_global_address);
-	else if (default_global_address.s)
-		send_address_str=&default_global_address;
+	else if (default_global_address->s)
+		send_address_str=default_global_address;
 	else
 		send_address_str=&(send_sock->address_str);
 
@@ -606,8 +616,8 @@ int lumps_len(struct sip_msg* msg, struct lump* lumps,
 		send_port_str=&(send_sock->adv_port_str);
 	else if (msg->set_global_port.s)
 		send_port_str=&(msg->set_global_port);
-	else if (default_global_port.s)
-		send_port_str=&default_global_port;
+	else if (default_global_port->s)
+		send_port_str=default_global_port;
 	else
 		send_port_str=&(send_sock->port_no_str);
 
@@ -615,14 +625,14 @@ int lumps_len(struct sip_msg* msg, struct lump* lumps,
 	if(msg->rcv.bind_address) {
 		if(msg->rcv.bind_address->adv_name_str.len)
 			rcv_address_str=&(msg->rcv.bind_address->adv_name_str);
-		else if (default_global_address.s)
-			rcv_address_str=&default_global_address;
+		else if (default_global_address->s)
+			rcv_address_str=default_global_address;
 		else
 			rcv_address_str=&(msg->rcv.bind_address->address_str);
 		if(msg->rcv.bind_address->adv_port_str.len)
 			rcv_port_str=&(msg->rcv.bind_address->adv_port_str);
-		else if (default_global_port.s)
-			rcv_port_str=&default_global_port;
+		else if (default_global_port->s)
+			rcv_port_str=default_global_port;
 		else
 			rcv_port_str=&(msg->rcv.bind_address->port_no_str);
 	}
@@ -1007,16 +1017,16 @@ void process_lumps(	struct sip_msg* msg,
 		send_address_str=&(send_sock->adv_name_str);
 	else if (msg->set_global_address.len)
 		send_address_str=&(msg->set_global_address);
-	else if (default_global_address.s)
-		send_address_str=&default_global_address;
+	else if (default_global_address->s)
+		send_address_str=default_global_address;
 	else
 		send_address_str=&(send_sock->address_str);
 	if(send_sock && send_sock->adv_port_str.len)
 		send_port_str=&(send_sock->adv_port_str);
 	else if (msg->set_global_port.len)
 		send_port_str=&(msg->set_global_port);
-	else if (default_global_port.s)
-		send_port_str=&default_global_port;
+	else if (default_global_port->s)
+		send_port_str=default_global_port;
 	else
 		send_port_str=&(send_sock->port_no_str);
 
@@ -1024,14 +1034,14 @@ void process_lumps(	struct sip_msg* msg,
 	if(msg->rcv.bind_address) {
 		if(msg->rcv.bind_address->adv_name_str.len)
 			rcv_address_str=&(msg->rcv.bind_address->adv_name_str);
-		else if (default_global_address.s)
-			rcv_address_str=&default_global_address;
+		else if (default_global_address->s)
+			rcv_address_str=default_global_address;
 		else
 			rcv_address_str=&(msg->rcv.bind_address->address_str);
 		if(msg->rcv.bind_address->adv_port_str.len)
 			rcv_port_str=&(msg->rcv.bind_address->adv_port_str);
-		else if (default_global_port.s)
-			rcv_port_str=&default_global_port;
+		else if (default_global_port->s)
+			rcv_port_str=default_global_port;
 		else
 			rcv_port_str=&(msg->rcv.bind_address->port_no_str);
 	}
@@ -1251,7 +1261,8 @@ static unsigned int prep_reassemble_body_parts( struct sip_msg* msg,
 	unsigned int size;
 	unsigned int len = 0;
 	unsigned int orig_offs;
-	char *hdr;
+	struct hdr_field hf;
+	char *hdr, *it;
 
 	/* set the offset (in the original buffer) at the beginning of the body */
 	orig_offs = msg->body->part_count ? msg->body->body.s-msg->buf : msg->len ;
@@ -1356,29 +1367,41 @@ static unsigned int prep_reassemble_body_parts( struct sip_msg* msg,
 						}
 					}
 				} else {
-					hdr = (char*)pkg_malloc( part->headers.len);
-					if (hdr==NULL) {
-						LM_ERR("failed to allocate new ct hdr\n");
-					} else {
-						memcpy( hdr, part->headers.s, part->headers.len);
-						if (insert_new_lump_before(ct, hdr,
-						part->headers.len, HDR_CONTENTTYPE_T) == NULL) {
-							LM_ERR("failed to create insert lump\n");
-							pkg_free(hdr);
+					/* iterate all the SIP hdrs from this part and keep all
+					 * except the "Content-Length" */
+					it = part->headers.s;
+					while ( it<part->headers.s+part->headers.len ) {
+						memset( &hf, 0, sizeof(struct hdr_field));
+						it = get_hdr_field( it, part->headers.s+part->headers.len, &hf);
+						if (hf.type==HDR_ERROR_T || hf.type==HDR_EOH_T)
+							break;
+						if (hf.type==HDR_CONTENTLENGTH_T)
+							continue;
+						/* add this hdr */
+						hdr = (char*)pkg_malloc( hf.len);
+						if (hdr==NULL) {
+							LM_ERR("failed to allocate new ct hdr\n");
+						} else {
+							memcpy( hdr, hf.name.s, hf.len);
+							if (insert_new_lump_before(ct, hdr,
+							hf.len, HDR_CONTENTTYPE_T) == NULL) {
+								LM_ERR("failed to create insert lump\n");
+								pkg_free(hdr);
+							}
 						}
 					}
 				}
 			}
 		} else
-		/* if it is an 1->1 keeping the part, try to preserve the
-		 * the packing (multi-part or not) of this part */
-		if ( (part->flags & SIP_BODY_PART_FLAG_NEW)==0 &&
-		msg->body->part_count==1 &&
-		msg->body->flags & SIP_BODY_RCV_MULTIPART) {
-			/* preserve the original multi-part packing by preserving
-			 * the before and after padding between part and body */
-			len += msg->body->body.len - part->body.len;
-		}
+			/* if it is an 1->1 keeping the part, try to preserve the
+			 * the packing (multi-part or not) of this part */
+			if ( (part->flags & SIP_BODY_PART_FLAG_NEW)==0 &&
+			msg->body->part_count==1 &&
+			msg->body->flags & SIP_BODY_RCV_MULTIPART) {
+				/* preserve the original multi-part packing by preserving
+				 * the before and after padding between part and body */
+				len += msg->body->body.len - part->body.len;
+			}
 
 	} else if (msg->body->part_count<2) {
 
@@ -2413,7 +2436,7 @@ error:
 }
 
 
-char * build_res_buf_from_sip_req( unsigned int code, str *text ,str *new_tag,
+char * build_res_buf_from_sip_req( unsigned int code, const str *text ,str *new_tag,
 		struct sip_msg* msg, unsigned int *returned_len, struct bookmark *bmark)
 {
 	char *buf, *p, *received_buf, *rport_buf, *warning_buf;
@@ -2507,7 +2530,7 @@ char * build_res_buf_from_sip_req( unsigned int code, str *text ,str *new_tag,
 	}
 	/* server header */
 	if (server_signature)
-		len += server_header.len + CRLF_LEN;
+		len += server_header->len + CRLF_LEN;
 	/* warning hdr */
 	if (sip_warning) {
 		warning_buf = warning_builder(msg,&warning_len);
@@ -2649,7 +2672,7 @@ char * build_res_buf_from_sip_req( unsigned int code, str *text ,str *new_tag,
 		}
 	/* server header */
 	if (server_signature) {
-		append_str( p, server_header.s, server_header.len);
+		append_str( p, server_header->s, server_header->len);
 		append_str( p, CRLF, CRLF_LEN );
 	}
 	/* content_length hdr */
@@ -2839,7 +2862,7 @@ char *construct_uri(str *protocol,str *username,str *domain,str *port,
 {
 	int pos = 0;
 
-	if (!protocol || !username || !domain || !port || !params || !len)
+	if (!len)
 	{
 		LM_ERR("null pointer provided for construct_uri \n");
 		return 0;
@@ -2861,7 +2884,7 @@ char *construct_uri(str *protocol,str *username,str *domain,str *port,
 	pos += protocol->len;
 	uri_buff[pos++] = ':';
 
-	if (username->s && username->len != 0)
+	if (username && username->s && username->len != 0)
 	{
 		memcpy(uri_buff+pos,username->s,username->len);
 		pos += username->len;
@@ -2871,14 +2894,14 @@ char *construct_uri(str *protocol,str *username,str *domain,str *port,
 	memcpy(uri_buff+pos,domain->s,domain->len);
 	pos += domain->len;
 
-	if (port->s && port->len !=0)
+	if (port && port->s && port->len !=0)
 	{
 		uri_buff[pos++] = ':';
 		memcpy(uri_buff+pos,port->s,port->len);
 		pos += port->len;
 	}
 
-	if (params->s && params->len !=0 )
+	if (params && params->s && params->len !=0 )
 	{
 		uri_buff[pos++] = ';';
 		memcpy(uri_buff+pos,params->s,params->len);

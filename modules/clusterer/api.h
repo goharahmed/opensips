@@ -39,6 +39,11 @@
 #define SHTAG_STATE_BACKUP 0
 #define SHTAG_STATE_ACTIVE 1
 
+/* values returned by shtag_get_sync_status_f and
+ * accepted by shtag_set_sync_status_f */
+#define SHTAG_SYNC_NOT_REQUIRED 0
+#define SHTAG_SYNC_REQUIRED 1
+
 enum cl_node_state {
 	STATE_DISABLED,	/* don't send any messages and drop received ones */
 	STATE_ENABLED
@@ -53,7 +58,7 @@ typedef struct clusterer_node {
 } clusterer_node_t;
 
 enum clusterer_send_ret {
-	CLUSTERER_SEND_SUCCES = 0,
+	CLUSTERER_SEND_SUCCESS = 0,
 	CLUSTERER_CURR_DISABLED = 1,  /* current node disabled */
 	CLUSTERER_DEST_DOWN = -1,     /* destination node(s) already down or probing */
 	CLUSTERER_SEND_ERR = -2       /* error */
@@ -90,7 +95,7 @@ typedef void (*free_nodes_f)(clusterer_node_t *list);
 /*
  * Set the state (enabled or disabled) of the current node in the cluster.
  */
-typedef int (*set_state_f)(int cluster_id, enum cl_node_state state);
+typedef int (*set_state_f)(int cluster_id, int node_id, enum cl_node_state state);
 
 /*
  * Check if the given address belongs to one of the nodes in the cluster.
@@ -166,19 +171,19 @@ typedef void (*cl_event_cb_f)(enum clusterer_event ev, int node_id);
  * Register a capability(grouping of BIN packets/cluster events used to
  * achieve a certain functionality).
  *
- * @require_sync: 1 - if successful data sync is required in order for
- * this capability to be in the OK state, 0 - otherwise
+ * @startup_sync: require a sync on startup (1), or just start this cap
+ *                in the OK state (0)
  * @sync_cond: only sync with certain types of nodes
  *             (useful for federated usrloc)
  */
 typedef int (*register_capability_f)(str *cap, cl_packet_cb_f packet_cb,
-					cl_event_cb_f event_cb, int cluster_id, int require_sync,
+					cl_event_cb_f event_cb, int cluster_id, int startup_sync,
 					enum cl_node_match_op sync_cond);
 
 /*
  * Request to synchronize data for a given capability from another node.
  */
-typedef int (*request_sync_f)(str * capability, int cluster_id, int ignore_seed);
+typedef int (*request_sync_f)(str * capability, int cluster_id);
 /*
  * Returns a BIN packet in which to include a distinct "chunk" of data
  * (e.g. info about a single usrloc contact) to sync.
@@ -186,9 +191,13 @@ typedef int (*request_sync_f)(str * capability, int cluster_id, int ignore_seed)
  * The same packet will be returned multiple times if there is enough space left
  * otherwise, a new packet will be built and the previous one will be sent out.
  *
+ * @data_version: a way for modules to avoid data corruption when receiving
+ *                sync packets from an OpenSIPS running a different version
+ *
  * This function should only be called from the callback for the SYNC_REQ_RCV event.
  */
-typedef bin_packet_t* (*sync_chunk_start_f)(str *capability, int cluster_id, int dst_id);
+typedef bin_packet_t* (*sync_chunk_start_f)(str *capability, int cluster_id,
+                                            int dst_id, short data_version);
 /*
  * Iterate over chunks of data from a received sync packet.
  *
@@ -204,7 +213,34 @@ typedef int (*sync_chunk_iter_f)(bin_packet_t *packet);
 typedef int (*shtag_get_f)(str *tag, int cluster_id);
 
 /*
- * Activates an sharing tag by name and cluster ID
+ * Gets the sync status (required/not required) of a sharing tag
+ *
+ * Returns -1 if error or the sync status of the tag (>=0)
+ */
+typedef int (*shtag_get_sync_status_f)(str *tag, int cluster_id, str *capability);
+
+/*
+ * Sets the sync status (required/not required) of a single sharing tag or all
+ * sharing tags if @tag is NULL.
+ *
+ * Returns -1 if error or 0 otherwise
+ */
+typedef int (*shtag_set_sync_status_f)(str *tag, int cluster_id, str *capability,
+	int new_status);
+
+/*
+ * Sets the sync status to required for all sharing tags in backup state
+ * (conversely, all active tags will be set to not required).
+ *
+ * Returns:
+ *   -1 if error
+ *    1 if there is at least one sharing tag in backup state
+ *    0 if no sharing tag is in backup state
+ */
+typedef int (*shtag_sync_all_backup_f)(int cluster_id, str *capability);
+
+/*
+ * Activates a sharing tag by name and cluster ID
  *
  * Returns -1 if error or the new status of the tag (>=0)
  */
@@ -256,6 +292,9 @@ struct clusterer_binds {
 	shtag_activate_f shtag_activate;
 	shtag_get_all_active_f shtag_get_all_active;
 	shtag_register_callback_f shtag_register_callback;
+	shtag_get_sync_status_f shtag_get_sync_status;
+	shtag_set_sync_status_f shtag_set_sync_status;
+	shtag_sync_all_backup_f shtag_sync_all_backup;
 };
 
 typedef int (*load_clusterer_f)(struct clusterer_binds *binds);
@@ -266,7 +305,7 @@ static inline int load_clusterer_api(struct clusterer_binds *binds) {
 	load_clusterer_f load_clusterer;
 
 	/* import the clusterer auto-loading function */
-	if (!(load_clusterer = (load_clusterer_f) find_export("load_clusterer", 0, 0)))
+	if (!(load_clusterer = (load_clusterer_f) find_export("load_clusterer", 0)))
 		return -1;
 
 	/* let the auto-loading function load all clusterer API functions */

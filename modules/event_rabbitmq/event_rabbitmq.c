@@ -26,15 +26,12 @@
 #include "../../sr_module.h"
 #include "../../evi/evi_transport.h"
 #include "../../ut.h"
+#include "../../lib/csv.h"
 #include "event_rabbitmq.h"
 #include "rabbitmq_send.h"
 #include <string.h>
 
 
-
-/* send buffer */
-static char rmq_buffer[RMQ_BUFFER_SIZE];
-static int rmq_buffer_len;
 
 /**
  * module functions
@@ -47,14 +44,18 @@ static void destroy(void);
  * module parameters
  */
 static unsigned int heartbeat = 0;
-extern unsigned rmq_sync_mode;
+static int rmq_connect_timeout = RMQ_DEFAULT_CONNECT_TIMEOUT;
+struct timeval conn_timeout_tv;
+int use_tls;
+
+struct tls_mgm_binds tls_api;
 
 /**
  * exported functions
  */
 static evi_reply_sock* rmq_parse(str socket);
-static int rmq_raise(struct sip_msg *msg, str* ev_name,
-					 evi_reply_sock *sock, evi_params_t * params);
+static int rmq_raise(struct sip_msg *msg, str* ev_name, evi_reply_sock *sock,
+	evi_params_t *params, evi_async_ctx_t *async_ctx);
 static int rmq_match(evi_reply_sock *sock1, evi_reply_sock *sock2);
 static void rmq_free(evi_reply_sock *sock);
 static str rmq_print(evi_reply_sock *sock);
@@ -68,8 +69,28 @@ static proc_export_t procs[] = {
 /* module parameters */
 static param_export_t mod_params[] = {
 	{"heartbeat",					INT_PARAM, &heartbeat},
-	{"sync_mode",		INT_PARAM, &rmq_sync_mode},
+	{"connect_timeout", INT_PARAM, &rmq_connect_timeout},
+	{"use_tls", INT_PARAM, &use_tls},
 	{0,0,0}
+};
+
+static module_dependency_t *get_deps_use_tls(param_export_t *param)
+{
+	if (*(int *)param->param_pointer == 0)
+		return NULL;
+
+	return alloc_module_dep(MOD_TYPE_DEFAULT, "tls_mgm", DEP_ABORT);
+}
+
+/* modules dependencies */
+static dep_export_t deps = {
+	{ /* OpenSIPS module dependencies */
+		{ MOD_TYPE_NULL, NULL, 0 },
+	},
+	{ /* modparam dependencies */
+		{ "use_tls", get_deps_use_tls },
+		{ NULL, NULL },
+	},
 };
 
 /**
@@ -80,7 +101,8 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,			/* dlopen flags */
-	NULL,            /* OpenSIPS module dependencies */
+	0,							/* load function */
+	&deps,            /* OpenSIPS module dependencies */
 	0,							/* exported functions */
 	0,							/* exported async functions */
 	mod_params,							/* exported parameters */
@@ -89,10 +111,12 @@ struct module_exports exports= {
 	0,							/* exported pseudo-variables */
 	0,			 				/* exported transformations */
 	procs,						/* extra processes */
+	0,							/* module pre-initialization function */
 	mod_init,					/* module initialization function */
 	0,							/* response handling function */
 	destroy,					/* destroy function */
-	child_init					/* per-child init function */
+	child_init,					/* per-child init function */
+	0							/* reload confirm function */
 };
 
 
@@ -131,6 +155,23 @@ static int mod_init(void)
 		heartbeat = 0;
 	} else {
 		LM_NOTICE("heartbeat is enabled for [%d] seconds\n", heartbeat);
+	}
+
+	conn_timeout_tv.tv_sec = rmq_connect_timeout/1000;
+	conn_timeout_tv.tv_usec = (rmq_connect_timeout%1000)*1000;
+
+	if (use_tls) {
+		#ifndef AMQP_VERSION_v04
+		LM_ERR("TLS not supported for librabbitmq version lower than 0.4.0\n");
+		return -1;
+		#endif
+
+		if (load_tls_mgm_api(&tls_api) != 0) {
+			LM_ERR("failed to load tls_mgm API!\n");
+			return -1;
+		}
+
+		amqp_set_initialize_ssl_library(0);
 	}
 
 	return 0;
@@ -216,6 +257,8 @@ static evi_reply_sock* rmq_parse(str socket)
 	rmq_params_t *param;
 	unsigned int len, i;
 	const char* begin;
+	str s;
+	csv_record *p_list = NULL, *it;
 	str prev_token;
 
 	enum state {
@@ -223,7 +266,7 @@ static evi_reply_sock* rmq_parse(str socket)
 		ST_PASS_PORT,	/* Password or port part */
 		ST_HOST,		/* Hostname part */
 		ST_PORT,		/* Port part */
-		ST_ROUTE_OR_EXPORT 	/* Routing or export key */
+		ST_ROUTE_OR_PARAMS 	/* Routing key or extra params */
 	} st;
 
 	if (!socket.len || !socket.s) {
@@ -268,7 +311,7 @@ static evi_reply_sock* rmq_parse(str socket)
 				if (dupl_string(&sock->address, begin, socket.s + i) < 0)
 					goto err;
 				sock->flags |= EVI_ADDRESS;
-				st = ST_ROUTE_OR_EXPORT;
+				st = ST_ROUTE_OR_PARAMS;
 				begin = socket.s + i + 1;
 			}
 			break;
@@ -300,7 +343,7 @@ static evi_reply_sock* rmq_parse(str socket)
 					goto err;
 				}
 				sock->flags |= EVI_PORT;
-				st = ST_ROUTE_OR_EXPORT;
+				st = ST_ROUTE_OR_PARAMS;
 				begin = socket.s + i + 1;
 			}
 			break;
@@ -320,7 +363,7 @@ static evi_reply_sock* rmq_parse(str socket)
 					goto err;
 				sock->flags |= EVI_ADDRESS;
 
-				st = ST_ROUTE_OR_EXPORT;
+				st = ST_ROUTE_OR_PARAMS;
 				begin = socket.s + i + 1;
 			}
 			break;
@@ -336,18 +379,45 @@ static evi_reply_sock* rmq_parse(str socket)
 				}
 				sock->flags |= EVI_PORT;
 
-				st = ST_ROUTE_OR_EXPORT;
+				st = ST_ROUTE_OR_PARAMS;
 				begin = socket.s + i + 1;
 			}
 			break;
 
-		case ST_ROUTE_OR_EXPORT:
+		case ST_ROUTE_OR_PARAMS:
 			switch(socket.s[i]) {
 			case '?':
+				s.s = (char*)begin;
+				s.len = socket.s + i - begin;
 
-				if (dupl_string(&param->exchange, begin, socket.s + i) < 0)
+				p_list = __parse_csv_record(&s, 0, ';');
+				if (!p_list) {
+					LM_ERR("bad extra parameters: %.*s\n", s.len, s.s);
 					goto err;
-				param->flags |= RMQ_PARAM_EKEY;
+				}
+				for (it = p_list; it; it = it->next)
+					if (it->s.len > RMQ_EXCHANGE_LEN &&
+						!memcmp(it->s.s, RMQ_EXCHANGE_S, RMQ_EXCHANGE_LEN)) {
+						if (dupl_string(&param->exchange, it->s.s+RMQ_EXCHANGE_LEN,
+							it->s.s + it->s.len) < 0)
+							goto err;
+						param->flags |= RMQ_PARAM_EKEY;
+					} else if (it->s.len > RMQ_TLS_DOM_LEN &&
+						!memcmp(it->s.s, RMQ_TLS_DOM_S, RMQ_TLS_DOM_LEN)) {
+						if (dupl_string(&param->tls_dom_name,
+							it->s.s+RMQ_TLS_DOM_LEN, it->s.s + it->s.len) < 0)
+							goto err;
+						param->tls_dom_name.len--;
+						param->flags |= RMQ_PARAM_TLS;
+					} else if (it->s.len == RMQ_PERSISTENT_LEN &&
+						!memcmp(it->s.s, RMQ_PERSISTENT_S, RMQ_PERSISTENT_LEN)) {
+						param->flags |= RMQ_PARAM_PERS;
+					} else {
+						LM_WARN("unknown extra parameter: '%.*s'\n", it->s.len, it->s.s);
+						goto err;
+					}
+
+				free_csv_record(p_list);
 
 				if (dupl_string(&param->routing_key, socket.s + i + 1, socket.s + len) < 0)
 					goto err;
@@ -371,18 +441,25 @@ static evi_reply_sock* rmq_parse(str socket)
 
 success:
 	if (!(sock->flags & EVI_PORT) || !sock->port) {
-		sock->port = RMQ_DEFAULT_PORT;
+		if (param->flags & RMQ_PARAM_TLS)
+			sock->port = RMQ_DEFAULT_TLS_PORT;
+		else
+			sock->port = RMQ_DEFAULT_PORT;
 		sock->flags |= EVI_PORT;
 	}
 	if (!(param->flags & RMQ_PARAM_USER) || !param->user.s) {
-		param->user.s = param->pass.s = RMQ_DEFAULT_UP;
-		param->user.len = param->pass.len = RMQ_DEFAULT_UP_LEN;
+		param->user = param->pass = rmq_static_holder;
 		param->flags |= RMQ_PARAM_USER|RMQ_PARAM_PASS;
+	}
+
+	if ((param->flags & RMQ_PARAM_TLS) && !use_tls) {
+		LM_ERR("'use_tls' module parameter required for TLS support\n");
+		goto err;
 	}
 
 	param->heartbeat = heartbeat;
 	sock->params = param;
-	sock->flags |= EVI_PARAMS | RMQ_FLAG;
+	sock->flags |= EVI_PARAMS | RMQ_FLAG | EVI_ASYNC_STATUS;
 
 	return sock;
 err:
@@ -390,6 +467,7 @@ err:
 	if (prev_token.s)
 		shm_free(prev_token.s);
 	rmq_free_param(param);
+	free_csv_record(p_list);
 	if (sock->address.s)
 		shm_free(sock->address.s);
 	shm_free(sock);
@@ -451,103 +529,11 @@ end:
 }
 #undef DO_PRINT
 
-
-
-#define DO_COPY(buff, str, len) \
-	do { \
-		if ((buff) - rmq_buffer + (len) > RMQ_BUFFER_SIZE) { \
-			LM_ERR("buffer too small\n"); \
-			goto end; \
-		} \
-		memcpy((buff), (str), (len)); \
-		buff += (len); \
-	} while (0)
-
-/* builds parameters list */
-static int rmq_build_params(str* ev_name, evi_params_p ev_params)
-{
-	evi_param_p node;
-	int len;
-	char *buff, *int_s, *p, *end, *old;
-	char quote = QUOTE_C, esc = ESC_C;
-
-	if (ev_params && ev_params->flags & RMQ_FLAG) {
-		LM_DBG("buffer already built\n");
-		return rmq_buffer_len;
-	}
-
-	rmq_buffer_len = 0;
-
-	/* first is event name - cannot be larger than the buffer size */
-	memcpy(rmq_buffer, ev_name->s, ev_name->len);
-	rmq_buffer_len = ev_name->len;
-	buff = rmq_buffer + ev_name->len;
-
-	if (!ev_params)
-		goto end;
-
-	for (node = ev_params->first; node; node = node->next) {
-		*buff = PARAM_SEP;
-		buff++;
-
-		/* parameter name */
-		if (node->name.len && node->name.s) {
-			DO_COPY(buff, node->name.s, node->name.len);
-			DO_COPY(buff, ATTR_SEP_S, ATTR_SEP_LEN);
-		}
-
-		if (node->flags & EVI_STR_VAL) {
-			/* it is a string value */
-			if (node->val.s.len && node->val.s.s) {
-				/* check to see if enclose is needed */
-				end = node->val.s.s + node->val.s.len;
-				for (p = node->val.s.s; p < end; p++)
-					if (*p == PARAM_SEP)
-						break;
-				if (p == end) {
-					/* copy the whole buffer */
-					DO_COPY(buff, node->val.s.s, node->val.s.len);
-				} else {
-					DO_COPY(buff, &quote, 1);
-					old = node->val.s.s;
-					/* search for '"' to escape */
-					for (p = node->val.s.s; p < end; p++)
-						if (*p == QUOTE_C) {
-							DO_COPY(buff, old, p - old);
-							DO_COPY(buff, &esc, 1);
-							old = p;
-						}
-					/* copy the rest of the string */
-					DO_COPY(buff, old, p - old);
-					DO_COPY(buff, &quote, 1);
-				}
-			}
-		} else if (node->flags & EVI_INT_VAL) {
-			int_s = int2str(node->val.n, &len);
-			DO_COPY(buff, int_s, len);
-		} else {
-			LM_DBG("unknown parameter type [%x]\n", node->flags);
-		}
-	}
-
-end:
-	/* set buffer end */
-	*buff = 0;
-	rmq_buffer_len = buff - rmq_buffer + 1;
-	if (ev_params)
-		ev_params->flags |= RMQ_FLAG;
-
-	return rmq_buffer_len;
-}
-
-#undef DO_COPY
-
-
-static int rmq_raise(struct sip_msg *msg, str* ev_name,
-					 evi_reply_sock *sock, evi_params_t * params)
+static int rmq_raise(struct sip_msg *msg, str* ev_name, evi_reply_sock *sock,
+	evi_params_t *params, evi_async_ctx_t *async_ctx)
 {
 	rmq_send_t *rmqs;
-	int len;
+	str buf;
 
 	if (!sock || !(sock->flags & RMQ_FLAG)) {
 		LM_ERR("invalid socket type\n");
@@ -561,19 +547,24 @@ static int rmq_raise(struct sip_msg *msg, str* ev_name,
 		return -1;
 	}
 
-	/* check connection */
-	/* build the params list */
-	if ((len = rmq_build_params(ev_name, params)) < 0) {
-		LM_ERR("error while building parameters list\n");
+	buf.s = evi_build_payload(params, ev_name, 0, NULL, NULL);
+	if (!buf.s) {
+		LM_ERR("Failed to build event payload %.*s\n", ev_name->len, ev_name->s);
 		return -1;
 	}
-	rmqs = shm_malloc(sizeof(rmq_send_t) + len);
+	buf.len = strlen(buf.s);
+
+	rmqs = shm_malloc(sizeof(rmq_send_t) + buf.len + 1);
 	if (!rmqs) {
 		LM_ERR("no more shm memory\n");
+		evi_free_payload(buf.s);
 		return -1;
 	}
-	memcpy(rmqs->msg, rmq_buffer, len);
+	memcpy(rmqs->msg, buf.s, buf.len + 1);
+	evi_free_payload(buf.s);
+
 	rmqs->sock = sock;
+	rmqs->async_ctx = *async_ctx;
 
 	if (rmq_send(rmqs) < 0) {
 		LM_ERR("cannot send message\n");

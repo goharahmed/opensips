@@ -31,7 +31,21 @@
 #include "../tm//tm_load.h"
 #include "../../ut.h"
 
-#define SIPREC_SESSION_VERSION 0
+#define srec_hlog(_params ...)
+#ifdef DBG_SIPREC_HIST
+#ifdef DBG_STRUCT_HIST
+#include  "../../lib/dbg/struct_hist.h"
+#undef srec_hlog
+#define srec_hlog(_sess, _verb, _msg) \
+	 sh_log((_sess)->hist, _verb, _msg " (ref=%d)", (_sess)->ref)
+extern struct struct_hist_list *srec_hist;
+#else
+#warning "'DBG_SIPREC_HIST' flag not possible, because 'DBG_STRUCT_HIST' is not on"
+#undef DBG_SIPREC_HIST
+#endif
+#endif
+
+#define SIPREC_SESSION_VERSION 1
 #define SRC_MAX_PARTICIPANTS 2
 /* Uncomment this to enable SIPREC debugging
 #define SIPREC_DEBUG_REF
@@ -56,12 +70,14 @@ struct src_part {
 	str aor;
 	str name;
 	str xml_val;
+	time_t ts;
 	siprec_uuid uuid;
 	struct list_head streams;
 };
 
 #define SIPREC_STARTED	(1<<0)
 #define SIPREC_DLG_CBS	(1<<1)
+#define SIPREC_PAUSED	(1<<2)
 
 #define SIPREC_SRS(_s) (list_entry((_s)->srs.next, struct srs_node, list)->uri)
 
@@ -71,8 +87,10 @@ struct src_sess {
 	time_t ts;
 	int version;
 	int streams_no;
+	int streams_inactive;
 	str rtpproxy;
 	str media_ip;
+	str headers;
 
 	/* SRS */
 	struct list_head srs;
@@ -97,14 +115,17 @@ struct src_sess {
 	str b2b_fromtag;
 	str b2b_totag;
 	str b2b_callid;
+
+#ifdef DBG_SIPREC_HIST
+	struct struct_hist *hist;
+#endif
 };
 
-void src_unref_session(void *p);
 struct src_sess *src_new_session(str *srs, str *rtp, str *m_ip, str *group,
-		struct socket_info *si);
+		str *hdrs, struct socket_info *si);
 void src_free_session(struct src_sess *sess);
 int src_add_participant(struct src_sess *sess, str *aor, str *name, str *xml_val,
-		siprec_uuid *uuid);
+		siprec_uuid *uuid, time_t *start);
 
 extern struct tm_binds srec_tm;
 extern struct dlg_binds srec_dlg;
@@ -125,10 +146,11 @@ extern struct dlg_binds srec_dlg;
 		SIPREC_UNLOCK(_s); \
 	} while(0)
 
-#define SIPREC_UNREF_COUNT_UNSAFE(_s, _c) \
+#define SIPREC_UNREF(_s) \
 	do { \
+		SIPREC_LOCK(_s); \
 		SIPREC_DEBUG(_s, "unref"); \
-		(_s)->ref -= (_c); \
+		(_s)->ref--; \
 		if ((_s)->ref == 0) { \
 			LM_DBG("destroying session=%p\n", _s); \
 			SIPREC_UNLOCK(_s); \
@@ -137,18 +159,23 @@ extern struct dlg_binds srec_dlg;
 			if ((_s)->ref < 0) \
 				LM_BUG("invalid ref for session=%p ref=%d (%s:%d)\n", \
 						(_s), (_s)->ref, __func__, __LINE__); \
+			SIPREC_UNLOCK(_s); \
 		} \
 	} while(0)
 
-#define SIPREC_UNREF_COUNT(_s, _c) \
+#define SIPREC_UNREF_UNSAFE(_s) \
 	do { \
-		SIPREC_LOCK(_s); \
-		SIPREC_UNREF_COUNT_UNSAFE(_s, _c); \
-		SIPREC_UNLOCK(_s); \
+		SIPREC_DEBUG(_s, "unref"); \
+		(_s)->ref--; \
+		if ((_s)->ref == 0) { \
+			LM_DBG("destroying session=%p\n", _s); \
+			src_free_session(_s); \
+		} else { \
+			if ((_s)->ref < 0) \
+				LM_BUG("invalid ref for session=%p ref=%d (%s:%d)\n", \
+						(_s), (_s)->ref, __func__, __LINE__); \
+		} \
 	} while(0)
-
-#define SIPREC_UNREF_UNSAFE(_s) SIPREC_UNREF_COUNT_UNSAFE(_s, 1)
-#define SIPREC_UNREF(_s) SIPREC_UNREF_COUNT(_s, 1)
 
 void srec_loaded_callback(struct dlg_cell *dlg, int type,
 		struct dlg_cb_params *params);

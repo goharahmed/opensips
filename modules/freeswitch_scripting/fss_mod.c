@@ -45,8 +45,8 @@ str fss_col_events = str_init("events_csv");
 static int mod_init(void);
 static void mod_destroy(void);
 
-static int fs_esl(struct sip_msg *msg, char *cmd, char *url, char *out_pv);
-static int fixup_fs_esl(void **param, int param_no);
+static int fs_esl(struct sip_msg *msg, str *cmd, str *url,
+                pv_spec_t *reply_pvs);
 
 static int fs_sub_add_url(modparam_t type, void *string);
 
@@ -60,9 +60,12 @@ mi_response_t *mi_fs_reload(const mi_params_t *params,
 								struct mi_handler *async_hdl);
 
 static cmd_export_t cmds[] = {
-	{ "freeswitch_esl", (cmd_function)fs_esl, 2, fixup_fs_esl, 0, ALL_ROUTES },
-	{ "freeswitch_esl", (cmd_function)fs_esl, 3, fixup_fs_esl, 0, ALL_ROUTES },
-	{ NULL, NULL, 0, NULL, NULL, 0 }
+	{"freeswitch_esl", (cmd_function)fs_esl, {
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_STR,0,0},
+		{CMD_PARAM_VAR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		ALL_ROUTES},
+	{0,0,{{0,0,0}},0}
 };
 
 static param_export_t mod_params[] = {
@@ -114,6 +117,7 @@ struct module_exports exports= {
 	MOD_TYPE_DEFAULT, /* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS,  /* dlopen flags */
+	0,				  /* load function */
 	&deps,            /* OpenSIPS module dependencies */
 	cmds,             /* exported functions */
 	NULL,             /* exported async functions */
@@ -123,17 +127,19 @@ struct module_exports exports= {
 	NULL,             /* exported pseudo-variables */
 	NULL,             /* exported transformations */
 	NULL,             /* extra processes */
+	0,                /* module pre-initialization function */
 	mod_init,         /* module initialization function */
 	NULL,             /* reply processing function */
 	mod_destroy,      /* destroy function */
-	NULL              /* per-child init function */
+	NULL,             /* per-child init function */
+	NULL              /* reload confirm function */
 };
 
 /* temporarily dup the URL modparams in shm until mod_init() runs */
 struct list_head startup_fs_subs = LIST_HEAD_INIT(startup_fs_subs);
 static int fs_sub_add_url(modparam_t type, void *string)
 {
-	struct str_dlist *strl;
+	str_dlist *strl;
 	str url = {string, strlen(string)};
 
 	strl = shm_malloc(sizeof *strl);
@@ -180,58 +186,35 @@ static int mod_init(void)
 
 	free_shm_str_dlist(&startup_fs_subs);
 
+	fss_db_close();
+
 	return 0;
 }
 
 static void mod_destroy(void)
 {
-	fss_db_close();
 }
 
-static int fixup_fs_esl(void **param, int param_no)
-{
-	switch (param_no) {
-	case 1:
-	case 2:
-		return fixup_spve(param);
-	case 3:
-		return fixup_pvar(param);
-	default:
-		LM_BUG("freeswitch_esl() called with > 3 params!\n");
-		return -1;
-	}
-}
-
-static int fs_esl(struct sip_msg *msg, char *cmd_gp, char *url_gp,
-                  char *reply_pvs)
+static int fs_esl(struct sip_msg *msg, str *cmd, str *url,
+                pv_spec_t *reply_pvs)
 {
 	fs_evs *sock;
 	pv_value_t reply_val;
-	str url, cmd, reply;
+	str reply;
 	int ret = 1;
 
-	if (fixup_get_svalue(msg, (gparam_p)cmd_gp, &cmd) != 0) {
-		LM_ERR("failed to print cmd parameter!\n");
-		return -1;
-	}
-
-	if (fixup_get_svalue(msg, (gparam_p)url_gp, &url) != 0) {
-		LM_ERR("failed to print url parameter!\n");
-		return -1;
-	}
-
-	sock = fs_api.get_evs_by_url(&url);
+	sock = fs_api.get_evs_by_url(url);
 	if (!sock) {
-		LM_ERR("failed to get a socket for FS URL %.*s\n", url.len, url.s);
+		LM_ERR("failed to get a socket for FS URL %.*s\n", url->len, url->s);
 		return -1;
 	}
 
-	LM_DBG("running '%.*s' on %s:%d\n", cmd.len, cmd.s,
+	LM_DBG("running '%.*s' on %s:%d\n", cmd->len, cmd->s,
 	       sock->host.s, sock->port);
 
-	if (fs_api.fs_esl(sock, &cmd, &reply) != 0) {
+	if (fs_api.fs_esl(sock, cmd, &reply) != 0) {
 		LM_ERR("failed to run freeswitch_esl cmd '%*s.' on %s:%d\n",
-		       cmd.len, cmd.s, sock->host.s, sock->port);
+		       cmd->len, cmd->s, sock->host.s, sock->port);
 		ret = -1;
 		goto out;
 	}
@@ -242,7 +225,7 @@ static int fs_esl(struct sip_msg *msg, char *cmd_gp, char *url_gp,
 		reply_val.flags = PV_VAL_STR;
 		reply_val.rs = reply;
 
-		if (pv_set_value(msg, (pv_spec_p)reply_pvs, 0, &reply_val) != 0) {
+		if (pv_set_value(msg, reply_pvs, 0, &reply_val) != 0) {
 			LM_ERR("failed to set output pvar!\n");
 			ret = -1;
 		}
@@ -263,7 +246,7 @@ mi_response_t *mi_fs_subscribe(const mi_params_t *params,
 	mi_item_t *events;
 	str event_str;
 	int i, no_events;
-	struct str_list *evlist = NULL, *li, **last = &evlist;
+	str_list *evlist = NULL, *li, **last = &evlist;
 	fs_evs *sock;
 	str url;
 
@@ -347,7 +330,7 @@ mi_response_t *mi_fs_unsubscribe(const mi_params_t *params,
 	mi_item_t *events;
 	str event_str;
 	int i, no_events;
-	struct str_list *evlist = NULL, *li, **last = &evlist;
+	str_list *evlist = NULL, *li, **last = &evlist;
 	fs_evs *sock;
 	str url;
 	int rc, do_unref = 0;
@@ -434,7 +417,7 @@ mi_response_t *mi_fs_list(const mi_params_t *params,
 	struct fs_evs_list *sock_list;
 	mi_response_t *resp;
 	mi_item_t *resp_obj, *sockets_arr, *socket_item, *events_arr;
-	struct str_list *event;
+	str_list *event;
 
 	resp = init_mi_result_object(&resp_obj);
 	if (!resp)

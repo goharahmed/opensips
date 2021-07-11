@@ -34,7 +34,9 @@ enum HTTPD_CONTENT_TYPE {
 	HTTPD_STD_CNT_TYPE = 0,
 	HTTPD_TEXT_HTML_TYPE,
 	HTTPD_TEXT_XML_CNT_TYPE,
-	HTTPD_APPLICATION_JSON_CNT_TYPE
+	HTTPD_APPLICATION_JSON_CNT_TYPE,
+	HTTPD_TEXT_PLAIN_TYPE,
+	HTTPD_TEXT_PLAIN_PROMETHEUS_TYPE,
 };
 
 /**
@@ -155,7 +157,7 @@ static inline int load_httpd_api(httpd_api_t *api)
 	load_httpd_f load_httpd;
 
 	/* import the httpd auto-loading functions */
-	if ( !(load_httpd=(load_httpd_f)find_export("httpd_bind", 1, 0)))
+	if ( !(load_httpd=(load_httpd_f)find_export("httpd_bind", 0)))
 		return -1;
 
 	/* let the auto-loading function load all httpd suuff */

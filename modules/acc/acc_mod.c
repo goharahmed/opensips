@@ -138,18 +138,13 @@ str acc_created_col    = str_init("created");
 struct acc_extra *evi_extra_tags = 0;
 struct acc_extra *evi_leg_tags = 0;
 
-/* db avp variables */
-str acc_created_avp_name = str_init("accX_created");
-int acc_created_avp_id = -1;
-
 /* acc context position */
 int acc_flags_ctx_idx;
 int acc_tm_flags_ctx_idx;
+int acc_dlg_ctx_idx;
 
 /* ------------- fixup function --------------- */
-static int acc_fixup(void** param, int param_no);
-static int free_acc_fixup(void** param, int param_no);
-
+static int fixup_init_dburl(void **param);
 
 /**
  * pseudo-variables exported by acc module
@@ -167,55 +162,43 @@ static pv_export_t mod_items[] = {
 };
 
 static cmd_export_t cmds[] = {
-	{"acc_log_request", (cmd_function)w_acc_log_request, 1,
-		acc_fixup, free_acc_fixup,
+	{"acc_log_request", (cmd_function)w_acc_log_request, {
+		{CMD_PARAM_STR, 0, 0}, {0,0,0}},
 		REQUEST_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-	{"acc_db_request",  (cmd_function)w_acc_db_request,  2,
-		acc_fixup, free_acc_fixup,
+	{"acc_db_request",  (cmd_function)w_acc_db_request, {
+		{CMD_PARAM_STR, 0, 0},
+		{CMD_PARAM_STR, fixup_init_dburl, 0}, {0,0,0}},
 		REQUEST_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-	{"acc_aaa_request", (cmd_function)w_acc_aaa_request, 1,
-		acc_fixup, free_acc_fixup,
+	{"acc_aaa_request", (cmd_function)w_acc_aaa_request, {
+		{CMD_PARAM_STR, 0, 0}, {0,0,0}},
 		REQUEST_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-	{"acc_evi_request", (cmd_function)w_acc_evi_request, 1,
-		acc_fixup, free_acc_fixup,
+	{"acc_evi_request", (cmd_function)w_acc_evi_request, {
+		{CMD_PARAM_STR, 0, 0}, {0,0,0}},
 		REQUEST_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-
-	/* only the type of acc(db,evi...) */
-	{"do_accounting", (cmd_function)w_do_acc_1, 1,
-		do_acc_fixup, NULL,
+	{"do_accounting", (cmd_function)w_do_acc, {
+		{CMD_PARAM_STR, do_acc_fixup_type, do_acc_fixup_free_ival},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,
+			do_acc_fixup_flags, do_acc_fixup_free_ival},
+		{CMD_PARAM_STR|CMD_PARAM_OPT, 0, 0},
+		{0,0,0}},
 		REQUEST_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-
-	/* type of acc(db,evi...) and flags(log cdr, log missed) */
-	{"do_accounting", (cmd_function)w_do_acc_2, 2,
-		do_acc_fixup, NULL,
+	{"drop_accounting", (cmd_function)w_drop_acc, {
+		{CMD_PARAM_STR|CMD_PARAM_OPT,
+			do_acc_fixup_type, do_acc_fixup_free_ival},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,
+			do_acc_fixup_flags, do_acc_fixup_free_ival},
+		{0,0,0}},
 		REQUEST_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-
-	/* type of acc(db,evi...) and flags(log cdr, log missed)
-	 * and db table */
-	{"do_accounting", (cmd_function)w_do_acc_3, 3,
-		do_acc_fixup, NULL,
+	{"acc_new_leg", (cmd_function)w_new_leg, {{0,0,0}},
 		REQUEST_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-
-	{"drop_accounting", (cmd_function)w_drop_acc_0, 0, 0, NULL,
-		REQUEST_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-
-	/* we use the same fixup function since the parameters
-	 * have the same meanining as for do_accounting  */
-	{"drop_accounting", (cmd_function)w_drop_acc_1, 1,
-		do_acc_fixup, NULL,
-		REQUEST_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-
-	{"drop_accounting", (cmd_function)w_drop_acc_2, 2,
-		do_acc_fixup, NULL,
-		REQUEST_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-
-	{"acc_new_leg", (cmd_function)w_new_leg, 0, 0, 0,
-		REQUEST_ROUTE|FAILURE_ROUTE|BRANCH_ROUTE|LOCAL_ROUTE},
-
-	{0, 0, 0, 0, 0, 0}
+	{"acc_load_ctx_from_dlg", (cmd_function)w_load_ctx_from_dlg,
+		{{0,0,0}},
+		ALL_ROUTES},
+	{"acc_unload_ctx_from_dlg", (cmd_function)w_unload_ctx_from_dlg,
+		{{0,0,0}},
+		ALL_ROUTES},
+	{0,0,{{0,0,0}},0}
 };
-
-
 
 static param_export_t params[] = {
 	{"early_media",             INT_PARAM, &early_media               },
@@ -244,7 +227,6 @@ static param_export_t params[] = {
 	{"acc_sip_code_column",  STR_PARAM, &acc_sipcode_col.s    },
 	{"acc_sip_reason_column",STR_PARAM, &acc_sipreason_col.s  },
 	{"acc_time_column",      STR_PARAM, &acc_time_col.s       },
-	{"acc_created_avp_name", STR_PARAM, &acc_created_avp_name.s},
 	{0,0,0}
 };
 
@@ -269,6 +251,7 @@ static module_dependency_t *get_deps_detect_dir(param_export_t *param)
 static dep_export_t deps = {
 	{ /* OpenSIPS module dependencies */
 		{ MOD_TYPE_DEFAULT, "tm", DEP_ABORT  },
+		{ MOD_TYPE_DEFAULT, "dialog", DEP_SILENT  },
 		{ MOD_TYPE_NULL, NULL, 0 },
 	},
 	{ /* modparam dependencies */
@@ -279,11 +262,30 @@ static dep_export_t deps = {
 	},
 };
 
+static int mod_preinit(void)
+{
+	if (load_dlg_api(&dlg_api) != 0) {
+		LM_DBG("failed to load dialog API - is the dialog module loaded?\n");
+		return 0;
+	}
+
+	if (!dlg_api.get_dlg) {
+		LM_ERR("error loading dialog module - cdrs cannot be generated\n");
+		return 0;
+	}
+	acc_dlg_ctx_idx = dlg_api.dlg_ctx_register_ptr(unref_acc_ctx);
+
+	is_cdr_enabled = 1;
+
+	return 0;
+}
+
 struct module_exports exports= {
 	"acc",
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,  /* module version */
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	&deps,           /* OpenSIPS module dependencies */
 	cmds,       /* exported functions */
 	0,          /* exported async functions */
@@ -293,67 +295,23 @@ struct module_exports exports= {
 	mod_items,  /* exported pseudo-variables */
 	0,			/* exported transformations */
 	0,          /* extra processes */
+	mod_preinit,/* pre-initialization module */
 	mod_init,   /* initialization module */
 	0,          /* response function */
 	0,          /* destroy function */
-	child_init  /* per-child init function */
+	child_init, /* per-child init function */
+	0           /* reload confirm function */
 };
 
 
 
 /************************** FIXUP functions ****************************/
-
-
-static int acc_fixup(void** param, int param_no)
+static int fixup_init_dburl(void **param)
 {
-	str s;
-
-	pv_elem_t *model = NULL;
-
-	s.s = (char*)(*param);
-
-	if (s.s==0 || s.s[0]==0) {
-		LM_ERR("first parameter is empty\n");
-		return E_SCRIPT;
-	}
-
-	if (param_no == 1) {
-		if (s.s==NULL) {
-			LM_ERR("null format in P%d\n",
-					param_no);
-		}
-
-		s.len = strlen(s.s);
-
-		if(pv_parse_format(&s, &model)<0) {
-			LM_ERR("wrong format[%s]\n", s.s);
-			return E_UNSPEC;
-		}
-
-		*param = (void*)model;
-		return 0;
-	} else if (param_no == 2) {
+	if (!db_url.s || db_url.len == 0)
 		init_db_url(db_url, 1 /* can be null */);
-
-		/* only for db acc - the table name */
-		if (db_url.s==0) {
-			pkg_free(s.s);
-			*param = 0;
-		}
-	}
-	return 0;
+	return 0;	
 }
-
-static int free_acc_fixup(void** param, int param_no)
-{
-	if(*param)
-	{
-		pkg_free(*param);
-		*param = 0;
-	}
-	return 0;
-}
-
 
 
 /************************** INTERFACE functions ****************************/
@@ -373,7 +331,6 @@ static int mod_init( void )
 	acc_sipcode_col.len = strlen(acc_sipcode_col.s);
 	acc_sipreason_col.len = strlen(acc_sipreason_col.s);
 	acc_time_col.len = strlen(acc_time_col.s);
-	acc_created_avp_name.len = strlen(acc_created_avp_name.s);
 
 	if (log_facility_str) {
 		int tmp = str2facility(log_facility_str);
@@ -448,6 +405,11 @@ static int mod_init( void )
 
 	acc_flags_ctx_idx = context_register_ptr(CONTEXT_GLOBAL, unref_acc_ctx);
 	acc_tm_flags_ctx_idx = tmb.t_ctx_register_ptr(unref_acc_ctx);
+
+	if (is_cdr_enabled && dlg_api.register_dlgcb(NULL,
+				DLGCB_LOADED,acc_loaded_callback, NULL, NULL) < 0)
+			LM_ERR("cannot register callback for dialog loaded - accounting "
+					"for ongoing calls will be lost after restart\n");
 
 	return 0;
 }

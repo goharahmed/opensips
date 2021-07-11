@@ -130,16 +130,15 @@
 	try to learn all the dialog information from antoher node in the cluster at startup.
 	The data synchronization mechanism requires defining one of the nodes in the cluster
 	as a "<emphasis role='bold'>seed</emphasis>" node.
-	See the <ulink url="http://www.opensips.org/html/docs/modules/3.0.x/clusterer.html#capabilities">clusterer</ulink> 
+	See the <ulink url="https://opensips.org/docs/modules/3.0.x/clusterer.html#capabilities">clusterer</ulink> 
 	module for details on how to do this and why is it needed.
 	</para>
 	<para>
 	In the context of dialog replication, using a database as a failsafe for obtaining
 	restart persistency for dialog data is useful in case all nodes in the cluster are down.
 	This approach makes the most sense if a separate, local DB is used for each node in the
-	cluster. In consequence dialogs loaded from the database at startup are dropped and also
-	deleted from the DB once the sync from cluster is complete. This is done for dialogs that
-	are not reconfirmed as being active in the meantime (SIP updates, received in sync data).
+	cluster. Dialogs loaded from the database at startup, which are not reconfirmed through
+	syncing, are dropped and also deleted from the database once the sync from cluster is complete.
 	</para>
 	<para>
 	Also configuring profile replication via the <emphasis>profile_replication_cluster</emphasis>
@@ -831,7 +830,7 @@ modparam("dialog", "to_sock_column", "to_sock_c_name")
 		</para>
 		<para>
 		<emphasis>
-			Default value is <quote>hash_id</quote>.
+			Default value is <quote>dlg_id</quote>.
 		</emphasis>
 		</para>
 		<example>
@@ -1098,7 +1097,8 @@ modparam("dialog", "timer_bulk_del_no", 10)
 	<section id="race_condition_timeout" xreflabel="race_condition_timeout">
 		<title><varname>race_condition_timeout</varname> (int)</title>
 		<para>
-		If dialog is created using the 'E' flag, and a 200OK with CANCEL race condition occurs, then the dialog will be terminated after 'race_condition_timeout' seconds.
+		If dialog is created using the 'E' flag, and a SIP Race condition happens, then the dialog will be terminated after 'race_condition_timeout' seconds.
+		Currently, the only supported race conditions are (200OK vs CANCEL) and (early BYE vs 200OK)
 		</para>
 		<para>
 		<emphasis>
@@ -1364,28 +1364,55 @@ modparam("dialog", "replicate_profiles_expire", 10)
 
 	<section id="func_create_dialog" xreflabel="create_dialog()">
 		<title>
-		<function moreinfo="none">create_dialog()</function>
+		<function moreinfo="none">create_dialog([flags])</function>
 		</title>
 		<para>
 		The function creats the dialog for the currently processed request. The
 		request must be an initial request.
 
 		Optionally,the function also receives a string parameter, which specifies
-		whether the dialog end-points should be pinged via SIP options
-		messages. The parameter can be "P" to specify to only ping the
-		caller, "p" to only ping the callee or "Pp" to ping both dialog
-		sides. If the extra string parameter is provided and one
-		end-point fails to respond to a options ping, OpenSIPS will
-		terminate the dialog from the middle.
-		Also, the end-points can be pinged via in-dialog Re-INVITE SIP messages. This
-		behaviour is controlled via the "R" flags for pinging the caller side, and
-		the "r" flag for re-invite pinging the callee side. If one end-points fails
-		to re-negociate the session via the Re-INVITE pings, OpenSIPS will terminate
-		the dialog from the middle
+		special behavior to be done for the current dialog. 
 
-		The string parameter can also contain "B" to activate the bye on
-		timeout behavior.
-
+		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>flags (string, optional)</emphasis>
+				Possible values here are :
+				<itemizedlist>
+				<listitem><para>
+				B - Upon reaching dialog lifetime, BYEs will be triggered
+				both ways
+				</para></listitem>
+				<listitem><para>
+				P - Ping caller side with OPTIONS messages, once every
+				options_ping_interval seconds
+				</para></listitem>
+				<listitem><para>
+				p - Ping callee side with OPTIONS messages, once every
+				options_ping_interval seconds
+				</para></listitem>
+				<listitem><para>
+				R - Ping caller side with RE-INVITE messages, once every
+				reinvite_ping_interval seconds
+				</para></listitem>
+				<listitem><para>
+				r - Ping callee side with RE-INVITE messages, once every
+				reinvite_ping_interval seconds
+				</para></listitem>
+				<listitem><para>
+				E - Upon detecting a SIP Race condition (see RFC 5407),
+				end the call after race_condition_timeout seconds
+				</para></listitem>
+				</itemizedlist>
+				Multiple string flags can be used at the same time,
+				ie. passing "BPp" flags will enable all 3 flags.
+			</para></listitem>
+		</itemizedlist>
+		<para>
+		NOTE: both RE-INVITE and OPTIONS pinging cannot be enabled at the same time
+		for a single dialog leg. If both flags ("<emphasis>PR</emphasis>" or
+		"<emphasis>pr</emphasis>") are provided only RE-INVITE pinging will be used.
 		</para>
 		<para>
 		The function returns true if the dialog was successfully created or
@@ -1435,6 +1462,12 @@ create_dialog("B");
 		and (B) to cope with bogus sequential requests that do not have Route
 		headers, so they are not handled by loose_route().
 		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>dlg_match_mode (string, optional)</emphasis>
+			</para></listitem>
+		</itemizedlist>
 		<para>
 		The function returns true if a dialog exists for the request.
 		</para>
@@ -1570,28 +1603,30 @@ create_dialog("B");
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>attr</emphasis> - the name of the dialog variable
+			<para><emphasis>attr (string)</emphasis> - the name of the dialog variable
 			(from the found dialog) to be returned;
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>avp</emphasis> - an avp where to store the values of
+			<para><emphasis>avp (var)</emphasis> - an avp where to store the values of
 			the "attr" dialog variable.
-			Since the function checks through all dialogs, this needs to be an actual AVP in order to support pushing values from all matched dialogs.
+			Since the function checks through all dialogs, this needs to be an actual
+			AVP in order to support pushing values from all matched dialogs.
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>key</emphasis> - name of a dialog variable to be
+			<para><emphasis>key (string)</emphasis> - name of a dialog variable to be
 			used a search key (when looking after the target dialog)
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>key_val</emphasis> - the value of the dialog
+			<para><emphasis>key_val (string)</emphasis> - the value of the dialog
 			variable that is used as key in searching the target dialog.
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>no_dlgs</emphasis> - the total number of dialogs containing the key variable
+			<para><emphasis>no_dlgs (var)</emphasis> - the total number of dialogs
+			containing the key variable
 			</para>
 		</listitem>
 		</itemizedlist>
@@ -1602,7 +1637,7 @@ create_dialog("B");
 		<title><function>get_dialog_info</function> usage</title>
 		<programlisting format="linespecific">
 ...
-if ( get_dialog_info("callee","$avp(callee_array)","caller","$fu","$var(dlg_no)) ) {
+if ( get_dialog_info("callee",$avp(callee_array),"caller",$fu,$var(dlg_no)) ) {
 	xlog("caller $fu has $var(dlg_no) other ongoing calls, talking with :");	
 	$var(it) = 0;
 	while ($var(it) &lt; $var(dlg_no)) {
@@ -1644,18 +1679,18 @@ $dlg_val(callee) = $ru;
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>names</emphasis> - the name of an AVP variable to
+			<para><emphasis>names (var)</emphasis> - an AVP variable to
 			hold all the names of the variables from the found dialog.
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>vals</emphasis> - the name of an AVP variable to
+			<para><emphasis>vals (var)</emphasis> - an AVP variable to
 			hold all the values of the variables from the found dialog.
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>callid</emphasis> - the callid of a dialog to be 
-			searched (and have the variables fetched).
+			<para><emphasis>callid (string)</emphasis> - the callid of a dialog
+			to be searched (and have the variables fetched).
 			</para>
 		</listitem>
 		</itemizedlist>
@@ -1666,7 +1701,7 @@ $dlg_val(callee) = $ru;
 		<title><function>get_dialog_vals</function> usage</title>
 		<programlisting format="linespecific">
 ...
-if ( get_dialog_vals("$avp(d_names)","$avp(d_vals)","$var(callid)") ) {
+if ( get_dialog_vals($avp(d_names),$avp(d_vals),$var(callid)) ) {
 	xlog("the call $var(callid) has the variables:\n);
 	$var(i) = 0;
 	while ( $(avp(d_names)[$var(i)])!=NULL ) {
@@ -1694,19 +1729,19 @@ if ( get_dialog_vals("$avp(d_names)","$avp(d_vals)","$var(callid)") ) {
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>name</emphasis> - the name of the dialog variable used for the lookup
+			<para><emphasis>name (string)</emphasis> - the name of the dialog variable used for the lookup
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>value</emphasis> - the value of the above dialog val
+			<para><emphasis>value (string)</emphasis> - the value of the above dialog val
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>out_avp</emphasis> - the AVP which will be populated will the dialog JSONs for all the matched calls
+			<para><emphasis>out_avp (var)</emphasis> - the AVP which will be populated will the dialog JSONs for all the matched calls
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>dlg_no</emphasis> - the out var which will contain the total number of matched dialogs
+			<para><emphasis>dlg_no (var)</emphasis> - the out var which will contain the total number of matched dialogs
 			</para>
 		</listitem>
 		</itemizedlist>
@@ -1717,7 +1752,7 @@ if ( get_dialog_vals("$avp(d_names)","$avp(d_vals)","$var(callid)") ) {
 		<title><function>get_dialog_vals</function> usage</title>
 		<programlisting format="linespecific">
 ...
-if ( get_dialogs_by_val("caller","$fU","$avp(dlg_jsons)","$avp(dlg_no)") ) {
+if ( get_dialogs_by_val("caller",$fU,$avp(dlg_jsons),$avp(dlg_no)) ) {
 	xlog("Caller $fU has $avp(dlg_no) other calls \n);
 	$var(i) = 0;
 	while ( $(avp(dlg_jsons)[$var(i)])!=NULL ) {
@@ -1746,19 +1781,19 @@ if ( get_dialogs_by_val("caller","$fU","$avp(dlg_jsons)","$avp(dlg_no)") ) {
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>name</emphasis> - the name of the dialog profile used for the lookup
+			<para><emphasis>name (string)</emphasis> - the name of the dialog profile used for the lookup
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>value</emphasis> - the value of the above dialog profile ( optional )
+			<para><emphasis>value (string)</emphasis> - the value of the above dialog profile ( optional )
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>out_avp</emphasis> - the AVP which will be populated will the dialog JSONs for all the matched calls
+			<para><emphasis>out_avp (var)</emphasis> - the AVP which will be populated will the dialog JSONs for all the matched calls
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>dlg_no</emphasis> - the out var which will contain the total number of matched dialogs
+			<para><emphasis>dlg_no (var)</emphasis> - the out var which will contain the total number of matched dialogs
 			</para>
 		</listitem>
 		</itemizedlist>
@@ -1769,7 +1804,7 @@ if ( get_dialogs_by_val("caller","$fU","$avp(dlg_jsons)","$avp(dlg_no)") ) {
 		<title><function>get_dialog_vals</function> usage</title>
 		<programlisting format="linespecific">
 ...
-if ( get_dialogs_by_profile("caller","$fU","$avp(dlg_jsons)","$avp(dlg_no)") ) {
+if ( get_dialogs_by_profile("caller",$fU,$avp(dlg_jsons),$avp(dlg_no)) ) {
 	xlog("Caller $fU has $avp(dlg_no) other calls \n);
 	$var(i) = 0;
 	while ( $(avp(dlg_jsons)[$var(i)])!=NULL ) {
@@ -1782,6 +1817,79 @@ if ( get_dialogs_by_profile("caller","$fU","$avp(dlg_jsons)","$avp(dlg_no)") ) {
 </programlisting>
 		</example>
 	</section>
+
+
+	<section id="func_load_dialog_ctx" xreflabel="load_dialog_ctx()">
+		<title>
+		<function moreinfo="none">load_dialog_ctx( dialog [, id_type])</function>
+		</title>
+		<para>
+		The function loads and switches to the context of the given dialog.
+		The context of a dialog is given by the dialog flags, variables,
+		profiles and any other value/state related to the dialog. By 
+		switching to the context of another dialog, you will see at the script
+		level, by default, all the data from the new dialog.
+		</para>
+		<para>
+		NOTE: you cannot perform a new load until doing an unload - no nested
+		loadings are possible.
+		</para>
+		<para>Meaning of the parameters is as follows:</para>
+		<itemizedlist>
+		<listitem>
+			<para><emphasis>dialog (string)</emphasis> - the identifier of the
+			dialog to be loaded, it may be a SIP Call-ID or a Dialog ID.
+			</para>
+		</listitem>
+		<listitem>
+			<para><emphasis>id_type (string,optional)</emphasis> - what kind of
+			dialog identified was used in the first parameter. It can be
+			<emphasis>callid</emphasis> (SIP Call-ID) or 
+			<emphasis>did</emphasis> (internal Dialog ID). By default callid
+			will be assumed.
+			</para>
+		</listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from any type of route.
+		</para>
+		<example>
+		<title><function>load_dialog_ctx</function> usage</title>
+		<programlisting format="linespecific">
+...
+if (load_dialog_ctx("$var(callid)")) {
+	xlog("The dialog '$var(callid)' already has a duration "
+	     "of $DLG_lifetime seconds\n");
+	if (is_in_profile("inbound_call"))
+		xlog("this dialog is an inbound call\n");
+	unload_dialog_ctx();
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+
+	<section id="func_unload_dialog_ctx" xreflabel="unload_dialog_ctx()">
+		<title>
+		<function moreinfo="none">unload_dialog_ctx()</function>
+		</title>
+		<para>
+		The function off-loads the loaded context of another dialog, exposing
+		whatever dialog context was present before doing the load.
+		</para>
+		<para>
+		NOTE: you MUST perform from script an explicit unload for each load
+		you did, otherwise the loaded dialog will remain hanged for ever.
+		</para>
+		<para>
+		This function can be used from any type of route.
+		</para>
+		<para>
+		For usage example, see the <xref linkend="func_load_dialog_ctx"/>
+		</para>
+	</section>
+
 
 	<section id="func_set_dlg_profile" xreflabel="set_dlg_profile()">
 		<title>
@@ -1799,15 +1907,14 @@ if ( get_dialogs_by_profile("caller","$fU","$avp(dlg_jsons)","$avp(dlg_no)") ) {
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>profile</emphasis> - name of the profile to be
-			added to; pseudo-variables are supported.
+			<para><emphasis>profile (string)</emphasis> - name of the profile to be
+			added to.
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>value</emphasis> (optional) - string value to
+			<para><emphasis>value (string, optional)</emphasis> - string value to
 			define the belonging of the dialog to the profile - note that the
 			profile must support values.
-			Pseudo-variables are supported.
 			</para>
 		</listitem>
 		</itemizedlist>
@@ -1820,7 +1927,7 @@ if ( get_dialogs_by_profile("caller","$fU","$avp(dlg_jsons)","$avp(dlg_no)") ) {
 		<programlisting format="linespecific">
 ...
 set_dlg_profile("inbound_call");
-set_dlg_profile("caller","$fu");
+set_dlg_profile("caller",$fu);
 ...
 </programlisting>
 		</example>
@@ -1841,15 +1948,14 @@ set_dlg_profile("caller","$fu");
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>profile</emphasis> - name of the profile to be
-			removed from; pseudo-variables are supported.
+			<para><emphasis>profile (string)</emphasis> - name of the profile to be
+			removed from.
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>value</emphasis> (optional) - string value to
+			<para><emphasis>value (string, optional)</emphasis> - string value to
 			define the belonging of the dialog to the profile - note that the
 			profile must support values.
-			Pseudo-variables are supported.
 			</para>
 		</listitem>
 		</itemizedlist>
@@ -1862,7 +1968,7 @@ set_dlg_profile("caller","$fu");
 		<programlisting format="linespecific">
 ...
 unset_dlg_profile("inbound_call");
-unset_dlg_profile("caller","$fu");
+unset_dlg_profile("caller",$fu);
 ...
 </programlisting>
 		</example>
@@ -1888,13 +1994,13 @@ unset_dlg_profile("caller","$fu");
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>profile</emphasis> - name of the profile to be
-			checked against; pseudo-variables are supported.
+			<para><emphasis>profile (string)</emphasis> - name of the profile to be
+			checked against.
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>value</emphasis> (optional) - string value to
-			toughen  the check. Pseudo-variables are supported.
+			<para><emphasis>value (string. optional)</emphasis> - string value to
+			toughen the check.
 			</para>
 		</listitem>
 		</itemizedlist>
@@ -1933,17 +2039,17 @@ if (is_in_profile("caller","XX")) {
 		<para>Meaning of the parameters is as follows:</para>
 		<itemizedlist>
 		<listitem>
-			<para><emphasis>profile</emphasis> - name of the profile to get
-			the size for; pseudo-variables are supported.
+			<para><emphasis>profile (string)</emphasis> - name of the profile to get
+			the size for.
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>value</emphasis> (optional) - string value to
-			toughen  the check; pseudo-variables are supported.
+			<para><emphasis>value (string, optional)</emphasis> - string value to
+			toughen the check.
 			</para>
 		</listitem>
 		<listitem>
-			<para><emphasis>size</emphasis> - an AVP or script variable to
+			<para><emphasis>size (var)</emphasis> - an AVP or script variable to
 			return the profile size in.
 			</para>
 		</listitem>
@@ -1958,10 +2064,10 @@ if (is_in_profile("caller","XX")) {
 modparam("dialog", "profiles_no_value", "inboundCalls")
 modparam("dialog", "profiles_with_value", "caller")
 ...
-get_profile_size("inboundCalls",,"$var(size)");
+get_profile_size("inboundCalls",,$var(size));
 xlog("inboundCalls: $var(size)\n");
 ...
-get_profile_size("caller", "$fu", "$var(size)");
+get_profile_size("caller", $fu, $var(size));
 xlog("currently, the user $fu has $var(size) active outgoing calls\n");
 ...
 </programlisting>
@@ -1977,9 +2083,12 @@ xlog("currently, the user $fu has $var(size) active outgoing calls\n");
 		flags are dialog persistent and they can be accessed (set and test)
 		for all requests belonging to the dialog.
 		</para>
-		<para>
-		The flag index can be between 0 and 31.
-		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>idx (int)</emphasis> - The flag index can be between 0 and 31.
+			</para></listitem>
+		</itemizedlist>
 		<para>
 		NOTE: the dialog must be created before using this function (use
 		create_dialog() function before).
@@ -1992,7 +2101,7 @@ xlog("currently, the user $fu has $var(size) active outgoing calls\n");
 		<title><function>set_dlg_flag</function> usage</title>
 		<programlisting format="linespecific">
 ...
-set_dlg_flag("3");
+set_dlg_flag(3);
 ...
 </programlisting>
 		</example>
@@ -2007,12 +2116,14 @@ set_dlg_flag("3");
 		equal to <emphasis>value</emphasis>. If true, changes the value with the
 		opposite one. This operation is done under the dialog lock.
 		</para>
-		<para>
-		The flag index can be between 0 and 31.
-		</para>
-		<para>
-		The value should be 0 (false) or 1 (true).
-		</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>idx (int)</emphasis> - The flag index can be between 0 and 31.
+			</para></listitem>
+			<listitem><para>
+				<emphasis>value (int)</emphasis> - The value should be 0 (false) or 1 (true).
+			</para></listitem>
+		</itemizedlist>
 		<para>
 		NOTE: the dialog must be created before using this function (use
 		create_dialog() function before).
@@ -2025,7 +2136,7 @@ set_dlg_flag("3");
 		<title><function>test_and_set_dlg_flag</function> usage</title>
 		<programlisting format="linespecific">
 ...
-test_and_set_dlg_flag("3", "0");
+test_and_set_dlg_flag(3, 0);
 ...
 </programlisting>
 		</example>
@@ -2040,9 +2151,12 @@ test_and_set_dlg_flag("3", "0");
 		The dialog flags are dialog persistent and they can be accessed
 		(set and test) for all requests belonging to the dialog.
 		</para>
-		<para>
-		The flag index can be between 0 and 31.
-		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>idx (int)</emphasis> - The flag index can be between 0 and 31.
+			</para></listitem>
+		</itemizedlist>
 		<para>
 		NOTE: the dialog must be created before using this function (use
 		create_dialog() function before).
@@ -2055,7 +2169,7 @@ test_and_set_dlg_flag("3", "0");
 		<title><function>reset_dlg_flag</function> usage</title>
 		<programlisting format="linespecific">
 ...
-reset_dlg_flag("16");
+reset_dlg_flag(16);
 ...
 </programlisting>
 		</example>
@@ -2070,9 +2184,12 @@ reset_dlg_flag("16");
 		The dialog flags are dialog persistent and they can be accessed
 		(set and test) for all requests belonging to the dialog.
 		</para>
-		<para>
-		The flag index can be between 0 and 31.
-		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>idx (int)</emphasis> - The flag index can be between 0 and 31.
+			</para></listitem>
+		</itemizedlist>
 		<para>
 		NOTE: the dialog must be created before using this function (use
 		create_dialog() function before).
@@ -2085,7 +2202,7 @@ reset_dlg_flag("16");
 		<title><function>is_dlg_flag_set</function> usage</title>
 		<programlisting format="linespecific">
 ...
-if (is_dlg_flag_set("16")) {
+if (is_dlg_flag_set(16)) {
 	xlog("dialog flag 16 is set\n");
 }
 ...
@@ -2103,9 +2220,15 @@ if (is_dlg_flag_set("16")) {
 		dialog persistent and they can be accessed (read and write) for all
 		requests belonging to the dialog.
 		</para>
-		<para>
-		Parameter <emphasis>val</emphasis> may contain pseudo-variables.
-		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>name (string)</emphasis>
+			</para></listitem>
+			<listitem><para>
+				<emphasis>val (string)</emphasis>
+			</para></listitem>
+		</itemizedlist>
 		<para>
 		NOTE: the dialog must be created before using this function (use
 		create_dialog() function before).
@@ -2122,7 +2245,7 @@ if (is_dlg_flag_set("16")) {
 		<title><function>store_dlg_value</function> usage</title>
 		<programlisting format="linespecific">
 ...
-store_dlg_value("inv_src_ip","$si");
+store_dlg_value("inv_src_ip",$si);
 store_dlg_value("account type","prepaid");
 # or
 $dlg_val(account_type) = "prepaid";
@@ -2133,7 +2256,7 @@ $dlg_val(account_type) = "prepaid";
 
 	<section id="func_fetch_dlg_value" xreflabel="fetch_dlg_value()">
 		<title>
-		<function moreinfo="none">fetch_dlg_value(name,pvar)</function>
+		<function moreinfo="none">fetch_dlg_value(name,val)</function>
 		</title>
 		<para>
 		Fetches from the dialog the value of attribute named
@@ -2141,10 +2264,15 @@ $dlg_val(account_type) = "prepaid";
 		dialog persistent and they can be accessed (read and write) for all
 		requests belonging to the dialog.
 		</para>
-		<para>
-		Parameter <emphasis>pvar</emphasis> may be a script var ($var) or
-		and avp ($avp).
-		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>name (string)</emphasis>
+			</para></listitem>
+			<listitem><para>
+				<emphasis>val (var)</emphasis>
+			</para></listitem>
+		</itemizedlist>
 		<para>
 		NOTE: the dialog must be created before using this function (use
 		create_dialog() function before).
@@ -2161,8 +2289,8 @@ $dlg_val(account_type) = "prepaid";
 		<title><function>fetch_dlg_value</function> usage</title>
 		<programlisting format="linespecific">
 ...
-fetch_dlg_value("inv_src_ip","$avp(2)");
-fetch_dlg_value("account type","$var(account)");
+fetch_dlg_value("inv_src_ip",$avp(2));
+fetch_dlg_value("account type",$var(account));
 # or
 $var(account) = $dlg_val(account_type);
 ...
@@ -2183,6 +2311,12 @@ $var(account) = $dlg_val(account_type);
 		<para>
 		For more details see the <xref linkend="dialog-clustering"/> chapter.
 		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>tag_name (string)</emphasis>
+			</para></listitem>
+		</itemizedlist>
 		<para>
 		NOTE: the dialog must be created before using this function (use
 		create_dialog() function before).
@@ -2196,6 +2330,223 @@ $var(account) = $dlg_val(account_type);
 		<programlisting format="linespecific">
 ...
 set_dlg_sharing_tag("vip1");
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_dlg_on_answer" xreflabel="dlg_on_answer()">
+		<title>
+		<function moreinfo="none">dlg_on_answer([route_name])</function>
+		</title>
+		<para>
+		The function arms a script route to be executed when the current
+		dialog will be later answered. When the route will be executed, the
+		dialog context will be exposed, but with no valid SIP message (just
+		a phony one).
+		</para>
+		<para>
+		You must use this function AFTER creating the dialog and before the
+		dialog being answered.
+		</para>
+		<para>
+		If the parameter is missing, the function does a reset of any route
+		previously set; there will be no triggering.
+		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>route_name (string,optional)</emphasis> - the name
+				of the script route to be executed.
+			</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
+			REPLY_ROUTE and FAILURE_ROUTE.
+		</para>
+		<example>
+		<title><function>dlg_on_answer</function> usage</title>
+		<programlisting format="linespecific">
+...
+create_dialog();
+dlg_on_answer("dlg_answered");
+...
+route[dlg_answered] {
+	xlog("The dialog $DLG_did was answered\n");
+}
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_dlg_on_timeout" xreflabel="dlg_on_timeout()">
+		<title>
+		<function moreinfo="none">dlg_on_timeout([route_name])</function>
+		</title>
+		<para>
+		The function arms a script route to be executed when (and if) the 
+		current dialog will timeout (as duration). When the route will be 
+		executed, the dialog context will be exposed, but with no valid SIP
+		message (just a phony one)
+		</para>
+		<para>
+		When the route is executed, the dialog is not yet terminated, just its
+		lifetime reached the set limit. In the timeout route you can increase 
+		the dialog expiration timeout (and the dialog will continue) or you
+		can let the dialog to be terminated (after the end of this route).
+		</para>
+		<para>
+		You must use this function AFTER creating the dialog and before the
+		dialog being answered.
+		</para>
+		<para>
+		You must use this function AFTER creating the dialog and before the
+		dialog being answered.
+		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>route_name (string,optional)</emphasis> - the name
+				of the script route to be executed.
+			</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
+			REPLY_ROUTE and FAILURE_ROUTE.
+		</para>
+		<example>
+		<title><function>dlg_on_timeout</function> usage</title>
+		<programlisting format="linespecific">
+...
+create_dialog();
+$DLG_timeout=120;
+dlg_on_timeout("dlg_timeout");
+...
+route[dlg_timeout] {
+	xlog("The dialog $DLG_did timed out\n");
+	if (_some_prolongation_condition)
+		$DLG_timeout = 60; # give it 1 min more
+}
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_dlg_on_hangup" xreflabel="dlg_on_hangup()">
+		<title>
+		<function moreinfo="none">dlg_on_hangup([route_name])</function>
+		</title>
+		<para>
+		The function arms a script route to be executed when the current
+		dialog will be terminated. When the route will be executed, the
+		dialog context will be exposed, but with no valid SIP message (just
+		a phony one). Note that the dialog will be already terminated and there
+		is nothing you can do about it besides reading data from its context.
+		</para>
+		<para>
+		You must use this function AFTER creating the dialog and before the
+		dialog being answered.
+		<para>
+		</para>
+		If the parameter is missing, the function does a reset of any route
+		previously set; there will be no triggering.
+		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>route_name (string,optional)</emphasis> - the name
+				of the script route to be executed.
+			</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from REQUEST_ROUTE, BRANCH_ROUTE,
+			REPLY_ROUTE and FAILURE_ROUTE.
+		</para>
+		<example>
+		<title><function>dlg_on_hangup</function> usage</title>
+		<programlisting format="linespecific">
+...
+create_dialog();
+dlg_on_hangup("dlg_hangup");
+...
+route[dlg_hangup] {
+	xlog("The dialog $DLG_did terminated after $DLG_lifetime secs\n");
+}
+</programlisting>
+		</example>
+	</section>
+
+	<section id="func_dlg_send_sequential" xreflabel="dlg_send_sequential()">
+		<title>
+			<function moreinfo="none">dlg_send_sequential(method, leg, [, body] [, content-type] [, headers])</function>
+		</title>
+		<para>
+		Used to send an in-dialog request towards one if the dialog's legs.
+		The function assumes that is runs inside a dialog context - if you
+		are running it from a different context (such as an event_route),
+		make sure you first load the dialog context using the
+			<xref linkend="func_load_dialog_ctx"/> function.
+		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para><emphasis>method (string)</emphasis> -
+				the method of the request sent.
+			</para></listitem>
+			<listitem><para><emphasis>leg (string)</emphasis> - the leg
+				where the request is sent. Must be either
+				<emphasis>caller</emphasis> or <emphasis>callee</emphasis>.
+			</para></listitem>
+			<listitem><para><emphasis>body (string, optional)</emphasis> - an
+				optional body sent in the request. If missing, no body is sent.
+			</para></listitem>
+			<listitem><para><emphasis>content-type (string, optional)</emphasis> -
+				the content type of the body sent. Make sure you specify this
+				every time you send a request with a body, otherwise there are high
+				changes that your UAC will reject the request.
+			</para></listitem>
+			<listitem><para><emphasis>headers (string, optional)</emphasis> -
+				additional headers attached to the request sent.
+			</para></listitem>
+		</itemizedlist>
+		<para>
+		This function can be used from ANY route.
+		</para>
+		<example>
+		<title><function>dlg_send_sequential</function> usage to convert DTMF codes</title>
+		<programlisting format="linespecific">
+...
+event_route[E_RTPPROXY_DTMF] {
+    if (load_dialog_ctx("$param(id)", "did")) {
+        if ($param(stream) == 0) {
+            $var(direction) = "callee";
+        } else {
+            $var(direction) = "caller";
+        }
+        dlg_send_sequential($var(direction), "INFO",
+                "Signal=$param(digit)\nDuration=160",
+                "application/dtmf-relay");
+        unload_dialog_ctx();
+    }
+}
+...
+</programlisting>
+		</example>
+	</section>
+
+	<section id="param_cluster_auto_sync" xreflabel="cluster_auto_sync">
+		<title><varname>cluster_auto_sync</varname> (string)</title>
+		<para>
+		Specifies whether to automatically issue a sync request (for dialogs
+		marked with a sharing tag in backup state) when a node becomes reachable.
+		A value of <emphasis>1</emphasis> means enabled and <emphasis>0</emphasis>
+		disabled.
+		</para>
+		<para><emphasis>
+			Default value is 1 (enabled).
+		</emphasis></para>
+		<example>
+		<title>Set <varname>cluster_auto_sync</varname> parameter</title>
+		<programlisting format="linespecific">
+...
+modparam("dialog", "cluster_auto_sync", 0)
 ...
 </programlisting>
 		</example>
@@ -2339,10 +2690,10 @@ set_dlg_sharing_tag("vip1");
 		## list all ongoing dialogs
 		opensips-cli -x mi dlg_list
 		## list the dialog by callid and From TAG
-		opensips-cli -x mi dlg_list abcdrssfrs122444@192.168.1.1 AAdfeEFF33
+		opensips-cli -x mi dlg_list callid=abcdrssfrs122444@192.168.1.1 from_tag=AAdfeEFF33
 		## list 10 dialogs, starting from the position 40
 		## (in the list of all ongoing dialogs)
-		opensips-cli -x mi dlg_list 40 10
+		opensips-cli -x mi dlg_list index=40 counter=10
 		</programlisting>
 		</section>
 
@@ -2387,7 +2738,7 @@ set_dlg_sharing_tag("vip1");
 		<itemizedlist>
 			<listitem><para>
 				<emphasis>dialog_id</emphasis> - this is an identifier
-				of the dialog - it can be either (1) the numerical unique ID 
+				of the dialog - it can be either (1) the unique ID 
 				of the dialog (as provided by dlg_list), either (2) the 
 				SIP Call-ID of the dialog.
 			</para></listitem>
@@ -2405,7 +2756,7 @@ set_dlg_sharing_tag("vip1");
 		</para>
 		<programlisting  format="linespecific">
 		# terminate the dialog via the internal Dialog-ID
-		opensips-cli -x mi dlg_end_dlg 1391569858236
+		opensips-cli -x mi dlg_end_dlg 6ae.4b38d013
 		# terminate the dialog via its SIP Call-ID
 		opensips-cli -x mi dlg_end_dlg Y2IwYjQ2YmE2ZDg5MWVkNDNkZGIwZjAzNGM1ZDY
 		</programlisting>
@@ -2554,22 +2905,27 @@ set_dlg_sharing_tag("vip1");
 		This command will only take effect if dialog replication is enabled.
 		</para>
 		<para>
-		The current node will locate a suitable donor node within the
-		<xref linkend="param_dialog_replication_cluster"/> and issue a sync
-		request to it. The donor node will then push all the dialog information
-		to the current node, via the the binary interface. For dialogs that
-		already exist in memory, the information will be not be treated as an update
-		but discarded instead.
+		Fully synchronize the dialog information in memory from a suitable donor
+		node within the <xref linkend="param_dialog_replication_cluster"/>. Dialogs
+		that already exist in memory which are not reconfirmed through syncing will
+		be discarded. A sharing tag can be specified in order to sync only dialogs
+		marked with that sharing tag.
 		</para>
 		<para>
 		Name: <emphasis>dlg_cluster_sync</emphasis>
 		</para>
-		<para>It takes no parameters</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>sharing_tag</emphasis> - name of the sharing tag that
+				dialogs have to be marked with in order to be synced
+			</para></listitem>
+		</itemizedlist>
 		<para>
 		MI FIFO Command Format:
 		</para>
 		<programlisting  format="linespecific">
-		opensips-cli -x mi dlg_cluster_sync
+		opensips-cli -x mi dlg_cluster_sync vip1
 		</programlisting>
 		</section>
 
@@ -2639,8 +2995,125 @@ set_dlg_sharing_tag("vip1");
 		</programlisting>
 		</section>
 
-	</section>
+		<section id="mi_dlg_send_sequential" xreflabel="dlg_send_sequential">
+		<title><function moreinfo="none">dlg_send_sequential</function></title>
+		<para>
+		Sends a sequential request within an ongoing dialog.
+		</para>
+		<para>
+		Name: <emphasis>dlg_send_sequential</emphasis>
+		</para>
+		<para>Parameters:</para>
+		<itemizedlist>
+			<listitem><para>
+				<emphasis>callid</emphasis> - the callid of the dialog you need to trigger
+					the sequential message for.
+			</para></listitem>
+			<listitem><para>
+				<emphasis>method</emphasis> - (optional) the method used for the sequential
+					message. Default value is <emphasis>INVITE</emphasis>.
+			</para></listitem>
+			<listitem><para>
+				<emphasis>mode</emphasis> - (optional) can be used to tune the behavior of
+					the sequential message. Possible values for the <emphasis>mode</emphasis> are:
+				<itemizedlist>
+					<listitem><para>
+					<emphasis>caller</emphasis> - (default) sends the sequential message
+						to the caller. This mode can be useful in high availability scenarios
+						when you want to update the upstream's routing set, specifically the contact.
+					</para></listitem>
+					<listitem><para>
+						<emphasis>callee</emphasis> - same as caller, but sends the sequential
+							message to the callee.
+					</para></listitem>
+					<listitem><para>
+						<emphasis>challenge</emphasis> - sends a sequential INVITE (or UPDATE)
+						to the caller to challenge it for its advertised SDP body. When the
+						body is received, it is forwarded to the callee. This mode is useful
+						when trying to change both endpoints (upstream and downstream) routing
+						set. It can also be useful when trying to trigger a re-negotiation for
+						SDP body.
+					</para></listitem>
+					<listitem><para>
+						<emphasis>challenge-caller</emphasis> - same as <emphasis>challenge</emphasis>
+					</para></listitem>
+					<listitem><para>
+						<emphasis>challenge-callee</emphasis> - same as
+							<emphasis>challenge-caller</emphasis>, only that it first challenges
+							the callee, instead of the caller.
+					</para></listitem>
+				</itemizedlist>
+			</para></listitem>
+			<listitem><para>
+				<emphasis>body</emphasis> - (optional) can be used to specify a body for
+					the initial sequential message. Possible values for the <emphasis>body</emphasis>
+					parameter are:
+				<itemizedlist>
+					<listitem><para>
+						<emphasis>none</emphasis> - (default) no body added to the sequential message.
+					</para></listitem>
+					<listitem><para>
+						<emphasis>inbound</emphasis> - advertises in the body of the sequential
+							message generated the last body received from its pair. For example,
+							if the <emphasis>mode=challenge-caller</emphasis>, the message will
+							contain the body sent to &osips; by the callee. This is useful when
+							you need to alter the body previously sent to the caller, because you
+							want to re-negotiate a different media proxy for the call. This can
+							be achieved by catching the generated request in
+							<emphasis>local_route</emphasis>, and re-engage the Media proxy.
+					</para></listitem>
+					<listitem><para>
+						<emphasis>outbound</emphasis> - advertises in the body of the sequential
+							message generated the last body sent to that UAC. For example,
+							if the <emphasis>mode=challenge-caller</emphasis>, the message will
+							contain the last body sent by &osips; to the caller. This is useful
+							in a high availability scenario when trying to re-negotiate the
+							contact of the server, but there is no need to alter the body sent
+							earlier.
+					</para></listitem>
+					<listitem><para>
+							<emphasis>custom:CONTENT_TYPE:BODY</emphasis> - this can be used to
+								specify a specific Content-Type ehader and body for the
+								sequential message generated.
+					</para></listitem>
+				</itemizedlist>
+			</para></listitem>
+		</itemizedlist>
+		<para>
+			This functions runs asynchronously and returns the status code and reason
+			of the last reply received for either the <emphasis>challenge</emphasis> or normal mode.
+		</para>
+		<para>
+		MI Command Format:
+		</para>
+		<programlisting  format="linespecific">
+			opensips-cli -x mi dlg_send_sequential \
+				callid=5291231-testing@127.0.0.1
+		</programlisting>
 
+		<para>
+		MI Command used to trigger media re-negotiation:
+		</para>
+		<programlisting  format="linespecific">
+			opensips-cli -x mi dlg_send_sequential \
+				callid=5291231-testing@127.0.0.1 \
+				mode=challenge \
+				body=inbound
+		</programlisting>
+
+		<para>
+		MI Command used to UPDATE the callee's remote Contact after a server failover:
+		</para>
+		<programlisting  format="linespecific">
+			opensips-cli -x mi dlg_send_sequential \
+				callid=5291231-testing@127.0.0.1 \
+				mode=challenge-callee \
+				body=outbound \
+				method=UPDATE
+		</programlisting>
+
+		</section>
+	</section>
 
 	<section id="exported_pseudo_variables">
 	<title>Exported Pseudo-Variables</title>
@@ -2718,9 +3191,10 @@ set_dlg_sharing_tag("vip1");
 		<section id="pv_DLG_dir" xreflabel="$DLG_dir">
 			<title><varname>$DLG_dir</varname></title>
 			<para>
-			Returns the direction of the request in dialog (as "UPSTREAM" or
-			"DOWNSTREAM" string) - to be used for sequential request.
-			This PV will be available only for sequential requests (on
+			Returns the direction of the request in dialog (as "upstream" string
+			if the request is generated by callee or "downstream" string if the
+			request is generated by caller) - to be used for sequential request.
+			This PV will be available only for sequential requests (not for
 			replies), after doing loose_route().
 			</para>
 			<para>
@@ -2732,8 +3206,8 @@ set_dlg_sharing_tag("vip1");
 			<title><varname>$DLG_did</varname></title>
 			<para>
 			Returns the id of the dialog corresponding to
-			the processed sequential request. The output format is
-			entry ':' id (as returned by the dlg_list MI function). This PV will be
+			the processed sequential request. The output format is a string
+			identical to the one returned by the dlg_list MI function. This PV will be
 			available only for sequential requests, after doing loose_route().
 			</para>
 			<para>
@@ -2765,11 +3239,19 @@ set_dlg_sharing_tag("vip1");
 						</para>
 					</listitem>
 					<listitem>
-						<para><emphasis>Ping Timeout</emphasis> - Dialog ended because no reply to in-dialog pings
+						<para><emphasis>Ping Timeout</emphasis> - Dialog ended because no reply to option pings
+						</para>
+					</listitem>
+					<listitem>
+						<para><emphasis>ReINVITE Ping Timeout</emphasis> - Dialog ended because no reply to reinvite pings
 						</para>
 					</listitem>
 					<listitem>
 						<para><emphasis>RTPProxy Timeout</emphasis> - Media timeout signaled by RTPProxy
+						</para>
+					</listitem>
+					<listitem>
+						<para><emphasis>SIP Race Condition</emphasis> - SIP Race Condition occurred
 						</para>
 					</listitem>
 				</itemizedlist>
@@ -2843,14 +3325,11 @@ set_dlg_sharing_tag("vip1");
 		<para>Parameters:</para>
 		<itemizedlist>
 			<listitem><para>
-					<emphasis>hash_entry</emphasis> - the entry in the dialog table.
-					This is used, along with the <emphasis>hash_id</emphasis>,
-					to uniquely identify the dialog.
+					<emphasis>id</emphasis> - the hex representation of the dialog id.
 			</para></listitem>
 			<listitem><para>
-					<emphasis>hash_id</emphasis> - the id in the dialog table.
-					This is used, along with the <emphasis>hash_entry</emphasis>,
-					to uniquely identify the dialog.
+					<emphasis>db_id</emphasis> - the integer representation of the dialog id,
+					as it is stored in the database <emphasis>dlg_id</emphasis> field.
 			</para></listitem>
 			<listitem><para>
 					<emphasis>callid</emphasis> - the callid.

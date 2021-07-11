@@ -7,7 +7,7 @@ Fraud Detection Module
 
         1.1. Overview
 
-              1.1.1. Monitorized Stats
+              1.1.1. Monitored Stats
               1.1.2. Fraud rules
 
         1.2. Dependencies
@@ -96,7 +96,7 @@ Chapter 1. Admin Guide
    This module provides a way to prevent some basic fraud attacks.
    Alerts are provided through return codes and events.
 
-1.1.1. Monitorized Stats
+1.1.1. Monitored Stats
 
    Basically, this module watches the following parameters:
      * Total calls
@@ -396,20 +396,26 @@ hresh")
 1.4.1.  check_fraud(user, number, profile_id)
 
    This method should be called each time a given user calls a
-   given number. It will try to match a fraud rule within de given
-   fraud profile and update the stats (see above). Furthermore,
-   the stats will be checked against the rule's thresholds. If any
-   of the stats is above it's threshold value the appropriate
-   event will also be raised (see further details below).
+   given number. It will try to match a fraud rule within the
+   given fraud profile and update the stats (see above).
+   Furthermore, the stats will be checked against the rule's
+   thresholds. If any of the stats is above its threshold value,
+   the appropriate event will also be raised (see further details
+   below).
+
+   Designed to only work with initial INVITE messages! If a dialog
+   is not already present, one will be created (equivalent of
+   create_dialog()).
 
    Meaning of the parameters is as follows:
-     * user - the user who is making the call. Please keep in mind
-       that the user doesn't have to be registered. This string is
-       only used do keep different stats for different registered
-       users.
-     * number - the number the user is calling to.
-     * profile_id - the fraud profile id (i.e. the subset of fraud
-       rules) in which to try and find a matching fraud rule.
+     * user (string) - the user who is making the call. Please
+       keep in mind that the user doesn't have to be registered.
+       This string is only used to keep different stats for
+       different registered users.
+     * number (string) - the number the user is calling to.
+     * profile_id (int) - the fraud profile id (i.e. the subset of
+       fraud rules) in which to try and find a matching fraud
+       rule.
 
    The meaning of the return code is as follows:
      * 2 - no matching fraud rule was found
@@ -427,15 +433,19 @@ hresh")
 
 1.5.1.  show_fraud_stats
 
-   Show the current statistics for a user to a given prefix and
-   fraud profile.
+   Show the current statistics for all dials of a user to a
+   prefix.
+
+   NOTE: Since the fraud statistics are refreshed on-the-fly, as
+   check_fraud() is called, this function will return stale data
+   if check_fraud() has not been called at least once for the
+   (user, prefix) pair within a newly matching time interval!
 
    Name: show_fraud_stats
 
    Parameters:
      * user
      * prefix
-     * fraud_profile
 
 1.5.2.  fraud_reload
 
@@ -482,13 +492,14 @@ Chapter 2. Contributors
    Table 2.1. Top contributors by DevScore^(1), authored
    commits^(2) and lines added/removed^(3)
      Name DevScore Commits Lines ++ Lines --
-   1. Andrei Datcu (@andrei-datcu) 37 11 2665 235
-   2. Liviu Chircu (@liviuchircu) 27 22 168 132
-   3. Bogdan-Andrei Iancu (@bogdan-iancu) 6 4 18 30
-   4. Vlad Patrascu (@rvlad-patrascu) 6 3 54 63
-   5. Razvan Crainea (@razvancrainea) 4 2 10 9
+   1. Liviu Chircu (@liviuchircu) 44 36 357 273
+   2. Andrei Datcu (@andrei-datcu) 37 11 2665 235
+   3. Vlad Patrascu (@rvlad-patrascu) 8 5 73 114
+   4. Bogdan-Andrei Iancu (@bogdan-iancu) 7 5 20 31
+   5. Razvan Crainea (@razvancrainea) 7 5 13 10
    6. Ionut Ionita (@ionutrazvanionita) 3 1 21 6
-   7. Peter Lemenkov (@lemenkov) 3 1 1 1
+   7. Maksym Sobolyev (@sobomax) 3 1 3 3
+   8. Peter Lemenkov (@lemenkov) 3 1 1 1
 
    (1) DevScore = author_commits + author_lines_added /
    (project_lines_added / project_commits) + author_lines_deleted
@@ -510,13 +521,14 @@ Chapter 2. Contributors
 
    Table 2.2. Most recently active contributors^(1) to this module
                      Name                   Commit Activity
-   1. Liviu Chircu (@liviuchircu)         Mar 2015 - Jan 2019
-   2. Vlad Patrascu (@rvlad-patrascu)     May 2017 - Dec 2018
-   3. Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
-   4. Bogdan-Andrei Iancu (@bogdan-iancu) Oct 2014 - May 2016
-   5. Ionut Ionita (@ionutrazvanionita)   Jan 2016 - Jan 2016
-   6. Razvan Crainea (@razvancrainea)     Feb 2015 - Aug 2015
-   7. Andrei Datcu (@andrei-datcu)        Aug 2014 - Sep 2014
+   1. Maksym Sobolyev (@sobomax)          Jan 2021 - Jan 2021
+   2. Liviu Chircu (@liviuchircu)         Mar 2015 - Jan 2021
+   3. Razvan Crainea (@razvancrainea)     Feb 2015 - Sep 2019
+   4. Vlad Patrascu (@rvlad-patrascu)     May 2017 - Apr 2019
+   5. Bogdan-Andrei Iancu (@bogdan-iancu) Oct 2014 - Apr 2019
+   6. Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
+   7. Ionut Ionita (@ionutrazvanionita)   Jan 2016 - Jan 2016
+   8. Andrei Datcu (@andrei-datcu)        Aug 2014 - Sep 2014
 
    (1) including any documentation-related commits, excluding
    merge commits
@@ -525,9 +537,9 @@ Chapter 3. Documentation
 
 3.1. Contributors
 
-   Last edited by: Peter Lemenkov (@lemenkov), Liviu Chircu
-   (@liviuchircu), Bogdan-Andrei Iancu (@bogdan-iancu), Andrei
-   Datcu (@andrei-datcu).
+   Last edited by: Liviu Chircu (@liviuchircu), Vlad Patrascu
+   (@rvlad-patrascu), Peter Lemenkov (@lemenkov), Bogdan-Andrei
+   Iancu (@bogdan-iancu), Andrei Datcu (@andrei-datcu).
 
    Documentation Copyrights:
 

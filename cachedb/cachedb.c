@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 OpenSIPS Solutions
+ * Copyright (C) 2011-2019 OpenSIPS Solutions
  *
  * This file is part of opensips, a free SIP server.
  *
@@ -16,13 +16,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
- *
- *
- * history:
- * ---------
- *  2011-09-xx  created (vlad-paiu)
  */
-
 
 #include "cachedb.h"
 #include "cachedb_cap.h"
@@ -36,11 +30,25 @@
 #include <string.h>
 #include <stdlib.h>
 
+stat_var *cdb_total_queries;
+stat_var *cdb_slow_queries;
+
 struct cachedb_engine_t
 {
 	cachedb_engine cde;
 	struct cachedb_engine_t* next;
 };
+
+int init_cdb_support(void)
+{
+	if (register_stat("cdb", "cdb_total_queries", &cdb_total_queries, 0) ||
+	    register_stat("cdb", "cdb_slow_queries", &cdb_slow_queries, 0)) {
+		LM_ERR("failed to register CacheDB stats\n");
+		return -1;
+	}
+
+	return 0;
+}
 
 int cachedb_store_url(struct cachedb_url **list,char *val)
 {
@@ -650,7 +658,7 @@ cachedb_con* cachedb_do_init(str *url,void* (*new_connection)(struct cachedb_id 
 
 	id = new_cachedb_id(url);
 	if (!id) {
-		LM_ERR("cannot parse url [%.*s]\n",url->len,url->s);
+		LM_ERR("cannot parse url [%s]\n", db_url_escape(url));
 		pkg_free(res);
 		return 0;
 	}
@@ -757,12 +765,12 @@ int cachedb_raw_query(str* cachedb_name, str* attr, cdb_raw_entry*** reply,int e
 	return ret;
 }
 
-void free_raw_fetch(cdb_raw_entry **reply, int no_val, int no_key)
+void free_raw_fetch(cdb_raw_entry **reply, int num_cols, int num_rows)
 {
 	int i,j;
 
-	for (i=0;i<no_key;i++) {
-		for (j=0;j<no_val;j++) {
+	for (i=0;i<num_rows;i++) {
+		for (j=0;j<num_cols;j++) {
 			if (reply[i][j].type == CDB_STR)
 				pkg_free(reply[i][j].val.s.s);
 		}

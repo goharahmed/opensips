@@ -96,11 +96,12 @@ int port_override_name, transport_override_name, domain_prefix_name,
  * Exported functions
  */
 static cmd_export_t cmds[] = {
-	{"dp_can_connect",  (cmd_function)dp_can_connect,  0, 0, 0, REQUEST_ROUTE},
-	{"dp_apply_policy", (cmd_function)dp_apply_policy, 0, 0, 0, REQUEST_ROUTE},
-	{0, 0, 0, 0, 0, 0}
+	{"dp_can_connect",  (cmd_function)dp_can_connect, {{0,0,0}},
+		REQUEST_ROUTE},
+	{"dp_apply_policy", (cmd_function)dp_apply_policy, {{0,0,0}},
+		REQUEST_ROUTE},
+	{0,0,{{0,0,0}},0}
 };
-
 
 /*
  * Exported parameters
@@ -139,6 +140,7 @@ struct module_exports exports = {
 	MOD_TYPE_DEFAULT,/* class of this module */
 	MODULE_VERSION,
 	DEFAULT_DLFLAGS, /* dlopen flags */
+	0,				 /* load function */
 	&deps,           /* OpenSIPS module dependencies */
 	cmds,      /* exported functions */
 	0,         /* exported async functions */
@@ -148,10 +150,12 @@ struct module_exports exports = {
 	0,         /* exported pseudo-variables */
 	0,		   /* exported transformations */
 	0,         /* extra processes */
+	0,         /* module pre-initialization function */
 	mod_init,  /* module initialization function */
 	0,         /* response function*/
 	destroy,   /* destroy function */
-	child_init /* per-child init function */
+	child_init,/* per-child init function */
+	0          /* reload confirm function */
 };
 
 
@@ -231,12 +235,9 @@ static int child_init(int rank)
 {
 	LM_DBG("initializing\n");
 
-	/* Check if database is needed by child */
-	if (rank!=PROC_MAIN && rank!=PROC_TCP_MAIN)  {
-		if (domainpolicy_db_init(&db_url)<0) {
-			LM_ERR("unable to connect to the database\n");
-			return -1;
-		}
+	if (domainpolicy_db_init(&db_url)<0) {
+		LM_ERR("unable to connect to the database\n");
+		return -1;
 	}
 	return 0;
 }

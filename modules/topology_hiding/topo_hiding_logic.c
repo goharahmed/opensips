@@ -34,6 +34,7 @@ extern str topo_hiding_prefix;
 extern str topo_hiding_seed;
 extern str topo_hiding_ct_encode_pw;
 extern str th_contact_encode_param;
+extern int th_ct_enc_scheme;
 
 struct th_ct_params {
 	str param_name;
@@ -381,16 +382,12 @@ static int topo_dlg_replace_contact(struct sip_msg* msg, struct dlg_cell* dlg)
 									ct_username);
 				if (ct_username_len > 0) {
 					prefix_len += 1 + /* @ */ + ct_username_len;
-					if (dlg_api.is_mod_flag_set(dlg,TOPOH_DID_IN_USER))
-						prefix_len += RR_DLG_PARAM_SIZE;
-				} else if (dlg_api.is_mod_flag_set(dlg,TOPOH_DID_IN_USER)) {
-					prefix_len += RR_DLG_PARAM_SIZE + 1;
 				}
 			}
 		}
-	} else if (dlg_api.is_mod_flag_set(dlg,TOPOH_DID_IN_USER)) {
-		prefix_len += RR_DLG_PARAM_SIZE + 1;
 	}
+	if (dlg_api.is_mod_flag_set(dlg,TOPOH_DID_IN_USER))
+		prefix_len += RR_DLG_PARAM_SIZE + 1;
 
 	prefix = pkg_malloc(prefix_len);
 	if (!prefix) {
@@ -848,8 +845,7 @@ static void _th_no_dlg_onreply(struct cell* t, int type, struct tmcb_params *par
 
 	/* pass record route headers */
 	if(req->record_route){
-		if(print_rr_body(req->record_route, &rr_set, 0,
-							0) != 0 ){
+		if(print_rr_body(req->record_route, &rr_set, 0, 1, NULL) != 0 ){
 			LM_ERR("failed to print route records \n");
 			return;
 		}
@@ -936,7 +932,13 @@ static int topo_hiding_no_dlg(struct sip_msg *req,struct cell* t,int extra_flags
 
 static int topo_hiding_with_dlg(struct sip_msg *req,struct cell* t,struct dlg_cell* dlg,int extra_flags)
 {
+	int already_engaged = dlg_api.is_mod_flag_set(dlg,TOPOH_ONGOING);
+
 	dlg_api.set_mod_flag(dlg, TOPOH_ONGOING | extra_flags );
+	if (already_engaged) {
+		LM_DBG("topology hiding already engaged!\n");
+		return 1;
+	}
 
 	/* parse all headers to be sure that all RR and Contact hdrs are found */
 	if (parse_headers(req, HDR_EOH_F, 0)< 0) {
@@ -1001,7 +1003,7 @@ void th_loaded_callback(struct dlg_cell *dlg, int type,
 
 static void topo_unref_dialog(void *dialog)
 {
-	dlg_api.unref_dlg((struct dlg_cell*)dialog, 1);
+	dlg_api.dlg_unref((struct dlg_cell*)dialog, 1);
 }
 
 static void topo_dlg_initial_reply (struct dlg_cell* dlg, int type,
@@ -1037,7 +1039,7 @@ static void topo_dlg_onroute (struct dlg_cell* dlg, int type,
 	/* we also may end up here via TERMINATE event triggered by internal
 	 * dlg termination -> the requests we have here are dummy, so nothing
 	 * to be done */
-	if (req->via1==NULL) {
+	if (is_dummy_sip_msg(req)==0) {
 		LM_DBG("dummy request identified, skipping...\n");
 		return;
 	}
@@ -1073,12 +1075,12 @@ static void topo_dlg_onroute (struct dlg_cell* dlg, int type,
 	}
 
 	/* register tm callback for response in  */
-	dlg_api.ref_dlg(dlg,1);
+	dlg_api.dlg_ref(dlg,1);
 	if (tm_api.register_tmcb( req, 0, TMCB_RESPONSE_FWDED,
 	(dir==DLG_DIR_UPSTREAM)?th_down_onreply:th_up_onreply,
 	(void*)dlg, topo_unref_dialog)<0 ) {
 		LM_ERR("failed to register TMCB\n");
-		dlg_api.unref_dlg(dlg,1);
+		dlg_api.dlg_unref(dlg,1);
 		return;
 	}
 
@@ -1247,12 +1249,7 @@ static int dlg_th_encode_callid(struct sip_msg *msg)
 	new_callid.len = word64_enc_len + topo_hiding_prefix.len;
 	new_callid.s = pkg_malloc(new_callid.len);
 	if (new_callid.s==NULL) {
-		LM_ERR("Failed to allocate callid len\n");
-		return -1;
-	}
-
-	if (new_callid.s == NULL) {
-		LM_ERR("Failed to encode callid\n");
+		LM_ERR("Failed to allocate new callid\n");
 		return -1;
 	}
 
@@ -1311,7 +1308,7 @@ static inline char *dlg_th_rebuild_rpl(struct sip_msg *msg,int *len)
 			NULL,MSG_TRANS_NOVIA_FLAG);
 }
 
-#define MSG_SKIP_BITMASK	(METHOD_REGISTER|METHOD_PUBLISH|METHOD_NOTIFY|METHOD_SUBSCRIBE)
+#define MSG_SKIP_BITMASK	(METHOD_REGISTER|METHOD_PUBLISH|METHOD_SUBSCRIBE)
 static int dlg_th_callid_pre_parse(struct sip_msg *msg,int want_from)
 {
 	/* do not throw errors from the upcoming parsing operations */
@@ -1428,8 +1425,10 @@ int topo_callid_post_raw(str *data, struct sip_msg* foo)
 	memset(&msg,0,sizeof(struct sip_msg));
 	msg.buf=data->s;
 	msg.len=data->len;
-	if (dlg_th_callid_pre_parse(&msg,1) < 0)
+	if (dlg_th_callid_pre_parse(&msg,1) < 0) {
+		LM_ERR("could not parse resulted sip message: %.*s\n", data->len, data->s);
 		goto done;
+	}
 
 	if (msg.first_line.type==SIP_REQUEST) {
 		if (get_to(&msg)->tag_value.len>0) {
@@ -1523,8 +1522,7 @@ static char* build_encoded_contact_suffix(struct sip_msg* msg,int *suffix_len)
 	}
 
 	if(msg->record_route){
-		if(print_rr_body(msg->record_route, &rr_set, !is_req,
-							0) != 0 ){
+		if(print_rr_body(msg->record_route, &rr_set, !is_req, 0, NULL) != 0){
 			LM_ERR("failed to print route records \n");
 			return NULL;
 		}
@@ -1545,7 +1543,8 @@ static char* build_encoded_contact_suffix(struct sip_msg* msg,int *suffix_len)
 
 	addr_len = (short)msg->rcv.bind_address->sock_str.len;
 	local_len += rr_len + ct_len + addr_len; 
-	enc_len = calc_word64_encode_len(local_len);
+	enc_len = th_ct_enc_scheme == ENC_BASE64 ?
+		calc_word64_encode_len(local_len) : calc_word32_encode_len(local_len);
 	total_len = enc_len +  
 		1 /* ; */ + 
 		th_contact_encode_param.len + 
@@ -1638,7 +1637,10 @@ static char* build_encoded_contact_suffix(struct sip_msg* msg,int *suffix_len)
 	memcpy(s,th_contact_encode_param.s,th_contact_encode_param.len);
 	s+= th_contact_encode_param.len;
 	*s++ = '=';
-	word64encode((unsigned char*)s,(unsigned char *)suffix_plain,p-suffix_plain);
+	if (th_ct_enc_scheme == ENC_BASE64)
+		word64encode((unsigned char*)s,(unsigned char *)suffix_plain,p-suffix_plain);
+	else
+		word32encode((unsigned char*)s,(unsigned char *)suffix_plain,p-suffix_plain);
 	s = s+enc_len;
 	
 	if (th_param_list) {
@@ -1780,9 +1782,7 @@ error:
 }
 
 #define ROUTE_STR "Route: "
-#define CRLF "\r\n"
 #define ROUTE_LEN (sizeof(ROUTE_STR) - 1)
-#define CRLF_LEN (sizeof(CRLF) - 1)
 #define ROUTE_PREF "Route: <"
 #define ROUTE_PREF_LEN (sizeof(ROUTE_PREF) -1)
 #define ROUTE_SUFF ">\r\n"
@@ -1823,25 +1823,41 @@ static int topo_no_dlg_seq_handling(struct sip_msg *msg,str *info)
 		}
 	}
 
-	max_size = calc_max_word64_decode_len(info->len);
+	max_size = th_ct_enc_scheme == ENC_BASE64 ?
+		calc_max_word64_decode_len(info->len) :
+		calc_max_word32_decode_len(info->len);
 	dec_buf = pkg_malloc(max_size);
 	if (dec_buf==NULL) {
 		LM_ERR("No more pkg\n");
 		return -1;
 	}
 
-	dec_len = word64decode((unsigned char *)dec_buf,(unsigned char *)info->s,info->len);
+	if (th_ct_enc_scheme == ENC_BASE64)
+		dec_len = word64decode((unsigned char *)dec_buf,
+			(unsigned char *)info->s,info->len);
+	else
+		dec_len = word32decode((unsigned char *)dec_buf,
+			(unsigned char *)info->s,info->len);
 	for (i=0;i<dec_len;i++)
 		dec_buf[i] ^= topo_hiding_ct_encode_pw.s[i%topo_hiding_ct_encode_pw.len]; 
 
-	rr_buf.len=*(short *)dec_buf;
-	rr_buf.s = dec_buf + sizeof(short);
-	p = rr_buf.s + rr_buf.len;
-	ct_buf.len = *(short *)p;
-	ct_buf.s = p + sizeof(short);
-	p = ct_buf.s + ct_buf.len;
-	bind_buf.len = *(short *)p;
-	bind_buf.s = p + sizeof(short);
+	#define __extract_len_and_buf(_p, _len, _s) \
+		do { \
+			(_s).len = *(short *)p;\
+			if ((_s).len<0 || (_s).len>_len) {\
+				LM_ERR("bad length %d in encoded contact\n", (_s).len);\
+				goto err_free_buf;\
+			}\
+			(_s).s = _p + sizeof(short);\
+			_p += sizeof(short) + (_s).len;\
+			_len -= sizeof(short) + (_s).len;\
+		} while(0)
+
+	p = dec_buf;
+	size = dec_len;
+	__extract_len_and_buf(p, size, rr_buf);
+	__extract_len_and_buf(p, size, ct_buf);
+	__extract_len_and_buf(p, size, bind_buf);
 
 	LM_DBG("extracted routes [%.*s] , ct [%.*s] and bind [%.*s]\n",
 		rr_buf.len,rr_buf.s,ct_buf.len,ct_buf.s,bind_buf.len,bind_buf.s);

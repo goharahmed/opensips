@@ -8,7 +8,7 @@
  * register at high enough frequencies that they actually degrade the
  * performance of their registrars.
  *
- * Copyright (C) 2016 OpenSIPS Solutions
+ * Copyright (C) 2016-2020 OpenSIPS Solutions
  *
  * This file is part of opensips, a free SIP server.
  *
@@ -25,10 +25,6 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
- *
- * History:
- * --------
- *  2016-07-06 initial version (liviu)
  */
 
 #ifndef __MID_REG_
@@ -68,6 +64,8 @@ struct ct_mapping {
 	str received;
 	str instance;
 
+	ucontact_t *uc;
+
 	struct list_head list;
 };
 
@@ -96,53 +94,40 @@ struct mid_reg_info {
 	                                   marks the last successful reg */
 
 	int skip_dereg;
+	int max_contacts;
 	struct list_head ct_mappings;
 
 	udomain_t *dom; /* used during 200 OK ul_api operations */
 	str aor;        /* used during both "reg out" and "resp in" */
-	str ownership_tag; /* used during both "reg out" and "resp in" */
+	str ownership_tag; /* a sharing tag which helps decide ownership */
+	struct ct_match cmatch; /* info regarding the contact matching mode */
 
 	/* ucontact_info dup'ed fields */
 	str user_agent;
 	unsigned int ul_flags;
 	unsigned int cflags;
 
+	/* REGISTER-time state of the PN providers -- to be used at 200 OK
+	 * without a re-parse of the REGISTER */
+	void *pn_provider_state;
+
 	int pending_replies;
 	rw_lock_t *tm_lock;
 };
 
-struct save_ctx {
-	unsigned int flags;
-	str aor;
-	str ownership_tag;
-	unsigned int max_contacts;
-	unsigned int expires;
-	int expires_out;
-	int star;
-
-	unsigned int min_expires;
-	unsigned int max_expires;
-};
-
 extern rw_lock_t *tm_retrans_lk;
 
-extern str realm_prefix;
 extern int case_sensitive;
 
-extern struct usrloc_api ul_api;
-extern struct tm_binds tm_api;
 extern struct sig_binds sig_api;
 
-extern int default_expires;
-extern int min_expires;
-extern int max_expires;
-extern int max_contacts;
 extern int retry_after;
 extern unsigned int outgoing_expires;
 
 extern enum mid_reg_mode reg_mode;
 extern enum mid_reg_insertion_mode ctid_insertion;
 extern str ctid_param;
+extern str at_escape_str;
 
 extern str register_method;
 extern str contact_hdr;
@@ -151,23 +136,12 @@ extern str expires_param;
 
 extern str matching_param;
 
-extern int disable_gruu;
-extern int reg_use_domain;
-
-extern str rcv_param;
-
-extern str gruu_secret;
-
-extern int tcp_persistent_flag;
-
 struct mid_reg_info *mri_alloc(void);
 struct mid_reg_info *mri_dup(struct mid_reg_info *mri);
 void mri_free(struct mid_reg_info *mri);
 
 void set_ct(struct mid_reg_info *ct);
 struct mid_reg_info *get_ct(void);
-
-int extract_aor(str* _uri, str* _a,str *sip_instance,str *call_id);
 
 int get_expires_hf(struct sip_msg* _m);
 str get_extra_ct_params(struct sip_msg *msg);

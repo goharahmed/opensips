@@ -35,6 +35,7 @@
 
 #include "../tls_mgm/api.h"
 
+#include "rest_client.h"
 #include "rest_methods.h"
 #include "rest_cb.h"
 
@@ -54,7 +55,7 @@ static int transfers;
 static int read_fds[FD_SETSIZE];
 
 /* handle for use with synchronous reqs */
-static CURL *sync_handle;
+CURL *sync_handle;
 
 /* libcurl's reported running handles */
 static int running_handles;
@@ -138,7 +139,6 @@ int trace_rest_request_cb(CURL *handle, curl_infotype type, char *data, size_t s
 			/* set port to 0 */
 			tparam->local_port = 0;
 #endif
-			/* coverity[BUFFER_SIZE_WARNING] */
 			strncpy( tparam->local_ip, ip, INET6_ADDRSTRLEN);
 
 #if ( LIBCURL_VERSION_NUM >= 0x072100 )
@@ -148,7 +148,6 @@ int trace_rest_request_cb(CURL *handle, curl_infotype type, char *data, size_t s
 			/* set boggus localhost ip */
 			ip = "127.0.0.1";
 #endif
-			/* coverity[BUFFER_SIZE_WARNING] */
 			strncpy( tparam->remote_ip, ip, INET6_ADDRSTRLEN);
 
 #if ( LIBCURL_VERSION_NUM >= 0x071900 )
@@ -182,7 +181,7 @@ int trace_rest_request_cb(CURL *handle, curl_infotype type, char *data, size_t s
 			}
 
 			/* generate a new correlation each time we send a message */
-			/* FIXME what if 2 messages are sent before recieving reply?
+			/* FIXME what if 2 messages are sent before receiving reply?
 			 * Ex: destination has 2 ip's */
 			if ( type == CURLINFO_HEADER_OUT ) {
 				tparam->correlation.s = (char *)tprot.generate_guid(REST_CORRELATION_COOKIE);
@@ -412,8 +411,17 @@ static inline int set_upload_opts(CURL *handle, str *ctype, str *body)
 		snprintf(print_buff, MAX_CONTENT_TYPE_LEN, "Content-Type: %.*s",
 		         ctype->len, ctype->s);
 		header_list = curl_slist_append(header_list, print_buff);
-		w_curl_easy_setopt(handle, CURLOPT_HTTPHEADER, header_list);
 	}
+
+	/* by default, cURL will include "Expect: 100-continue" header field for
+	 * bodies larger than 1024 bytes -- an empty value disables the header */
+	if (!enable_expect_100) {
+		snprintf(print_buff, MAX_CONTENT_TYPE_LEN, "Expect:");
+		header_list = curl_slist_append(header_list, print_buff);
+	}
+
+	if (header_list)
+		w_curl_easy_setopt(handle, CURLOPT_HTTPHEADER, header_list);
 
 	/* two rare bugs may occur with older curl versions (pre 7.17.1):
 	 *	1. since body->s is not dup'ed and may point to a PV buf,
@@ -510,7 +518,7 @@ int rest_sync_transfer(enum rest_client_method method, struct sip_msg *msg,
           /* in */    char *url, str *body, str *ctype,
           /* out */   pv_spec_p body_pv, pv_spec_p ctype_pv, pv_spec_p code_pv)
 {
-	char ret;
+	int ret;
 	CURLcode rc;
 	long http_rc;
 	pv_value_t pv_val;
@@ -545,6 +553,7 @@ int rest_sync_transfer(enum rest_client_method method, struct sip_msg *msg,
 	w_curl_easy_setopt(sync_handle, CURLOPT_WRITEDATA, &res_body);
 
 	w_curl_easy_setopt(sync_handle, CURLOPT_HEADERFUNCTION, header_func);
+	/* coverity[bad_sizeof] */
 	w_curl_easy_setopt(sync_handle, CURLOPT_HEADERDATA, &st);
 
 	if (rest_trace_enabled())
@@ -666,7 +675,7 @@ int start_async_http_req(struct sip_msg *msg, enum rest_client_method method,
 		break;
 
 	case REST_CLIENT_PUT:
-		set_post_opts(handle, req_ctype, req_body);
+		set_put_opts(handle, req_ctype, req_body);
 		break;
 
 	default:
@@ -716,22 +725,6 @@ int start_async_http_req(struct sip_msg *msg, enum rest_client_method method,
 		}
 
 		LM_DBG("perform code: %d, handles: %d\n", mrc, running_handles);
-
-		mrc = curl_multi_timeout(multi_handle, &retry_time);
-		if (mrc != CURLM_OK) {
-			LM_ERR("curl_multi_timeout: %s\n", curl_multi_strerror(mrc));
-			goto error;
-		}
-
-		LM_DBG("libcurl TCP connect: we should wait up to %ldms "
-		       "(timeout=%ldms, poll=%ldms)!\n", retry_time,
-		       connection_timeout_ms, connect_poll_interval);
-
-		if (retry_time == -1) {
-			LM_DBG("curl_multi_timeout() returned -1, pausing %ldms...\n",
-			        busy_wait);
-			goto busy_wait;
-		}
 
 		/* transfer completed!  But how well? */
 		if (running_handles == 0) {
@@ -804,17 +797,33 @@ int start_async_http_req(struct sip_msg *msg, enum rest_client_method method,
 			}
 		}
 
-		/*
-		 * from curl_multi_timeout() docs: "retry_time" milliseconds "at most!"
-		 *         -> we'll wait only 1/10 of this time before retrying
-		 */
-		busy_wait = connect_poll_interval < timeout ?
-		            connect_poll_interval : timeout;
+		mrc = curl_multi_timeout(multi_handle, &retry_time);
+		if (mrc != CURLM_OK) {
+			LM_ERR("curl_multi_timeout: %s\n", curl_multi_strerror(mrc));
+			goto error;
+		}
 
-busy_wait:
-		/* libcurl seems to be stuck in internal operations (TCP connect?) */
-		LM_DBG("busy waiting %ldms ...\n", busy_wait);
-		usleep(1000UL * busy_wait);
+		LM_DBG("libcurl TCP connect: we should wait up to %ldms "
+		       "(timeout=%ldms, poll=%ldms)!\n", retry_time,
+		       connection_timeout_ms, connect_poll_interval);
+
+		/*
+			from curl_multi_timeout() docs:
+				retry_time = -1, no timeout set
+				retry_time =  0, proceed immediately
+				retry_time >  0, wait at most retry_time
+		*/
+		if (retry_time != -1 && retry_time < connect_poll_interval) {
+			busy_wait = retry_time < timeout ? retry_time : timeout;
+		} else {
+			busy_wait = connect_poll_interval < timeout ? connect_poll_interval : timeout;
+		}
+
+		if (busy_wait > 0) {
+			/* libcurl seems to be stuck in internal operations (TCP connect?) */
+			LM_DBG("busy waiting %ldms ...\n", busy_wait);
+			usleep(1000UL * busy_wait);
+		}
 	}
 
 	LM_ERR("connect timeout on %s (%lds)\n", url, connection_timeout);
@@ -851,11 +860,11 @@ cleanup:
 	return ret;
 }
 
-enum async_ret_code resume_async_http_req(int fd, struct sip_msg *msg, void *_param)
+static enum async_ret_code _resume_async_http_req(int fd, struct sip_msg *msg,
+										rest_async_param *param, int timed_out)
 {
 	CURLcode rc;
 	CURLMcode mrc;
-	rest_async_param *param = (rest_async_param *)_param;
 	int running = 0, max_fd;
 	long http_rc = 0;
 	fd_set rset, wset, eset;
@@ -863,14 +872,22 @@ enum async_ret_code resume_async_http_req(int fd, struct sip_msg *msg, void *_pa
 	int ret = RCL_INTERNAL_ERR, retr;
 	CURLM *multi_handle;
 
+	LM_DBG("resume async processing...\n");
+
 	multi_handle = param->multi_list->multi_handle;
 
 	retr = 0;
 	do {
+		/* When @enable_expect_100 is on, both the client body upload and the
+		 * server body download will be performed within this loop, blocking */
+
 		mrc = curl_multi_perform(multi_handle, &running);
-		if (mrc != CURLM_CALL_MULTI_PERFORM)
+		LM_DBG("perform result: %d, running: %d\n", mrc, running);
+
+		if (mrc != CURLM_CALL_MULTI_PERFORM &&
+		     (mrc != CURLM_OK || !running))
 			break;
-		LM_DBG("retry last perform...\n");
+
 		usleep(_async_resume_retr_itv);
 		retr += _async_resume_retr_itv;
 	} while (retr < _async_resume_retr_timeout);
@@ -880,16 +897,17 @@ enum async_ret_code resume_async_http_req(int fd, struct sip_msg *msg, void *_pa
 		goto out;
 	}
 
-	LM_DBG("running handles: %d\n", running);
-	if (running == 1) {
-		LM_DBG("transfer in progress...\n");
-		async_status = ASYNC_CONTINUE;
-		return 1;
-	}
+	if (!timed_out) {
+		if (running == 1) {
+			LM_DBG("transfer in progress...\n");
+			async_status = ASYNC_CONTINUE;
+			return 1;
+		}
 
-	if (running != 0) {
-		LM_BUG("non-zero running handles!! (%d)", running);
-		goto out;
+		if (running != 0) {
+			LM_BUG("non-zero running handles!! (%d)", running);
+			goto out;
+		}
 	}
 
 	FD_ZERO(&rset);
@@ -905,7 +923,7 @@ enum async_ret_code resume_async_http_req(int fd, struct sip_msg *msg, void *_pa
 			goto out;
 		}
 
-	} else if (FD_ISSET(fd, &rset)) {
+	} else if (!timed_out && FD_ISSET(fd, &rset)) {
 		LM_DBG("fd %d still transferring...\n", fd);
 		async_status = ASYNC_CONTINUE;
 		return 1;
@@ -924,10 +942,9 @@ enum async_ret_code resume_async_http_req(int fd, struct sip_msg *msg, void *_pa
 		http_rc = 0;
 	}
 
-	if (get_easy_status(param->handle, multi_handle, &rc) < 0) {
-		LM_ERR("transfer is done, but no results found!\n");
-		goto out;
-	}
+	if (get_easy_status(param->handle, multi_handle, &rc) < 0)
+		LM_DBG("download finished, but an HTTP status is not available "
+		        "(timed_out: %d)\n", timed_out);
 
 	if (param->code_pv) {
 		val.flags = PV_VAL_INT|PV_TYPE_INT;
@@ -993,9 +1010,26 @@ out:
 	}
 	pkg_free(param);
 
+	if (timed_out)
+		ret = RCL_TRANSFER_TIMEOUT;
+
 	/* default async status is ASYNC_DONE */
 	return ret;
 }
+
+
+enum async_ret_code resume_async_http_req(int fd, struct sip_msg *msg, void *_param)
+{
+	return _resume_async_http_req(fd, msg, (rest_async_param *)_param, 0);
+}
+
+
+enum async_ret_code time_out_async_http_req(int fd, struct sip_msg *msg, void *_param)
+{
+	LM_INFO("transfer timed out (async statement timeout)\n");
+	return _resume_async_http_req(fd, msg, (rest_async_param *)_param, 1);
+}
+
 
 /**
  * rest_append_hf - add a custom HTTP header before a rest call
@@ -1045,7 +1079,7 @@ static inline int rest_trace_enabled(void)
 
 void append_body_to_msg( trace_message message, void* param)
 {
-
+	static str sip_str = str_init("sip");
 	struct rest_append_param* app = param;
 
 	if ( !app ) {
@@ -1059,7 +1093,7 @@ void append_body_to_msg( trace_message message, void* param)
 	if ( app->body.len )
 		tprot.add_payload_part( message, "payload", &app->body );
 
-	tprot.add_extra_correlation( message, "sip", &app->callid );
+	tprot.add_extra_correlation( message, &sip_str, &app->callid );
 }
 
 static int trace_rest_message( rest_trace_param_t* tparam )

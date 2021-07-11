@@ -39,7 +39,7 @@
 
 struct ulcb_head_list *ulcb_list;
 
-int init_ulcb_list(void)
+int ul_init_cbs(void)
 {
 	ulcb_list = shm_malloc(sizeof *ulcb_list);
 	if (!ulcb_list) {
@@ -113,5 +113,5 @@ int register_ulcb(ul_cb_type types, ul_cb f)
 
 	cbp->types = types;
 
-	return 1;
+	return 0;
 }

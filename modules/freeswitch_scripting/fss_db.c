@@ -98,7 +98,7 @@ int fss_db_reload(void)
 {
 	struct list_head new_sockets, old_sockets;
 	struct fs_evs_list *sock_list;
-	struct str_list *evlist;
+	str_list *evlist;
 	fs_evs *sock;
 	db_res_t *res = NULL;
 	db_val_t *values;
@@ -154,7 +154,7 @@ int fss_db_reload(void)
 			continue;
 		}
 
-		evlist = _parse_csv_record(&events, CSV_SIMPLE|CSV_SHM|CSV_DUP_FIELDS);
+		evlist = _parse_csv_record(&events, CSV_SHM|CSV_DUP_FIELDS);
 		if (!evlist) {
 			LM_ERR("failed to parse events: %.*s\n", events.len, events.s);
 			goto skip_socket;

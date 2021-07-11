@@ -42,11 +42,16 @@ else
 	md5sum_cmd = md5sum
 endif
 EXPECTED_MD5=$(shell [ -f $(MEM_STATS_HDR) ] && tail -n 1 $(MEM_STATS_HDR) | awk '{print $$4}')
-MODULES_MD5=$(shell find $(dir $(MEM_STATS_HDR))/../modules -name "[Mm]akefile" | \
-			awk -F/ '{print $$(NF - 1)}' | sort | $(md5sum_cmd) | awk '{print $$1}')
+MODULES_MD5=$(shell find $(dir $(MEM_STATS_HDR))/../modules -maxdepth 2 -name "[Mm]akefile" | \
+			awk -F/ '{print $$(NF - 1)}' | sort -u | $(md5sum_cmd) | awk '{print $$1}')
 ifneq ($(EXPECTED_MD5),$(MODULES_MD5))
 REGENERATE_MEM_STATS=remove-mem-stats
 endif
+endif
+
+# if unit tests are enabled, build any module test code into the module .so
+ifneq (,$(findstring UNIT_TESTS,$(DEFS)))
+extra_sources+=$(wildcard test/*.c)
 endif
 
 include ../../Makefile.sources

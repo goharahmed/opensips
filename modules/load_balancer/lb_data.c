@@ -42,6 +42,9 @@ extern int fetch_freeswitch_stats;
 extern int initial_fs_load;
 extern struct fs_binds fs_api;
 
+/* reader-writers lock for data reloading */
+rw_lock_t *ref_lock = NULL;
+
 
 struct lb_data* load_lb_data(void)
 {
@@ -216,7 +219,7 @@ static int lb_set_resource_bitmask(struct lb_resource *res, unsigned int bit)
 
 
 int add_lb_dsturi( struct lb_data *data, int id, int group, char *uri,
-											char* resource, unsigned int flags)
+						char* resource, char* attrs, unsigned int flags)
 {
 	struct lb_res_str_list *lb_rl;
 	struct lb_res_str *r;
@@ -225,7 +228,7 @@ int add_lb_dsturi( struct lb_data *data, int id, int group, char *uri,
 	struct sip_uri puri;
 	struct proxy_l *proxy;
 	union sockaddr_union sau;
-	int len;
+	int uri_len, attrs_len;
 	int i;
 	str fs_url = { NULL, 0 };
 	str lb_str = { MI_SSTR("load_balancer") };
@@ -233,9 +236,9 @@ int add_lb_dsturi( struct lb_data *data, int id, int group, char *uri,
 	LM_DBG("uri=<%s>, grp=%d, res=<%s>\n",uri, group, resource);
 
 	/* check uri */
-	len = strlen(uri);
-	if(parse_uri(uri, len, &puri)!=0 ) {
-		LM_ERR("bad uri [%.*s] for destination\n", len, uri);
+	uri_len = strlen(uri);
+	if(parse_uri(uri, uri_len, &puri)!=0 ) {
+		LM_ERR("bad uri [%.*s] for destination\n", uri_len, uri);
 		return -1;
 	}
 
@@ -246,25 +249,31 @@ int add_lb_dsturi( struct lb_data *data, int id, int group, char *uri,
 		return -1;
 	}
 
+	attrs_len = attrs ? strlen(attrs) : 0;
+
 	/*add new destination */
 	dst = (struct lb_dst*)shm_malloc( sizeof(struct lb_dst)
-		+ lb_rl->n*sizeof(struct lb_resource_map) + len +
+		+ lb_rl->n*sizeof(struct lb_resource_map) + uri_len + attrs_len +
 		(3+2*sizeof(struct lb_dst*)));
 	if (dst==NULL) {
 		LM_ERR("failed to get shmem\n");
 		goto error;
 	}
 	memset( dst, 0, sizeof(struct lb_dst)+
-		lb_rl->n*sizeof(struct lb_resource_map) + len +
+		lb_rl->n*sizeof(struct lb_resource_map) + uri_len + attrs_len +
 		(3+2*sizeof(struct lb_dst*)) );
 
 	dst->rmap = (struct lb_resource_map*)(dst+1);
 
 	dst->uri.s = (char*)(dst->rmap + lb_rl->n);
-	dst->uri.len = len;
-	memcpy( dst->uri.s , uri, len);
+	dst->uri.len = uri_len;
+	memcpy( dst->uri.s , uri, uri_len);
 
-	dst->profile_id.s = dst->uri.s + len;
+	dst->attrs.s = dst->uri.s + uri_len;
+	dst->attrs.len = attrs_len;
+	memcpy(dst->attrs.s, attrs, attrs_len);
+
+	dst->profile_id.s = dst->attrs.s + attrs_len;
 	dst->profile_id.len = snprintf(dst->profile_id.s,
 		2+2*sizeof(struct lb_dst*), "%X", id);
 
@@ -439,7 +448,7 @@ static int get_dst_load(struct lb_resource **res, unsigned int res_no,
  *  -4 - bad resources
  */
 int lb_route(struct sip_msg *req, int group, struct lb_res_str_list *rl,
-						unsigned int flags, struct lb_data *data, int reuse)
+					unsigned int flags, struct lb_data *data, int reuse, str *attrs)
 {
 	/* resources for previous iteration */
 	static struct lb_resource **res_prev = NULL;
@@ -557,7 +566,7 @@ int lb_route(struct sip_msg *req, int group, struct lb_res_str_list *rl,
 	if(
 		/* we should reuse previous resources list */
 		reuse ||
-		/* we have 'last_dst', i.e. previous iteration was successfull and
+		/* we have 'last_dst', i.e. previous iteration was successful and
 		 * we need to clean it up */
 		(last_dst != NULL)
 	) {
@@ -761,6 +770,7 @@ int lb_route(struct sip_msg *req, int group, struct lb_res_str_list *rl,
 							dsts_size_cur = 0;
 						} else if( it_l < load ) {
 							/* lower availability -> new iteration */
+							if( ++j == (8 * sizeof(unsigned int)) ) { i++; j=0; }
 							continue;
 						}
 
@@ -893,7 +903,7 @@ int lb_route(struct sip_msg *req, int group, struct lb_res_str_list *rl,
 	/* add new resources */
 	for( i=0 ; i<res_cur_n ; i++ ) {
 		res_val.s = res_cur[i]->name;
-		if( add_avp(AVP_VAL_STR, res_avp_name, res_val) != 0 )
+		if( add_avp_last(AVP_VAL_STR, res_avp_name, res_val) != 0 )
 			LM_ERR("failed to add RES AVP\n");
 	}
 
@@ -903,20 +913,23 @@ int lb_route(struct sip_msg *req, int group, struct lb_res_str_list *rl,
 		return -1;
 	}
 
+	if (dst && attrs)
+		*attrs = dst->attrs;
+
 	return dst ? 0 : (cnt_aval_dst? -2 /*no capacity*/ : -3 /* no dests*/ );
 }
 
 
 int do_lb_start(struct sip_msg *req, int group, struct lb_res_str_list *rl,
-									unsigned int flags, struct lb_data *data)
+						unsigned int flags, struct lb_data *data, str *attrs)
 {
-	return lb_route(req, group, rl, flags, data, 0/*no data reusage*/);
+	return lb_route(req, group, rl, flags, data, 0/*no data reusage*/, attrs);
 }
 
 
-int do_lb_next(struct sip_msg *req, struct lb_data *data)
+int do_lb_next(struct sip_msg *req, struct lb_data *data, str *attrs)
 {
-	return lb_route(req, -1, NULL, 0, data, 1/*reuse previous data*/);
+	return lb_route(req, -1, NULL, 0, data, 1/*reuse previous data*/, attrs);
 }
 
 
@@ -1037,36 +1050,15 @@ int do_lb_disable_dst(struct sip_msg *req, struct lb_data *data, unsigned int ve
 /* Checks, if the IP PORT is a LB destination
  */
 int lb_is_dst(struct lb_data *data, struct sip_msg *_m,
-				pv_spec_t *pv_ip, gparam_t *pv_port, int group, int active)
+				str *ip_str, int port, int group, int active, str *attrs)
 {
-	pv_value_t val;
 	struct ip_addr *ip;
-	int port;
 	struct lb_dst *dst;
 	int k;
 
-	/* get the address to test */
-	if (pv_get_spec_value( _m, pv_ip, &val)!=0) {
-		LM_ERR("failed to get IP value from PV\n");
+	if ( (ip=str2ip(ip_str))==NULL  && (ip=str2ip6(ip_str))==NULL) {
+		LM_ERR("IP val is not IP <%.*s>\n",ip_str->len,ip_str->s);
 		return -1;
-	}
-	if ( (val.flags&PV_VAL_STR)==0 ) {
-		LM_ERR("IP PV val is not string\n");
-		return -1;
-	}
-	if ( (ip=str2ip( &val.rs ))==NULL  && (ip=str2ip6( &val.rs ))==NULL) {
-		LM_ERR("IP val is not IP <%.*s>\n",val.rs.len,val.rs.s);
-		return -1;
-	}
-
-	/* get the port to test */
-	if (pv_port) {
-		if (fixup_get_ivalue(_m, (gparam_p)pv_port, &port) != 0) {
-			LM_ERR("failed to get PORT value from PV\n");
-			return -1;
-		}
-	} else {
-		port = 0;
 	}
 
 	/* and now search !*/
@@ -1078,6 +1070,8 @@ int lb_is_dst(struct lb_data *data, struct sip_msg *_m,
 			for(k=0 ; k<dst->ips_cnt ; k++ ) {
 				if ( (dst->ports[k]==0 || port==0 || port==dst->ports[k]) &&
 				ip_addr_cmp( ip, &dst->ips[k]) ) {
+					if (attrs)
+						*attrs = dst->attrs;
 					/* found */
 					return 1;
 				}

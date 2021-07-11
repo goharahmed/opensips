@@ -58,6 +58,16 @@ struct socket_info {
 	unsigned short workers;
 	struct scaling_profile *s_profile;
 
+	/* these are IP-level local/remote ports used during the last write op via
+	 * this sock (or a connection belonging to this sock). These values are 
+	 * optional (populated only by the TCP-based protocol, for ephemeral ports.
+	 * Note: they are populate ONLY by a write op and they are not ever reset,
+	 * they are simply overwritten by the next write op on this socket/conn.
+	 * IMPORTANT: when reading them, be sure you are just after a write ops,
+	 * otherwise you may read old data here */
+	unsigned short last_local_real_port;
+	unsigned short last_remote_real_port;
+
 	struct socket_info* next;
 	struct socket_info* prev;
 };
@@ -216,6 +226,9 @@ inline static int parse_proto(unsigned char* s, long len, int* proto)
 			break;
 		case PROTO2UINT('b', 'i', 'n'):
 			if(len==3) { *proto=PROTO_BIN; return 0; }
+			else if(len==4 && (s[3]=='s' || s[3]=='S')) {
+				*proto=PROTO_BINS; return 0;
+			}
 			break;
 
 		case PROTO2UINT('h', 'e', 'p'):
@@ -341,7 +354,7 @@ error_port:
 
 
 /* function will write the proto as string, starting from the p pointer. The
-   new resulting proto will be returned (where writing ended) */
+   new resulting pointer will be returned (where writing ended) */
 static inline char* proto2str(int proto, char *p)
 {
 	switch (proto) {
@@ -380,6 +393,12 @@ static inline char* proto2str(int proto, char *p)
 			*(p++) = 'i';
 			*(p++) = 'n';
 			break;
+		case PROTO_BINS:
+			*(p++) = 'b';
+			*(p++) = 'i';
+			*(p++) = 'n';
+			*(p++) = 's';
+			break;
 		case PROTO_HEP_UDP:
 			*(p++) = 'h';
 			*(p++) = 'e';
@@ -406,8 +425,8 @@ static inline char* proto2str(int proto, char *p)
 			break;
 		default:
 			LM_CRIT("unsupported proto %d\n", proto);
-			return 0;
 	}
+
 	return p;
 }
 
@@ -429,10 +448,10 @@ static inline char *proto2a(int proto)
 
 
 #define MAX_SOCKET_STR ( 4 + 1 + IP_ADDR_MAX_STR_SIZE+1+INT2STR_MAX_LEN+1)
-#define sock_str_len(_sock,_type) ( 3 + 1*((_sock)->proto==PROTO_SCTP) + 1 + \
-		((_type==1)?(_sock)->address_str.len:\
-			((_type==2)?(_sock)->adv_name_str.len:(_sock)->tag.len)) + \
-		1 + (_sock)->port_no_str.len)
+#define sock_str_len(_sock,_type) (3 + 1*((_sock)->proto==PROTO_SCTP) + 1 + \
+		(((_type)==0) ? (_sock)->address_str.len + (_sock)->port_no_str.len + 1 : \
+				(((_type)==1) ? (_sock)->adv_name_str.len + (_sock)->adv_port_str.len + 1 : \
+						(_sock)->tag.len)))
 
 /* builds the full name of the socket ( proto:name[:port] ), using different
    naming for it, depending on the "type" parameter :
@@ -440,8 +459,7 @@ static inline char *proto2a(int proto)
       1 - advertised name
       2 - tagged name
 */
-static inline char* socket2str(struct socket_info *sock, char *s, int* len,
-															int type)
+static inline char* socket2str(struct socket_info *sock, char *s, int *len, int type)
 {
 	static char buf[MAX_SOCKET_STR];
 	char *p,*p1;

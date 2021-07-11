@@ -68,10 +68,10 @@
 
 static unsigned int msg_no=0;
 /* address preset vars */
-str default_global_address={0,0};
-str default_global_port={0,0};
-str default_via_address={0,0};
-str default_via_port={0,0};
+str * const default_global_address=&STR_NULL;
+str * const default_global_port=&STR_NULL;
+str * const default_via_address=&STR_NULL;
+str * const default_via_port=&STR_NULL;
 
 
 unsigned int get_next_msg_no(void)
@@ -97,12 +97,12 @@ unsigned int get_next_msg_no(void)
  * break (e.g.: modules/textops)
  */
 int receive_msg(char* buf, unsigned int len, struct receive_info* rcv_info,
-		context_p existing_context, unsigned int flags)
+		context_p existing_context, unsigned int msg_flags)
 {
 	static context_p ctx = NULL;
 	struct sip_msg* msg;
 	struct timeval start;
-	int rc;
+	int rc, old_route_type;
 	char *tmp;
 	str in_buff;
 
@@ -139,7 +139,7 @@ int receive_msg(char* buf, unsigned int len, struct receive_info* rcv_info,
 	msg->len=len;
 	msg->rcv=*rcv_info;
 	msg->id=msg_no;
-	msg->flags=flags;
+	msg->msg_flags=msg_flags;
 	msg->ruri_q = Q_UNSPECIFIED;
 
 	if (parse_msg(in_buff.s,len, msg)!=0){
@@ -148,8 +148,12 @@ int receive_msg(char* buf, unsigned int len, struct receive_info* rcv_info,
 			tmp, rcv_info->src_port);
 		/* if a REQUEST msg was detected (first line was successfully parsed)
 		   we should trigger the error route */
-		if ( msg->first_line.type==SIP_REQUEST && error_rlist.a!=NULL )
+		if ( msg->first_line.type==SIP_REQUEST && sroutes->error.a!=NULL ) {
+			if (existing_context == NULL)
+				prepare_context( ctx, parse_error );
+			current_processing_ctx = ctx;
 			run_error_route(msg, 1);
+		}
 		goto parse_error;
 	}
 	LM_DBG("After parse_msg...\n");
@@ -206,7 +210,8 @@ int receive_msg(char* buf, unsigned int len, struct receive_info* rcv_info,
 		if (rc & SCB_RUN_TOP_ROUTE)
 			/* run the main request route and skip post_script callbacks
 			 * if the TOBE_CONTINUE flag is returned */
-			if ( run_top_route(rlist[DEFAULT_RT].a, msg) & ACT_FL_TBCONT )
+			if ( run_top_route(sroutes->request[DEFAULT_RT], msg) &
+			ACT_FL_TBCONT )
 				goto end;
 
 		/* execute post request-script callbacks */
@@ -245,15 +250,18 @@ int receive_msg(char* buf, unsigned int len, struct receive_info* rcv_info,
 			goto end; /* drop the reply */
 		}
 
+		swap_route_type(old_route_type, ONREPLY_ROUTE);
 		/* exec the onreply routing script */
-		if (rc & SCB_RUN_TOP_ROUTE &&  onreply_rlist[DEFAULT_RT].a &&
-		    (run_top_route(onreply_rlist[DEFAULT_RT].a,msg) & ACT_FL_DROP)
+		if (rc & SCB_RUN_TOP_ROUTE && sroutes->onreply[DEFAULT_RT].a &&
+		    (run_top_route(sroutes->onreply[DEFAULT_RT],msg) & ACT_FL_DROP)
 		    && msg->REPLY_STATUS < 200) {
+			set_route_type(old_route_type);
 
 			LM_DBG("dropping provisional reply %d\n", msg->REPLY_STATUS);
 			update_stat( drp_rpls, 1);
 			goto end; /* drop the message */
 		} else {
+			set_route_type(old_route_type);
 			/* send the msg */
 			forward_reply(msg);
 			/* TODO - TX reply stat */
@@ -274,8 +282,8 @@ end:
 		context_destroy(CONTEXT_GLOBAL, ctx);
 
 	current_processing_ctx = NULL;
-	stop_expire_timer( start, execmsgthreshold, "msg processing",
-		msg->buf, msg->len, 0);
+	__stop_expire_timer( start, execmsgthreshold, "msg processing",
+		msg->buf, msg->len, 0, slow_msgs);
 	reset_longest_action_list(execmsgthreshold);
 
 	/* free possible loaded avps -bogdan */

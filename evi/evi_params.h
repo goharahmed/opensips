@@ -59,7 +59,7 @@ evi_params_p evi_get_params(void);
 void evi_free_params(evi_params_p);
 
 /* generic parameter add */
-int evi_param_add(evi_params_p list, str *name, void *param, int flags);
+int evi_param_add(evi_params_p list, const str *name, const void *param, int flags);
 
 /* adds an integer to the list */
 #define evi_param_add_int(p_list, p_name, p_int) \
@@ -70,10 +70,10 @@ int evi_param_add(evi_params_p list, str *name, void *param, int flags);
 		evi_param_add(p_list, p_name, p_str, EVI_STR_VAL)
 
 /* creates a new parameter */
-evi_param_p evi_param_create(evi_params_p list, str *name);
+evi_param_p evi_param_create(evi_params_p list, const str *name);
 
 /* sets the value of a parameter */
-int evi_param_set(evi_param_p element, void *param, int flags);
+int evi_param_set(evi_param_p element, const void *param, int flags);
 
 /* sets an integer value to a parameter */
 #define evi_param_set_int(p_el, p_int) \
@@ -83,6 +83,8 @@ int evi_param_set(evi_param_p element, void *param, int flags);
 #define evi_param_set_str(p_el, p_str) \
 		evi_param_set(p_el, p_str, EVI_STR_VAL)
 
+evi_params_p evi_dup_shm_params(evi_params_p);
+void evi_free_shm_params(evi_params_p);
 
 
 #endif

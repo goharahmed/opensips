@@ -121,9 +121,9 @@ modparam("db_oracle", "reconnect", 0.5)
 
 1.6. Utility opensips_orasel
 
-   For working with opensipsctl script, should be able to print
-   the 'query' results to the terminal in a user-readable form.
-   The standard command-line Oracle client (sqlplus) is not quite
+   For working with opensips-cli tool, should be able to print the
+   'query' results to the terminal in a user-readable form. The
+   standard command-line Oracle client (sqlplus) is not quite
    suitable for this, as it cannot align row width to real
    (received) data's (it always prints a cell width as described
    in the db scheme). This problem has been solved by inclusion
@@ -140,19 +140,19 @@ Chapter 2. Contributors
    Table 2.1. Top contributors by DevScore^(1), authored
    commits^(2) and lines added/removed^(3)
      Name DevScore Commits Lines ++ Lines --
-   1. Iouri Kharon 20 1 2363 0
-   2. Bogdan-Andrei Iancu (@bogdan-iancu) 13 10 62 67
-   3. Liviu Chircu (@liviuchircu) 10 7 22 64
-   4. Peter Lemenkov (@lemenkov) 7 5 41 5
-   5. Razvan Crainea (@razvancrainea) 6 4 100 31
-   6. Henning Westerholt (@henningw) 5 3 19 7
-   7. fabriziopicconi 3 1 18 2
-   8. Ovidiu Sas (@ovidiusas) 3 1 12 12
-   9. Sergio Gutierrez 3 1 4 1
-   10. Julián Moreno Patiño 3 1 2 2
+   1. Iouri Kharon 21 1 2363 0
+   2. Bogdan-Andrei Iancu (@bogdan-iancu) 14 11 64 68
+   3. Liviu Chircu (@liviuchircu) 11 8 23 81
+   4. Razvan Crainea (@razvancrainea) 10 8 111 39
+   5. dronord 8 6 29 18
+   6. Peter Lemenkov (@lemenkov) 7 5 41 5
+   7. Henning Westerholt (@henningw) 5 3 19 7
+   8. Vlad Patrascu (@rvlad-patrascu) 4 2 3 3
+   9. fabriziopicconi 3 1 18 2
+   10. Ovidiu Sas (@ovidiusas) 3 1 12 12
 
-   All remaining contributors: Razvan Pistolea, Vlad Patrascu
-   (@rvlad-patrascu).
+   All remaining contributors: Sergio Gutierrez, Julián Moreno
+   Patiño, Razvan Pistolea.
 
    (1) DevScore = author_commits + author_lines_added /
    (project_lines_added / project_commits) + author_lines_deleted
@@ -174,19 +174,19 @@ Chapter 2. Contributors
 
    Table 2.2. Most recently active contributors^(1) to this module
                       Name                   Commit Activity
-   1.  Peter Lemenkov (@lemenkov)          Aug 2012 - Jun 2018
-   2.  Liviu Chircu (@liviuchircu)         Mar 2014 - Jun 2018
-   3.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - May 2017
-   4.  Julián Moreno Patiño                Feb 2016 - Feb 2016
-   5.  Razvan Crainea (@razvancrainea)     Oct 2011 - Feb 2016
-   6.  Bogdan-Andrei Iancu (@bogdan-iancu) Jul 2008 - Oct 2014
-   7.  fabriziopicconi                     Jun 2013 - Jun 2013
-   8.  Ovidiu Sas (@ovidiusas)             Jun 2012 - Jun 2012
-   9.  Razvan Pistolea                     Jul 2009 - Jul 2009
-   10. Sergio Gutierrez                    Feb 2009 - Feb 2009
+   1.  Razvan Crainea (@razvancrainea)     Oct 2011 - Sep 2019
+   2.  Liviu Chircu (@liviuchircu)         Mar 2014 - May 2019
+   3.  Bogdan-Andrei Iancu (@bogdan-iancu) Jul 2008 - Apr 2019
+   4.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - Apr 2019
+   5.  Peter Lemenkov (@lemenkov)          Aug 2012 - Jun 2018
+   6.  dronord                             Nov 2017 - Dec 2017
+   7.  Julián Moreno Patiño                Feb 2016 - Feb 2016
+   8.  fabriziopicconi                     Jun 2013 - Jun 2013
+   9.  Ovidiu Sas (@ovidiusas)             Jun 2012 - Jun 2012
+   10. Razvan Pistolea                     Jul 2009 - Jul 2009
 
-   All remaining contributors: Henning Westerholt (@henningw),
-   Iouri Kharon.
+   All remaining contributors: Sergio Gutierrez, Henning
+   Westerholt (@henningw), Iouri Kharon.
 
    (1) including any documentation-related commits, excluding
    merge commits
@@ -195,8 +195,8 @@ Chapter 3. Documentation
 
 3.1. Contributors
 
-   Last edited by: Peter Lemenkov (@lemenkov), Liviu Chircu
-   (@liviuchircu), Bogdan-Andrei Iancu (@bogdan-iancu), Henning
+   Last edited by: Liviu Chircu (@liviuchircu), Peter Lemenkov
+   (@lemenkov), Bogdan-Andrei Iancu (@bogdan-iancu), Henning
    Westerholt (@henningw), Iouri Kharon.
 
    Documentation Copyrights:

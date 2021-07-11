@@ -30,6 +30,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
 #ifdef _ADDED_XOPEN
 #undef _ADDED_XOPEN
@@ -38,7 +39,7 @@
 #endif
 
 #include <errno.h>
-#include <math.h>
+#include <ctype.h>
 
 #include "../../pvar.h"
 #include "../../dprint.h"
@@ -267,8 +268,8 @@ static int parse_rpn(str *exp)
   s.len = exp->len;
 
   while (s.len) {
-
-    if (*s.s >= '0' && *s.s <= '9') {
+    if (isdigit(*s.s) ||
+        (s.len >= 2 && *s.s == '-' && isdigit(*(s.s + 1)))) {
       errno = 0;
       d = strtod(s.s, &p);
 
